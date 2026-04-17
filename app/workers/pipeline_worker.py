@@ -1,0 +1,202 @@
+"""Background pipeline worker.
+
+Runs the full scan → detect → embed → cluster pipeline in a QThread so the
+GUI remains responsive.  Progress is communicated via Qt signals.
+
+Usage::
+
+    worker = PipelineWorker(root_folder="/home/user/photos", config=cfg)
+    worker.progress.connect(on_progress)
+    worker.log_message.connect(on_log)
+    worker.finished.connect(on_finished)
+    worker.start()
+"""
+
+from __future__ import annotations
+
+import logging
+import traceback
+from pathlib import Path
+from typing import Optional
+
+from PySide6.QtCore import QThread, Signal
+
+from app.config import AppConfig
+from app.db.database import init_db, session_scope
+from app.detectors.factory import create_detector
+from app.embeddings.tflite_embedder import TFLiteEmbedder
+from app.services.clustering_service import ClusteringService
+from app.services.detection_service import DetectionService
+from app.services.embedding_service import EmbeddingService
+from app.services.scan_service import ScanService
+
+log = logging.getLogger(__name__)
+
+
+class PipelineWorker(QThread):
+    """QThread that runs the complete processing pipeline.
+
+    Signals:
+        progress:    ``(current: int, total: int, stage: str, detail: str)``
+        log_message: ``(message: str)``
+        finished:    ``(success: bool, summary: str)``
+        error:       ``(message: str)``
+    """
+
+    progress = Signal(int, int, str, str)
+    log_message = Signal(str)
+    finished = Signal(bool, str)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        root_folder: str,
+        config: AppConfig,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._root_folder = root_folder
+        self._config = config
+        self._abort = False
+
+    def abort(self) -> None:
+        """Request a graceful stop (checked between pipeline stages)."""
+        self._abort = True
+        log.info("Pipeline abort requested")
+
+    def run(self) -> None:
+        """Execute the pipeline.  Called by QThread.start()."""
+        try:
+            self._run_pipeline()
+        except Exception as exc:  # noqa: BLE001
+            msg = f"Pipeline error: {exc}\n{traceback.format_exc()}"
+            log.error(msg)
+            self.error.emit(str(exc))
+            self.finished.emit(False, str(exc))
+
+    # ------------------------------------------------------------------
+
+    def _run_pipeline(self) -> None:
+        # Each stage gets its own session to avoid long-held transactions.
+        init_db(self._config.db_path_resolved)
+
+        # --- Stage 1: Scan ---
+        self.log_message.emit("Stage 1/4: Scanning image folder …")
+        new_ids = self._run_scan()
+        if self._abort:
+            self.finished.emit(False, "Aborted after scan")
+            return
+
+        # --- Stage 2: Detection ---
+        all_pending = self._get_pending_detection_ids()
+        self.log_message.emit(
+            f"Stage 2/4: Detecting faces in {len(all_pending)} image(s) …"
+        )
+        total_faces = self._run_detection(all_pending)
+        if self._abort:
+            self.finished.emit(False, "Aborted after detection")
+            return
+
+        # --- Stage 3: Embedding ---
+        self.log_message.emit("Stage 3/4: Generating face embeddings …")
+        embedded = self._run_embedding()
+        if self._abort:
+            self.finished.emit(False, "Aborted after embedding")
+            return
+
+        # --- Stage 4: Clustering ---
+        self.log_message.emit("Stage 4/4: Clustering faces into identities …")
+        n_persons = self._run_clustering()
+
+        summary = (
+            f"Done — {len(new_ids)} new image(s), "
+            f"{total_faces} face(s) detected, "
+            f"{embedded} embedded, "
+            f"{n_persons} person cluster(s)"
+        )
+        self.log_message.emit(summary)
+        self.finished.emit(True, summary)
+
+    # ------------------------------------------------------------------
+    # Stage implementations
+    # ------------------------------------------------------------------
+
+    def _run_scan(self) -> list:
+        def cb(current, total, path):
+            detail = Path(path).name
+            self.progress.emit(current, total or 0, "Scanning", detail)
+            if current % 50 == 0:
+                self.log_message.emit(f"  Scanned {current}/{total or '?'} files …")
+
+        with session_scope() as session:
+            svc = ScanService(session=session, config=self._config.scan, progress_cb=cb)
+            return svc.scan(self._root_folder)
+
+    def _get_pending_detection_ids(self) -> list:
+        from app.db.database import get_session
+        from app.db.models import Image
+
+        session = get_session()
+        try:
+            ids = [
+                r[0]
+                for r in session.query(Image.id)
+                .filter(Image.detection_done == False)  # noqa: E712
+                .all()
+            ]
+            return ids
+        finally:
+            session.close()
+
+    def _run_detection(self, image_ids: list) -> int:
+        if not image_ids:
+            return 0
+
+        detector = create_detector(self._config.detection)
+        self.log_message.emit(f"  Using detector: {detector.backend_name}")
+
+        def cb(current, total, path):
+            detail = Path(path).name
+            self.progress.emit(current, total or 0, "Detecting", detail)
+
+        with session_scope() as session:
+            svc = DetectionService(
+                session=session,
+                detector=detector,
+                config=self._config,
+                progress_cb=cb,
+            )
+            return svc.process(image_ids)
+
+    def _run_embedding(self) -> int:
+        embedder = TFLiteEmbedder(
+            model_path=self._config.embedding.model_path,
+            embedding_dim=self._config.embedding.embedding_dim,
+            input_size=self._config.embedding.input_size,
+        )
+        self.log_message.emit(f"  Embedder backend: {getattr(embedder, '_backend', '?')}")
+
+        counter = [0]
+
+        def cb(current, total, face_id):
+            counter[0] = current
+            self.progress.emit(current, total or 0, "Embedding", f"face #{face_id}")
+
+        with session_scope() as session:
+            svc = EmbeddingService(
+                session=session,
+                embedder=embedder,
+                config=self._config,
+                progress_cb=cb,
+            )
+            return svc.process_pending()
+
+    def _run_clustering(self) -> int:
+        with session_scope() as session:
+            svc = ClusteringService(
+                session=session,
+                config=self._config.clustering,
+            )
+            n = svc.run()
+            self.progress.emit(1, 1, "Clustering", f"{n} person(s)")
+            return n

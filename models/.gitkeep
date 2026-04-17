@@ -1,0 +1,13 @@
+# Place model files here:
+#
+#  Face detection (CPU, Caffe SSD res10):
+#    deploy.prototxt
+#    res10_300x300_ssd_iter_140000.caffemodel
+#
+#  Face detection (Coral Edge TPU):
+#    ssd_mobilenet_v2_face_quant_postprocess_edgetpu.tflite
+#
+#  Face embedding (CPU, TFLite):
+#    mobilefacenet.tflite
+#
+# See README.md and config.example.yaml for download instructions.

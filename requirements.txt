@@ -1,0 +1,62 @@
+# Face-Local — Python dependencies
+# Python 3.11+ required.
+#
+# Install:
+#   pip install -r requirements.txt
+#
+# For Coral Edge TPU support, also install pycoral separately:
+#   See the Coral section below.
+
+# ── Core ──────────────────────────────────────────────────────────────────────
+numpy>=1.24,<2.0
+opencv-python>=4.8
+Pillow>=10.0
+PyYAML>=6.0
+
+# ── GUI ───────────────────────────────────────────────────────────────────────
+PySide6>=6.6
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+SQLAlchemy>=2.0
+
+# ── Machine learning / clustering ────────────────────────────────────────────
+scikit-learn>=1.3
+
+# ── Face embeddings (CPU, TFLite) ─────────────────────────────────────────────
+# tflite-runtime is a lightweight package (~2 MB) that provides the TFLite
+# interpreter without pulling in all of TensorFlow.
+#
+# On Raspberry Pi / Linux ARM:
+#   pip install tflite-runtime
+#
+# On Linux x86-64:
+#   pip install tflite-runtime
+#
+# On macOS (Apple Silicon / Intel) or Windows:
+#   tflite-runtime wheels may not be available for all Python versions.
+#   Fallback: install tensorflow instead (heavier but works everywhere):
+#     pip install tensorflow
+#
+# We list both here; pip will install whichever resolves first.
+# Comment out if you prefer the full tensorflow package.
+tflite-runtime>=2.14; platform_machine != "AMD64" or sys_platform != "win32"
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=7.4
+pytest-qt>=4.2
+
+# ── Optional: Google Coral Edge TPU ──────────────────────────────────────────
+# pycoral is NOT installable via PyPI for all platforms.
+# Install it following the official guide:
+#
+#   https://coral.ai/docs/accelerator/get-started/
+#
+# Typical steps (Linux, Python 3.11):
+#   echo "deb https://packages.cloud.google.com/apt coral-edgetpu-stable main" \
+#     | sudo tee /etc/apt/sources.list.d/coral-edgetpu.list
+#   curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+#   sudo apt update
+#   sudo apt install libedgetpu1-std  # or libedgetpu1-max for full speed
+#   pip install pycoral
+#
+# The application detects Coral at runtime; pycoral absence is not fatal.

@@ -1,0 +1,95 @@
+# Face-Local configuration example
+# Copy to config.yaml and adjust to your environment.
+# All paths are relative to the working directory unless absolute.
+
+# Base directory for resolving relative paths.
+# Defaults to the directory from which you run the application.
+# base_dir: /home/user/face-local
+
+detection:
+  # Minimum confidence score [0.0 – 1.0] to accept a detection
+  confidence_threshold: 0.65
+
+  # Minimum face size in pixels (width and height must both exceed this)
+  min_face_size: 50
+
+  # Path to the Edge TPU compiled TFLite face detection model.
+  # Comment out or remove to force CPU-only mode.
+  #
+  # How to obtain the model:
+  #   1. Download from Coral model zoo:
+  #      wget https://raw.githubusercontent.com/google-coral/test_data/master/\
+  #           ssd_mobilenet_v2_face_quant_postprocess_edgetpu.tflite
+  #   2. Place in models/ directory
+  #   3. Set path below
+  #
+  # coral_model_path: models/ssd_mobilenet_v2_face_quant_postprocess_edgetpu.tflite
+
+  # CPU DNN model path (Caffe SSD res10).
+  # If omitted, the detector looks in models/ then falls back to Haar cascade.
+  #
+  # How to obtain:
+  #   wget -P models/ https://raw.githubusercontent.com/opencv/opencv/master/\
+  #        samples/dnn/face_detector/deploy.prototxt
+  #   wget -P models/ https://raw.githubusercontent.com/opencv/opencv_3rdparty/\
+  #        dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel
+  #
+  # cpu_model_path: models/res10_300x300_ssd_iter_140000.caffemodel
+
+embedding:
+  # NOTE: Embeddings run on CPU — Coral is NOT used for this step.
+  # See app/embeddings/tflite_embedder.py for details.
+
+  # Path to the MobileFaceNet TFLite embedding model.
+  # If omitted, a HOG-based stub is used (low quality — for testing only).
+  #
+  # How to obtain a MobileFaceNet TFLite model:
+  #   Option A — convert from ONNX:
+  #     pip install onnx onnx-tf tensorflow
+  #     # Download mobilefacenet.onnx from insightface model zoo
+  #     # Convert to TFLite — see README for detailed steps
+  #
+  #   Option B — use a pre-converted model from the community:
+  #     See README for verified download sources.
+  #
+  # model_path: models/mobilefacenet.tflite
+
+  # Size (width, height) expected by the embedding model
+  input_size: [112, 112]
+
+  # Length of the output embedding vector (MobileFaceNet = 192, ArcFace = 512)
+  embedding_dim: 192
+
+clustering:
+  # DBSCAN neighbourhood radius (cosine distance).
+  # Lower → tighter clusters (more persons). Typical range: 0.3 – 0.6.
+  epsilon: 0.4
+
+  # Minimum faces per cluster core point.
+  # Set to 1 to cluster every single face (produces many singletons).
+  min_samples: 2
+
+  # Distance metric for DBSCAN
+  metric: cosine
+
+storage:
+  # SQLite database file path
+  db_path: data/faces.db
+
+  # Directory for face crop thumbnail JPEG files
+  crops_dir: data/crops
+
+scan:
+  # Supported image file extensions (lowercase, including dot)
+  image_extensions:
+    - .jpg
+    - .jpeg
+    - .png
+    - .webp
+
+  # Number of parallel worker threads for the pipeline
+  # (currently used for future parallelism; pipeline is serial in MVP)
+  worker_threads: 2
+
+  # Size (width, height) of saved face crop thumbnails
+  thumbnail_size: [128, 128]
