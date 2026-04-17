@@ -265,25 +265,27 @@ def _apply_frozen_storage_defaults(
         cfg.storage.crops_dir = str(data_root / Path(cfg.storage.crops_dir))
 
 
+def _user_config_file() -> Path:
+    """Return the writable config file path for the current runtime."""
+    if paths.is_frozen():
+        cfg_dir = paths.user_config_dir()
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        return cfg_dir / "config.yaml"
+    # Dev: prefer existing config.yaml next to cwd
+    for c in [
+        Path(os.environ.get("FACE_LOCAL_CONFIG", "")),
+        Path("config.yaml"),
+    ]:
+        if c.name and c.exists():
+            return c
+    return Path("config.yaml")
+
+
 def save_db_path(new_db_path: str, config_path: Optional[str] = None) -> None:
-    """Persist *new_db_path* into the storage.db_path field of the YAML config.
+    """Persist *new_db_path* into the storage.db_path field of the YAML config."""
+    path = Path(config_path) if config_path else _user_config_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    Reads the existing config file (or starts with an empty dict if absent),
-    updates only the storage.db_path key, and writes the file back.
-    """
-    if config_path is None:
-        candidates = [
-            Path("config.yaml"),
-            Path(os.environ.get("FACE_LOCAL_CONFIG", "config.yaml")),
-        ]
-        for c in candidates:
-            if c.exists():
-                config_path = str(c)
-                break
-        else:
-            config_path = "config.yaml"
-
-    path = Path(config_path)
     raw: dict = {}
     if path.exists():
         with open(path, "r", encoding="utf-8") as fh:

@@ -8,6 +8,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -93,7 +94,11 @@ class UpdateDialog(QDialog):
         self._download_btn.clicked.connect(self._on_download)
         btn_row.addWidget(self._download_btn)
 
-        self._apply_btn = QPushButton("▶  Telepítő megnyitása / Open installer")
+        is_macos_dmg = sys.platform == "darwin"
+        apply_label = ("▶  Frissítés és újraindítás / Update & Restart"
+                       if is_macos_dmg else
+                       "▶  Telepítő megnyitása / Open installer")
+        self._apply_btn = QPushButton(apply_label)
         self._apply_btn.setEnabled(False)
         self._apply_btn.clicked.connect(self._on_apply)
         btn_row.addWidget(self._apply_btn)
@@ -131,11 +136,16 @@ class UpdateDialog(QDialog):
     def _on_done(self, path: str) -> None:
         self._downloaded_path = Path(path)
         self._progress.setValue(100)
-        self._status_label.setText("✓ Letöltve / Downloaded")
-        self._status_label.setStyleSheet("color: #4caf50; font-size: 11px;")
         self._apply_btn.setEnabled(True)
-        # Auto-open installer
-        self._on_apply()
+
+        if sys.platform == "darwin":
+            self._status_label.setText("✓ Letöltve — frissítés és újraindítás… / Downloaded — updating & restarting…")
+            self._status_label.setStyleSheet("color: #4caf50; font-size: 11px;")
+            QApplication.processEvents()
+            self._on_apply()
+        else:
+            self._status_label.setText("✓ Letöltve / Downloaded — kattints a telepítéshez")
+            self._status_label.setStyleSheet("color: #4caf50; font-size: 11px;")
 
     def _on_error(self, msg: str) -> None:
         self._status_label.setText(f"✗ Hiba / Error: {msg}")
