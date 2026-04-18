@@ -44,3 +44,11 @@ def test_select_target_channel_prefers_named_match() -> None:
     )
 
     assert selected["id"] == "2"
+
+
+def test_empty_buffer_post_mode_falls_back_to_default(monkeypatch) -> None:
+    monkeypatch.setenv("BUFFER_POST_MODE", "")
+
+    mode = post_buffer_release.validate_mode((__import__("os").environ.get("BUFFER_POST_MODE") or "").strip() or "addToQueue")
+
+    assert mode == "addToQueue"
