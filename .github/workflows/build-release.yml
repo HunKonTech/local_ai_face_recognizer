@@ -397,7 +397,20 @@ jobs:
             --name "$RELEASE_NAME" \
             --notes "$notes"
 
+  post-to-x:
+    if: ${{ needs.release.result == 'success' }}
+    needs:
+      - prepare
+      - build-macos
+      - build-windows
+      - build-linux
+      - release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
       - name: Post release announcement to X
+        continue-on-error: true
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           X_API_KEY: ${{ secrets.X_API_KEY }}
