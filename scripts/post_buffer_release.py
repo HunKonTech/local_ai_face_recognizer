@@ -129,13 +129,13 @@ def build_release_post_text(
         (
             "{app_name} scans photos offline, finds faces, and groups the same people locally.\n\n"
             "A {app_name} helyben felismeri és csoportosítja az arcokat, felhő nélkül.\n\n"
-            "{release_url}\n"
-            "#FaceRecognition #LocalAI"
+            "#FaceRecognition #LocalAI\n"
+            "Download / Letöltés: {release_url}"
         ).format(**context).strip(),
         (
             "{app_name} scans photos offline, finds faces, and groups the same people locally.\n\n"
             "A {app_name} helyben felismeri és csoportosítja az arcokat, felhő nélkül.\n\n"
-            "{release_url}"
+            "Download / Letöltés: {release_url}"
         ).format(**context).strip(),
     ]
     for variant in variants:
