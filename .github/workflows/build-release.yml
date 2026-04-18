@@ -396,3 +396,21 @@ jobs:
             --target "$GITHUB_SHA" \
             --name "$RELEASE_NAME" \
             --notes "$notes"
+
+      - name: Post release announcement to X
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          X_POST_TEMPLATE: ${{ secrets.X_POST_TEMPLATE }}
+        shell: bash
+        run: |
+          python3 scripts/post_x_release.py \
+            --app-name "$APP_NAME" \
+            --tag "$RELEASE_TAG" \
+            --release-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}" \
+            --platform "macOS=${{ needs.build-macos.result }}" \
+            --platform "Windows=${{ needs.build-windows.result }}" \
+            --platform "Linux=${{ needs.build-linux.result }}"
