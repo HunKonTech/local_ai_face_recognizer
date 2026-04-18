@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import AppConfig, save_db_path
+from app.paths import app_icon_path
 from app.db.database import init_db, session_scope
 from app.db.models import Face, Person
 from app.logging_setup import QLogHandler
@@ -65,6 +66,8 @@ class MainWindow(QMainWindow):
         self._db_path: str = str(config.db_path_resolved)
         self._pending_release = None
 
+        self._apply_window_icon()
+
         init_db(config.db_path_resolved)
 
         self._build_ui()
@@ -86,6 +89,11 @@ class MainWindow(QMainWindow):
         self._build_central()
         self._build_log_dock()
         self._build_status_bar()
+
+    def _apply_window_icon(self) -> None:
+        icon_path = app_icon_path()
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main")
@@ -743,9 +751,13 @@ class MainWindow(QMainWindow):
 
     def _setup_tray(self) -> None:
         self._tray = QSystemTrayIcon(self)
-        self._tray.setIcon(QIcon.fromTheme("dialog-information", self.style().standardIcon(
-            self.style().StandardPixmap.SP_ComputerIcon
-        )))
+        icon = self.windowIcon()
+        if icon.isNull():
+            icon = QIcon.fromTheme(
+                "dialog-information",
+                self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon),
+            )
+        self._tray.setIcon(icon)
         self._tray.setToolTip("Face-Local")
         if QSystemTrayIcon.isSystemTrayAvailable():
             self._tray.show()

@@ -13,7 +13,7 @@ import argparse
 import logging
 import sys
 
-from app.paths import default_log_file
+from app.paths import app_icon_path, default_log_file
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,13 +74,15 @@ def main() -> None:
     load_prefs()
 
     # --- Qt application ---
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QPalette, QColor
-    from PySide6.QtCore import Qt
 
     app = QApplication(sys.argv)
     app.setApplicationName("Face-Local")
     app.setOrganizationName("face-local")
+    icon_path = app_icon_path()
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     # Dark palette
     _apply_dark_palette(app)

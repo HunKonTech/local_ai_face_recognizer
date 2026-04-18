@@ -8,6 +8,7 @@ from pathlib import Path
 
 APP_NAME = "Face-Local"
 APP_SLUG = "face-local"
+APP_ICON_RELATIVE_PATH = "assets/icons/app-icon.png"
 
 
 def is_frozen() -> bool:
@@ -33,6 +34,11 @@ def bundle_root() -> Path:
 def resource_path(relative_path: str) -> Path:
     """Resolve *relative_path* inside the bundled resource directory."""
     return bundle_root() / relative_path
+
+
+def app_icon_path() -> Path:
+    """Return the bundled application icon path."""
+    return resource_path(APP_ICON_RELATIVE_PATH)
 
 
 def user_config_dir() -> Path:

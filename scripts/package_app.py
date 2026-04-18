@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from PyInstaller.__main__ import run as pyinstaller_run
@@ -17,6 +18,10 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD_DIR = ROOT / "build" / "pyinstaller"
 DIST_DIR = ROOT / "dist"
 ENTRYPOINT = ROOT / "app" / "main.py"
+ASSETS_DIR = ROOT / "assets"
+ICON_PNG = ASSETS_DIR / "icons" / "app-icon.png"
+ICON_ICNS = ASSETS_DIR / "icons" / "face-local.icns"
+ICON_ICO = ASSETS_DIR / "icons" / "face-local.ico"
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +56,10 @@ def build() -> None:
         *data_args,
     ]
 
+    icon_path = build_icon_path()
+    if icon_path is not None:
+        args.extend(["--icon", str(icon_path)])
+
     if os.name == "posix" and os.uname().sysname == "Darwin":
         args.extend(["--osx-bundle-identifier", "local.face.recognizer"])
 
@@ -68,6 +77,9 @@ def iter_data_files() -> list[tuple[str, str]]:
         if path.exists():
             data_files.append((str(path), "."))
 
+    if ICON_PNG.exists():
+        data_files.append((str(ICON_PNG), "assets/icons"))
+
     models_dir = ROOT / "models"
     if models_dir.exists():
         for model_file in sorted(models_dir.iterdir()):
@@ -75,6 +87,15 @@ def iter_data_files() -> list[tuple[str, str]]:
                 data_files.append((str(model_file), "models"))
 
     return data_files
+
+
+def build_icon_path() -> Path | None:
+    """Return the platform-appropriate icon file for PyInstaller."""
+    if sys.platform == "darwin":
+        return ICON_ICNS if ICON_ICNS.exists() else None
+    if os.name == "nt":
+        return ICON_ICO if ICON_ICO.exists() else None
+    return ICON_PNG if ICON_PNG.exists() else None
 
 
 def clean() -> None:

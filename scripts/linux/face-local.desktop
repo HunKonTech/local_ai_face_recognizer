@@ -3,5 +3,6 @@ Type=Application
 Name=Face-Local
 Comment=Offline face grouping and person labeling
 Exec=/usr/bin/face-local
+Icon=face-local
 Terminal=false
 Categories=Graphics;Utility;

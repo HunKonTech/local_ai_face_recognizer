@@ -17,6 +17,7 @@ mkdir -p \
     "$PKG_DIR/DEBIAN" \
     "$PKG_DIR/usr/bin" \
     "$PKG_DIR/usr/share/applications" \
+    "$PKG_DIR/usr/share/icons/hicolor/512x512/apps" \
     "$INSTALL_DIR"
 
 cp -R "$DIST_DIR"/. "$INSTALL_DIR"/
@@ -41,6 +42,8 @@ EOF
 chmod 755 "$PKG_DIR/usr/bin/$APP_SLUG"
 
 install -m 644 "scripts/linux/face-local.desktop" "$PKG_DIR/usr/share/applications/face-local.desktop"
+install -m 644 "assets/icons/app-icon-512.png" \
+    "$PKG_DIR/usr/share/icons/hicolor/512x512/apps/face-local.png"
 
 dpkg-deb --build --root-owner-group "$PKG_DIR"
 mv "$PKG_DIR.deb" "$RELEASE_DIR/${APP_NAME}-linux-installer-${VERSION}.deb"
