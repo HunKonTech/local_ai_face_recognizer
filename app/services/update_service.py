@@ -14,7 +14,7 @@ from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
-_REPO = "BenKoncsik/local_ai_face_recognizer"
+_REPO = "HuKonTech/local_ai_face_recognizer"
 _API_URL = f"https://api.github.com/repos/{_REPO}/releases/latest"
 
 
