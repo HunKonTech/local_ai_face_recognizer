@@ -15,13 +15,11 @@ from typing import Any, Iterable
 API_URL = "https://api.buffer.com"
 MAX_POST_LENGTH = 280
 DEFAULT_TEMPLATE = (
-    "{app_name} {tag} is out.\n"
-    "Zero cloud. Zero upload. Everything runs locally.\n"
-    "New builds: {platforms}.\n\n"
-    "{app_name} {tag} megjött.\n"
-    "Zero cloud. Zero upload. Minden helyben fut.\n"
-    "Új build-ek: {platforms}.\n\n"
-    "Download / Letöltés: {release_url}\n"
+    "{app_name} scans photos offline, finds faces, and groups the same people locally. "
+    "Label and organize identities with full privacy.\n\n"
+    "A {app_name} helyben átnézi a képeidet, felismeri és csoportosítja az arcokat, "
+    "felhő nélkül.\n\n"
+    "{release_url}\n"
     "#FaceRecognition #PhotoOrganizer #LocalAI #PrivacyFirst"
 )
 
@@ -128,17 +126,16 @@ def build_release_post_text(
 
     variants = [
         DEFAULT_TEMPLATE.format(**context).strip(),
-        DEFAULT_TEMPLATE.replace(
-            "\n#FaceRecognition #PhotoOrganizer #LocalAI #PrivacyFirst",
-            "\n#FaceRecognition #LocalAI",
+        (
+            "{app_name} scans photos offline, finds faces, and groups the same people locally.\n\n"
+            "A {app_name} helyben felismeri és csoportosítja az arcokat, felhő nélkül.\n\n"
+            "{release_url}\n"
+            "#FaceRecognition #LocalAI"
         ).format(**context).strip(),
         (
-            "{app_name} {tag} is out.\n"
-            "Everything runs locally.\n\n"
-            "{app_name} {tag} megjött.\n"
-            "Minden helyben fut.\n\n"
-            "Download / Letöltés: {release_url}\n"
-            "#FaceRecognition #LocalAI"
+            "{app_name} scans photos offline, finds faces, and groups the same people locally.\n\n"
+            "A {app_name} helyben felismeri és csoportosítja az arcokat, felhő nélkül.\n\n"
+            "{release_url}"
         ).format(**context).strip(),
     ]
     for variant in variants:

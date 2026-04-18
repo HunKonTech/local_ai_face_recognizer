@@ -17,8 +17,8 @@ def test_build_release_post_text_includes_successful_platforms_and_url() -> None
         successful_platforms=["macOS", "Windows"],
     )
 
-    assert "Face-Local v1.2.3 is out." in text
-    assert "Face-Local v1.2.3 megjött." in text
+    assert "Face-Local scans photos offline, finds faces" in text
+    assert "A Face-Local helyben felismeri és csoportosítja az arcokat" in text
     assert "https://github.com/example/face-local/releases/tag/v1.2.3" in text
     assert len(text) <= post_buffer_release.MAX_POST_LENGTH
 
