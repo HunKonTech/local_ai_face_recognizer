@@ -62,7 +62,7 @@ def main() -> int:
         successful_platforms=successful_platforms,
         template=args.template or None,
     )
-    mode = validate_mode((os.environ.get("BUFFER_POST_MODE") or "").strip() or "addToQueue")
+    mode = validate_mode((os.environ.get("BUFFER_POST_MODE") or "").strip() or "shareNow")
 
     if args.dry_run:
         print(post_text)
