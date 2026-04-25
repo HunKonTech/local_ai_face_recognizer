@@ -12,8 +12,36 @@ permissions:
 env:
   PYTHON_VERSION: "3.11"
   APP_NAME: Face-Local
+  OWNER: ${{ github.repository_owner }}
 
 jobs:
+  pick-runner:
+    name: Pick build runner
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+      runner_note: ${{ steps.pick.outputs.runner_note }}
+    steps:
+      - name: Check self-hosted runner availability
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          gh api "orgs/${{ env.OWNER }}/actions/runners" --jq '.runners[].name'
+
+          STATUS=$(gh api "orgs/${{ env.OWNER }}/actions/runners" \
+            --jq '.runners[] | select(.name == "Koncsik-MacBook-Air") | .status' 2>/dev/null || echo "")
+          if [ "$STATUS" = "online" ]; then
+            echo 'runner=["self-hosted", "macOS", "ARM64"]' >> "$GITHUB_OUTPUT"
+            echo 'runner_note=Runner: Koncsik-MacBook-Air (online)' >> "$GITHUB_OUTPUT"
+            echo "Runner: Koncsik-MacBook-Air (online)"
+          else
+            echo 'runner=["macos-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'runner_note=Runner: macos-latest (self-hosted offline)' >> "$GITHUB_OUTPUT"
+            echo "Runner: macos-latest (self-hosted offline)"
+          fi
+
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -21,8 +49,6 @@ jobs:
       package_version: ${{ steps.meta.outputs.package_version }}
       tag: ${{ steps.meta.outputs.tag }}
       release_name: ${{ steps.meta.outputs.release_name }}
-      macos_runs_on: ${{ steps.macos_runner.outputs.macos_runs_on }}
-      macos_runner_note: ${{ steps.macos_runner.outputs.macos_runner_note }}
     steps:
       - uses: actions/checkout@v6
 
@@ -72,99 +98,20 @@ jobs:
             echo "release_name=$RELEASE_NAME"
           } >> "$GITHUB_OUTPUT"
 
-      - id: macos_runner
-        env:
-          RUNNER_DISCOVERY_TOKEN: ${{ secrets.RUNNER_DISCOVERY_TOKEN }}
-          DEFAULT_GITHUB_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          RUNNER_JSON='"macos-latest"'
-          RUNNER_NOTE="Using GitHub-hosted macOS runner (fallback)."
-          TOKEN_TO_USE="${RUNNER_DISCOVERY_TOKEN:-$DEFAULT_GITHUB_TOKEN}"
-          export GH_TOKEN="$TOKEN_TO_USE"
-          OWNER="${GITHUB_REPOSITORY%/*}"
-          REPO="${GITHUB_REPOSITORY#*/}"
-          RESPONSE_FILE="$(mktemp)"
-          ERROR_FILE="$(mktemp)"
-          FOUND_MATCH=""
-
-          query_and_match() {
-            local endpoint="$1"
-
-            if gh api \
-              -H "Accept: application/vnd.github+json" \
-              "$endpoint" >"$RESPONSE_FILE" 2>"$ERROR_FILE"; then
-              MATCH="$(RUNNERS_JSON="$(cat "$RESPONSE_FILE")" python - <<'PY'
-          import json
-          import os
-
-          data = json.loads(os.environ["RUNNERS_JSON"])
-          target_labels = {"self-hosted", "macOS", "ARM64"}
-          target_name = "Koncsik-MacBook-Air"
-
-          for runner in data.get("runners", []):
-              labels = {label["name"] for label in runner.get("labels", [])}
-              if (
-                  runner.get("status") == "online"
-                  and not runner.get("busy", False)
-                  and (
-                      runner.get("name") == target_name
-                      or target_labels.issubset(labels)
-                  )
-              ):
-                  print(json.dumps(["self-hosted", "macOS", "ARM64"]))
-                  raise SystemExit(0)
-
-          raise SystemExit(1)
-          PY
-              )" || true
-
-              if [ -n "$MATCH" ]; then
-                FOUND_MATCH="$MATCH"
-                return 0
-              fi
-
-              return 1
-            fi
-
-            return 2
-          }
-
-          query_and_match "/repos/${OWNER}/${REPO}/actions/runners" || true
-
-          if [ -z "$FOUND_MATCH" ]; then
-            query_and_match "/orgs/${OWNER}/actions/runners" || true
-          fi
-
-          if [ -n "$FOUND_MATCH" ]; then
-            RUNNER_JSON="$FOUND_MATCH"
-            RUNNER_NOTE="Using self-hosted macOS ARM64 runner."
-          fi
-
-          echo "macos_runs_on=$RUNNER_JSON" >> "$GITHUB_OUTPUT"
-          echo "macos_runner_note=$RUNNER_NOTE" >> "$GITHUB_OUTPUT"
-          echo "$RUNNER_NOTE"
-
-          if [ -z "$FOUND_MATCH" ]; then
-            echo "No eligible self-hosted macOS ARM64 runner was discoverable. Falling back to macos-latest." >&2
-            if [ -s "$ERROR_FILE" ]; then
-              cat "$ERROR_FILE" >&2
-            fi
-            echo "Tip: set repository secret RUNNER_DISCOVERY_TOKEN with repo admin read access, or admin:org if the runner is org-level." >&2
-          fi
-
   build-macos:
-    needs: prepare
-    runs-on: ${{ fromJSON(needs.prepare.outputs.macos_runs_on) }}
+    needs:
+      - prepare
+      - pick-runner
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Selected macOS runner
         shell: bash
-        run: echo "${{ needs.prepare.outputs.macos_runner_note }}"
+        run: echo "${{ needs.pick-runner.outputs.runner_note }}"
 
       - name: Prepare writable Python tool cache
-        if: ${{ !contains(needs.prepare.outputs.macos_runs_on, 'self-hosted') }}
+        if: ${{ !contains(needs.pick-runner.outputs.runner, 'self-hosted') }}
         shell: bash
         run: |
           TOOLCACHE="${RUNNER_TEMP}/hostedtoolcache"
@@ -173,7 +120,7 @@ jobs:
           echo "RUNNER_TOOL_CACHE=$TOOLCACHE" >> "$GITHUB_ENV"
 
       - name: Select local Python on self-hosted macOS
-        if: ${{ contains(needs.prepare.outputs.macos_runs_on, 'self-hosted') }}
+        if: ${{ contains(needs.pick-runner.outputs.runner, 'self-hosted') }}
         shell: bash
         run: |
           find_python() {
@@ -205,7 +152,7 @@ jobs:
           "$PY_BIN" --version
 
       - uses: actions/setup-python@v6
-        if: ${{ !contains(needs.prepare.outputs.macos_runs_on, 'self-hosted') }}
+        if: ${{ !contains(needs.pick-runner.outputs.runner, 'self-hosted') }}
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -230,7 +177,6 @@ jobs:
       - name: Package macOS app
         shell: bash
         run: |
-          ditto -c -k --keepParent "dist/Face-Local.app" "release/Face-Local-macOS-app-${{ needs.prepare.outputs.package_version }}.zip"
           rm -rf release/dmg-root
           mkdir -p release/dmg-root
           cp -R "dist/Face-Local.app" "release/dmg-root/"
@@ -253,7 +199,6 @@ jobs:
             --tag "${{ needs.prepare.outputs.tag }}" \
             --target "$GITHUB_SHA" \
             --name "${{ needs.prepare.outputs.release_name }}" \
-            "release/*.zip" \
             "release/*.dmg"
 
   build-windows:
@@ -369,6 +314,7 @@ jobs:
       }}
     needs:
       - prepare
+      - pick-runner
       - build-macos
       - build-windows
       - build-linux
@@ -386,7 +332,7 @@ jobs:
           notes=$'Automated cross-platform build from `main`.\n\n'
           notes+="- Commit: ${GITHUB_SHA}"$'\n'
           notes+="- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"$'\n'
-          notes+="- macOS runner: ${{ needs.prepare.outputs.macos_runner_note }}"$'\n'
+          notes+="- macOS runner: ${{ needs.pick-runner.outputs.runner_note }}"$'\n'
           notes+="- macOS build: ${{ needs.build-macos.result }}"$'\n'
           notes+="- Windows build: ${{ needs.build-windows.result }}"$'\n'
           notes+="- Linux build: ${{ needs.build-linux.result }}"$'\n'
