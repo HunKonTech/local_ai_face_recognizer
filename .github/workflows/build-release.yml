@@ -19,27 +19,43 @@ jobs:
     name: Pick build runner
     runs-on: ubuntu-latest
     outputs:
-      runner: ${{ steps.pick.outputs.runner }}
-      runner_note: ${{ steps.pick.outputs.runner_note }}
+      mac_runner: ${{ steps.pick_mac.outputs.runner }}
+      mac_runner_note: ${{ steps.pick_mac.outputs.runner_note }}
+      windows_runner: ${{ steps.pick_windows.outputs.runner }}
+      windows_runner_note: ${{ steps.pick_windows.outputs.runner_note }}
     steps:
-      - name: Check self-hosted runner availability
-        id: pick
+      - name: Pick macOS runner
+        id: pick_mac
         env:
           GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
         shell: bash
         run: |
-          gh api "orgs/${{ env.OWNER }}/actions/runners" --jq '.runners[].name'
-
           STATUS=$(gh api "orgs/${{ env.OWNER }}/actions/runners" \
             --jq '.runners[] | select(.name == "Koncsik-MacBook-Air") | .status' 2>/dev/null || echo "")
+
           if [ "$STATUS" = "online" ]; then
             echo 'runner=["self-hosted", "macOS", "ARM64"]' >> "$GITHUB_OUTPUT"
             echo 'runner_note=Runner: Koncsik-MacBook-Air (online)' >> "$GITHUB_OUTPUT"
-            echo "Runner: Koncsik-MacBook-Air (online)"
           else
             echo 'runner=["macos-latest"]' >> "$GITHUB_OUTPUT"
-            echo 'runner_note=Runner: macos-latest (self-hosted offline)' >> "$GITHUB_OUTPUT"
-            echo "Runner: macos-latest (self-hosted offline)"
+            echo 'runner_note=Runner: macos-latest (fallback)' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pick Windows runner
+        id: pick_windows
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          STATUS=$(gh api "orgs/${{ env.OWNER }}/actions/runners" \
+            --jq '.runners[] | select(.name == "nagy_gep_windows") | .status' 2>/dev/null || echo "")
+
+          if [ "$STATUS" = "online" ]; then
+            echo 'runner=["self-hosted", "Windows", "X64"]' >> "$GITHUB_OUTPUT"
+            echo 'runner_note=Runner: nagy_gep_windows (online)' >> "$GITHUB_OUTPUT"
+          else
+            echo 'runner=["windows-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'runner_note=Runner: windows-latest (fallback)' >> "$GITHUB_OUTPUT"
           fi
 
   prepare:
@@ -102,16 +118,16 @@ jobs:
     needs:
       - prepare
       - pick-runner
-    runs-on: ${{ fromJSON(needs.pick-runner.outputs.runner) }}
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.mac_runner) }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Selected macOS runner
         shell: bash
-        run: echo "${{ needs.pick-runner.outputs.runner_note }}"
+        run: echo "${{ needs.pick-runner.outputs.mac_runner_note }}"
 
       - name: Prepare writable Python tool cache
-        if: ${{ !contains(needs.pick-runner.outputs.runner, 'self-hosted') }}
+        if: ${{ !contains(needs.pick-runner.outputs.mac_runner, 'self-hosted') }}
         shell: bash
         run: |
           TOOLCACHE="${RUNNER_TEMP}/hostedtoolcache"
@@ -120,7 +136,7 @@ jobs:
           echo "RUNNER_TOOL_CACHE=$TOOLCACHE" >> "$GITHUB_ENV"
 
       - name: Select local Python on self-hosted macOS
-        if: ${{ contains(needs.pick-runner.outputs.runner, 'self-hosted') }}
+        if: ${{ contains(needs.pick-runner.outputs.mac_runner, 'self-hosted') }}
         shell: bash
         run: |
           find_python() {
@@ -152,7 +168,7 @@ jobs:
           "$PY_BIN" --version
 
       - uses: actions/setup-python@v6
-        if: ${{ !contains(needs.pick-runner.outputs.runner, 'self-hosted') }}
+        if: ${{ !contains(needs.pick-runner.outputs.mac_runner, 'self-hosted') }}
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -202,10 +218,16 @@ jobs:
             "release/*.dmg"
 
   build-windows:
-    needs: prepare
-    runs-on: windows-latest
+    needs:
+      - prepare
+      - pick-runner
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.windows_runner) }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Selected Windows runner
+        shell: bash
+        run: echo "${{ needs.pick-runner.outputs.windows_runner_note }}"
 
       - uses: actions/setup-python@v6
         with:
@@ -332,7 +354,8 @@ jobs:
           notes=$'Automated cross-platform build from `main`.\n\n'
           notes+="- Commit: ${GITHUB_SHA}"$'\n'
           notes+="- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"$'\n'
-          notes+="- macOS runner: ${{ needs.pick-runner.outputs.runner_note }}"$'\n'
+          notes+="- macOS runner: ${{ needs.pick-runner.outputs.mac_runner_note }}"$'\n'
+          notes+="- Windows runner: ${{ needs.pick-runner.outputs.windows_runner_note }}"$'\n'
           notes+="- macOS build: ${{ needs.build-macos.result }}"$'\n'
           notes+="- Windows build: ${{ needs.build-windows.result }}"$'\n'
           notes+="- Linux build: ${{ needs.build-linux.result }}"$'\n'
