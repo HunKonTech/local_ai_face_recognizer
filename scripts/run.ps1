@@ -43,7 +43,7 @@ if (-not (Test-Path $FaceNet)) {
         }
     }
     if (-not $downloaded) {
-        Write-Warning "Could not download mobilefacenet.tflite — face recognition may not work. Use Settings > AI csomagok to retry."
+        Write-Warning "Could not download mobilefacenet.tflite - face recognition may not work. Use Settings > AI csomagok to retry."
     }
 }
 

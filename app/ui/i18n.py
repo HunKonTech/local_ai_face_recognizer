@@ -2363,6 +2363,10 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                  "hu": "Nincs párkép a jelenlegi képhez."},
 
     # ── Image library ─────────────────────────────────────────────────────
+    "ibp_deol_variant_type":    {"en": "Type:",                  "hu": "Típus:"},
+    "ibp_deol_variant_artistic":{"en": "(artistic)",             "hu": "(szövegezetesen szinezett)"},
+    "ibp_deol_variant_stable":  {"en": "(stable)",               "hu": "(stabilizált)"},
+
     "img_lib_group":            {"en": "Image Library",
                                  "hu": "Képkönyvtár"},
     "img_lib_root_label":       {"en": "Library root:",
