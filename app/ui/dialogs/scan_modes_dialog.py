@@ -15,6 +15,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -27,10 +28,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.app_settings import app_qsettings
+from app.services.duplicate_unknown_face_finder import (
+    DEFAULT_OVERLAP_SENSITIVITY,
+    OVERLAP_SENSITIVITIES,
+)
 from app.services.unknown_person_reset_service import UnknownPersonResetOptions
 from app.ui.i18n import t
 
 log = logging.getLogger(__name__)
+
+# QSettings key holding the last chosen overlap-search sensitivity preset.
+_OVERLAP_SENSITIVITY_SETTING = "overlap_cleanup/sensitivity"
+
 
 
 class ScanModesDialog(QDialog):
@@ -168,9 +178,19 @@ class ScanModesDialog(QDialog):
             options_widget=self._build_reset_unknown_options(),
         ))
 
+        # The overlap search carries its own sensitivity selector.
+        cards.addWidget(self._make_card(
+            title=t("scanModes.overlapCleanup.title"),
+            desc=t("scanModes.overlapCleanup.description"),
+            on_click=lambda: self._launch_maintenance("overlap_cleanup"),
+            danger=False,
+            button_label=t("scanModes.overlapCleanup.startButton"),
+            warning=t("scanModes.overlapCleanup.warning"),
+            options_widget=self._build_overlap_options(),
+        ))
+
         # Order mirrors the legacy "Klasszikus" maintenance list.
         maintenance = [
-            ("overlapCleanup", "overlap_cleanup", False),
             ("embeddingDuplicates", "embedding_duplicates", False),
             ("identityRepair", "identity_repair", False),
             ("cleanupEmptyUnknowns", "cleanup_empty_unknowns", False),
@@ -225,6 +245,49 @@ class ScanModesDialog(QDialog):
             lambda on: self._chk_delete_face_assignments.setEnabled(not on)
         )
         return box
+
+    def _build_overlap_options(self) -> QWidget:
+        """Sensitivity selector rendered inside the overlap-cleanup card.
+
+        The strict default only lists boxes that heavily overlap; the looser
+        levels also list boxes that merely intersect, which is what finds the
+        leftovers a strict pass walks past.
+        """
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        label = QLabel(t("scanModes.overlapCleanup.sensitivity"))
+        layout.addWidget(label)
+
+        self._overlap_sensitivity_combo = QComboBox()
+        for preset in OVERLAP_SENSITIVITIES:
+            self._overlap_sensitivity_combo.addItem(
+                t(f"overlapSensitivity.{preset.key}"), preset.key
+            )
+        saved = str(
+            app_qsettings().value(
+                _OVERLAP_SENSITIVITY_SETTING, DEFAULT_OVERLAP_SENSITIVITY
+            )
+        )
+        index = self._overlap_sensitivity_combo.findData(saved)
+        self._overlap_sensitivity_combo.setCurrentIndex(max(0, index))
+        self._overlap_sensitivity_combo.currentIndexChanged.connect(
+            self._on_overlap_sensitivity_changed
+        )
+        layout.addWidget(self._overlap_sensitivity_combo)
+
+        tip = QLabel(t("scanModes.overlapCleanup.sensitivityTip"))
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        layout.addWidget(tip)
+        return box
+
+    def _on_overlap_sensitivity_changed(self, _index: int) -> None:
+        key = self._overlap_sensitivity_combo.currentData()
+        app_qsettings().setValue(_OVERLAP_SENSITIVITY_SETTING, key)
+        log.info("Overlap search sensitivity set to %s", key)
 
     def reset_unknown_options(self) -> UnknownPersonResetOptions:
         """Current state of the inline Unknown-reset checkboxes."""

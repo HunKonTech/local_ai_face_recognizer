@@ -3066,21 +3066,41 @@ _STRINGS: Dict[str, Dict[str, str]] = {
 
     # overlapping question-mark cleanup
     "scanModes.overlapCleanup.title":
-        {"en": "Find Overlapping ? Boxes",
-         "hu": "Átfedő ? keretek keresése"},
+        {"en": "Find Overlapping / Intersecting ? Boxes",
+         "hu": "Átfedő / metsző ? keretek keresése"},
     "scanModes.overlapCleanup.description":
         {"en": "Searches the current database for unassigned question-mark face boxes "
-               "that significantly overlap already named faces. It only lists suspicious "
+               "that overlap already named faces. It only lists suspicious "
                "candidates first; nothing is deleted until you review the list, keep the "
                "checkboxes you want, and confirm deletion.",
          "hu": "Megkeresi az adatbázisban azokat a kérdőjeles, személyhez nem rendelt "
-               "arckereteket, amelyek jelentősen átfednek egy már elnevezett arccal. "
+               "arckereteket, amelyek átfednek vagy metszenek egy másik arckeretet. "
                "Először csak listázza a gyanús találatokat; semmit nem töröl addig, "
                "amíg át nem nézed a listát, ki nem választod a törlendőket, és meg "
                "nem erősíted a törlést."},
+    "scanModes.overlapCleanup.sensitivity":
+        {"en": "Sensitivity:", "hu": "Érzékenység:"},
+    "scanModes.overlapCleanup.sensitivityTip":
+        {"en": "The strict level only lists heavily overlapping boxes. The looser "
+               "levels also list boxes that merely intersect, and boxes belonging to "
+               "two different identities — more finds, more false candidates to skip "
+               "in the review list.",
+         "hu": "A szigorú szint csak az erősen átfedő kereteket listázza. A lazább "
+               "szintek a csak metsző kereteket is megtalálják, és a két különböző "
+               "személyhez tartozó párokat is — több találat, de több téves jelölt is "
+               "az átnézendő listán."},
+    "overlapSensitivity.strict":
+        {"en": "Strict — heavy overlap only (default)",
+         "hu": "Szigorú — csak erős átfedés (alapértelmezett)"},
+    "overlapSensitivity.medium":
+        {"en": "Medium — partial overlap, across identities too",
+         "hu": "Közepes — részleges átfedés, más személlyel is"},
+    "overlapSensitivity.any":
+        {"en": "Loose — every intersecting box pair",
+         "hu": "Laza — minden metsző keretpár"},
     "scanModes.overlapCleanup.startButton":
         {"en": "Find Overlapping ? Boxes",
-         "hu": "Átfedő ? keretek keresése"},
+         "hu": "Átfedő / metsző keretek keresése"},
     "scanModes.overlapCleanup.warning":
         {"en": "Review step included — known named faces are never deleted",
          "hu": "Átnézési lépéssel — az ismert, elnevezett arcokat soha nem törli"},

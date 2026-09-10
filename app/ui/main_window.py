@@ -37,7 +37,11 @@ from app.db.database import ensure_unknown_person, init_db, session_scope
 from app.db.models import Face, Image, Person
 from app.logging_setup import QLogHandler
 from app.paths import app_icon_path
-from app.services.duplicate_unknown_face_finder import DuplicateUnknownFaceFinder
+from app.services.duplicate_unknown_face_finder import (
+    DEFAULT_OVERLAP_SENSITIVITY,
+    DuplicateUnknownFaceFinder,
+    overlap_sensitivity,
+)
 from app.services.identity_service import BulkReassignResult, IdentityService
 from app.services.unknown_merge_service import UnknownMergeService
 from app.ui.dialogs.export_dialog import ExportDialog
@@ -1382,14 +1386,21 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, t("busy_title"), t("busy_msg"))
             return
 
-        threshold = self._config.detection.duplicate_unknown_iou_threshold
-        containment = self._config.detection.duplicate_unknown_containment_threshold
+        preset = self._overlap_sensitivity()
+        if preset.key == DEFAULT_OVERLAP_SENSITIVITY:
+            # Strict level keeps honouring the configured detection thresholds.
+            threshold = self._config.detection.duplicate_unknown_iou_threshold
+            containment = self._config.detection.duplicate_unknown_containment_threshold
+        else:
+            threshold = preset.iou
+            containment = preset.containment
         try:
             with session_scope() as session:
                 finder = DuplicateUnknownFaceFinder(
                     session,
                     iou_threshold=threshold,
                     containment_threshold=containment,
+                    cross_identity=preset.cross_identity,
                 )
                 matches = finder.find()
                 images_examined = finder.images_examined
@@ -1399,7 +1410,8 @@ class MainWindow(QMainWindow):
             return
 
         log.info(
-            "Átfedő arckeretek keresése: %d kép vizsgálva, %d találat.",
+            "Átfedő/metsző arckeretek keresése (%s): %d kép vizsgálva, %d találat.",
+            preset.key,
             images_examined,
             len(matches),
         )
@@ -1409,6 +1421,15 @@ class MainWindow(QMainWindow):
             iou_threshold=threshold,
             containment_threshold=containment,
         )
+
+    def _overlap_sensitivity(self):
+        """Sensitivity preset chosen in the maintenance dialog (persisted)."""
+        from app.app_settings import app_qsettings
+
+        key = app_qsettings().value(
+            "overlap_cleanup/sensitivity", DEFAULT_OVERLAP_SENSITIVITY
+        )
+        return overlap_sensitivity(str(key))
 
     @Slot()
     def _on_find_embedding_duplicate_faces(self) -> None:
