@@ -2156,6 +2156,25 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "ibp_note_tooltip":     {"en": "Free-text note attached to this image",
                              "hu": "Szabad szöveges megjegyzés a képhez"},
 
+    # ── Image metadata dialog (face-recognition preview) ────────────────
+    "imeta_title":         {"en": "Image data", "hu": "Kép adatai"},
+    "imeta_btn":           {"en": "🏷 Image data", "hu": "🏷 Kép adatai"},
+    "imeta_btn_tip":       {
+        "en": "Set where and when this photo was taken",
+        "hu": "Add meg, hol és mikor készült a kép",
+    },
+    "imeta_place_hdr":     {"en": "Where was this photo taken?",
+                            "hu": "Hol készült a kép?"},
+    "imeta_place_current": {"en": "Current place: {name}", "hu": "Jelenlegi hely: {name}"},
+    "imeta_place_none":    {"en": "No place assigned", "hu": "Nincs hely hozzárendelve"},
+    "imeta_place_hint":    {
+        "en": "Pick a place from the list, or type a new name and press Enter to create it.",
+        "hu": "Válassz helyet a listából, vagy írj be egy új nevet és nyomj Entert a létrehozáshoz.",
+    },
+    "imeta_place_clear":   {"en": "Remove place", "hu": "Hely törlése"},
+    "imeta_save_error":    {"en": "Could not save the image data: {error}",
+                            "hu": "A kép adatai nem menthetők: {error}"},
+
     # ── EXIF date update button ─────────────────────────────────────────
     "ibp_update_exif_date_btn":  {"en": "Update EXIF date from photo date",
                                   "hu": "EXIF készítési dátum frissítése a kép dátuma alapján"},

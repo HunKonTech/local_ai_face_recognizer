@@ -361,6 +361,7 @@ class _FaceImageLabel(QLabel):
     face_clicked = Signal(int)
     canvas_clicked = Signal()
     face_right_clicked = Signal(int, int, int)
+    canvas_right_clicked = Signal(int, int)   # global x, y — right-click off any face
     rect_drawn = Signal(QRect)
     point_clicked = Signal(float, float)  # label-space x, y (object mode)
 
@@ -582,9 +583,11 @@ class _FaceImageLabel(QLabel):
 
     def contextMenuEvent(self, event) -> None:
         face_id = self._hit_test(event.pos().x(), event.pos().y())
+        gp = self.mapToGlobal(event.pos())
         if face_id is not None:
-            gp = self.mapToGlobal(event.pos())
             self.face_right_clicked.emit(face_id, gp.x(), gp.y())
+        else:
+            self.canvas_right_clicked.emit(gp.x(), gp.y())
 
     # ------------------------------------------------------------------
     # Painting
@@ -911,6 +914,7 @@ class PreviewPanel(QWidget):
         self._image_label.face_clicked.connect(self._on_face_clicked)
         self._image_label.canvas_clicked.connect(self._open_zoom)
         self._image_label.face_right_clicked.connect(self._on_face_right_clicked)
+        self._image_label.canvas_right_clicked.connect(self._show_canvas_context_menu)
         self._image_label.rect_drawn.connect(self._on_rect_drawn)
         self._image_label.point_clicked.connect(self._on_object_point_clicked)
         layout.addWidget(self._image_label)
@@ -1061,6 +1065,12 @@ class PreviewPanel(QWidget):
         self._assign_btn.clicked.connect(self._assign_selected_face)
         _add(self._assign_btn)
 
+        self._meta_btn = _action_btn(t("imeta_btn"))
+        self._meta_btn.setEnabled(False)
+        self._meta_btn.setToolTip(t("imeta_btn_tip"))
+        self._meta_btn.clicked.connect(self._open_image_metadata)
+        _add(self._meta_btn)
+
         self._delete_btn = _action_btn(t("delete_selection"))
         self._delete_btn.setEnabled(False)
         self._delete_btn.clicked.connect(self._delete_selected_face)
@@ -1185,6 +1195,7 @@ class PreviewPanel(QWidget):
         self._render()
 
         self._path_label.setText(img_path)
+        self._meta_btn.setEnabled(True)
         self._open_btn.setEnabled(True)
         self._zoom_btn.setEnabled(True)
         self._draw_btn.setEnabled(True)
@@ -1220,6 +1231,7 @@ class PreviewPanel(QWidget):
         self._image_label.clear()
         self._image_label.setText(t("preview_empty"))
         self._path_label.setText("")
+        self._meta_btn.setEnabled(False)
         self._open_btn.setEnabled(False)
         self._zoom_btn.setEnabled(False)
         self._draw_btn.setChecked(False)
@@ -1537,6 +1549,30 @@ class PreviewPanel(QWidget):
         self._edit_btn.setEnabled(has_face)
         self._assign_btn.setEnabled(has_face)
         self._delete_btn.setEnabled(has_face)
+
+    def _show_canvas_context_menu(self, gx: int, gy: int) -> None:
+        """Right-click anywhere but on a face — offer image-level actions."""
+        if self._current_image_id is None:
+            return
+        menu = QMenu(self)
+        meta_action = menu.addAction(f"{t('imeta_title')} …")
+        zoom_action = menu.addAction(t("zoom"))
+        open_action = menu.addAction(t("open_file_manager"))
+        chosen = menu.exec(QPoint(gx, gy))
+        if chosen is meta_action:
+            self._open_image_metadata()
+        elif chosen is zoom_action:
+            self._open_zoom()
+        elif chosen is open_action:
+            self._open_in_filemanager()
+
+    def _open_image_metadata(self) -> None:
+        """Open the image-data dialog (place, date, note) for the shown image."""
+        if self._current_image_id is None:
+            return
+        from app.ui.dialogs.image_metadata_dialog import ImageMetadataDialog
+        dlg = ImageMetadataDialog(self._current_image_id, parent=self)
+        dlg.exec()
 
     def _open_zoom(self) -> None:
         """Open the zoom dialog with a full-resolution annotated image."""

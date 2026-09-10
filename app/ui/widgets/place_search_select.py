@@ -141,6 +141,10 @@ class PlaceSearchSelect(QWidget):
         self._list.clearSelection()
         self._list.setCurrentItem(None)
 
+    def clear_query(self) -> None:
+        """Empty the search box (and with it any filtering of the list)."""
+        self._search.clear()
+
     def retranslate(self) -> None:
         self._search.setPlaceholderText(t("place_search_placeholder"))
         self._no_results.setText(t("pss_no_results"))
