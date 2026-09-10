@@ -236,6 +236,21 @@ class ExportDialog(QDialog):
         img_layout.addWidget(self._images_btn)
         layout.addWidget(img_box)
 
+        # --- Faces of the current image into separate files (#175) ---
+        faces_box = QGroupBox(t("export_faces_group"))
+        faces_layout = QVBoxLayout(faces_box)
+        faces_desc = QLabel(t("export_faces_desc"))
+        faces_desc.setWordWrap(True)
+        faces_desc.setStyleSheet("color: #aaa; font-size: 11px;")
+        faces_layout.addWidget(faces_desc)
+        self._faces_btn = QPushButton(f"🙂  {t('fexp_title')}")
+        self._faces_btn.setEnabled(self._image_id is not None)
+        if self._image_id is None:
+            self._faces_btn.setToolTip(t("export_faces_need_image_tip"))
+        self._faces_btn.clicked.connect(self._on_export_faces)
+        faces_layout.addWidget(self._faces_btn)
+        layout.addWidget(faces_box)
+
         # --- Astro static site (scalable) ---
         astro_box = QGroupBox(t("export_astro_group"))
         astro_layout = QVBoxLayout(astro_box)
@@ -764,6 +779,14 @@ class ExportDialog(QDialog):
             ),
             on_error=lambda msg: QMessageBox.critical(self, t("export_error"), msg),
         )
+
+    def _on_export_faces(self) -> None:
+        """Export the faces of the currently open image into separate files."""
+        if self._image_id is None:
+            return
+        from app.ui.helpers.face_image_export import run_face_image_export
+
+        run_face_image_export([self._image_id], parent=self)
 
     def _on_export_metadata(self) -> None:
         fields = self._selected_fields()

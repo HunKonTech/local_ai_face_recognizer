@@ -3141,6 +3141,15 @@ class ImageBrowserPanel(QWidget):
             )
             menu.addSeparator()
 
+            export_faces = menu.addAction(
+                t("ibp_ctx_export_faces_one") if n == 1
+                else t("ibp_ctx_export_faces_many", n=n)
+            )
+            export_faces.triggered.connect(
+                lambda: self._export_faces_as_images(image_ids)
+            )
+            menu.addSeparator()
+
         undo_action = menu.addAction(t("rerec_ctx_undo_last"))
         undo_action.setEnabled(self._latest_undoable_batch() is not None)
         undo_action.triggered.connect(self._undo_last_rerecognition)
@@ -4205,6 +4214,14 @@ class ImageBrowserPanel(QWidget):
         manual_mark_action = menu.addAction(t("ibp_ctx_manual_mark"))
         object_mark_action = menu.addAction(t("object_ctx_mark_here"))
 
+        export_face_action: Optional[object] = None
+        export_all_action: Optional[object] = None
+        if self._current_image_id is not None:
+            menu.addSeparator()
+            if face_id is not None:
+                export_face_action = menu.addAction(t("ibp_ctx_export_this_face"))
+            export_all_action = menu.addAction(t("ibp_ctx_export_faces_one"))
+
         global_pos = self._image_label.mapToGlobal(QPoint(lx, ly))
         chosen = menu.exec(global_pos)
         log.debug(
@@ -4225,6 +4242,22 @@ class ImageBrowserPanel(QWidget):
             self._draw_mode_btn.setChecked(True)
         elif chosen is object_mark_action:
             self._object_mode_btn.setChecked(True)
+        elif export_face_action is not None and chosen is export_face_action:
+            self._export_faces_as_images(
+                [self._current_image_id], face_ids=[face_id]
+            )
+        elif export_all_action is not None and chosen is export_all_action:
+            self._export_faces_as_images([self._current_image_id])
+
+    def _export_faces_as_images(
+        self,
+        image_ids: List[int],
+        face_ids: Optional[List[int]] = None,
+    ) -> None:
+        """Open the face-image export dialog for *image_ids* (see #175)."""
+        from app.ui.helpers.face_image_export import run_face_image_export
+
+        run_face_image_export(image_ids, parent=self, face_ids=face_ids)
 
     def _delete_object_occurrence(self, occurrence_id: int) -> None:
         """Remove a single object occurrence marker from the current image."""

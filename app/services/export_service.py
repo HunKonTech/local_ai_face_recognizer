@@ -3419,7 +3419,9 @@ render();
 
 
 def _safe_filename(name: str) -> str:
-    return re.sub(r'[\\/:*?"<>|]', "_", name)[:120] or "collage"
+    from app.services.filename_pattern import safe_filename
+
+    return safe_filename(name, fallback="collage")
 
 
 # ---------------------------------------------------------------------------
