@@ -54,6 +54,7 @@ def _add_face(
     backend: str = "cpu",
     quality: float | None = None,
     confidence: float = 0.9,
+    assignment_confidence: float | None = None,
 ) -> int:
     face = Face(
         image_id=image_id,
@@ -62,6 +63,7 @@ def _add_face(
         confidence=confidence,
         detector_backend=backend,
         assignment_source=source,
+        assignment_confidence=assignment_confidence,
         quality_score=quality,
     )
     if embedding is not None:
@@ -189,6 +191,84 @@ class TestOverlapResolution:
         with session_scope() as s:
             assert s.get(Face, named) is not None
             assert s.get(Face, grouped) is None
+
+    def test_two_auto_recognised_persons_resolved_by_confidence(self, tmp_db):
+        """Same physical face the AI labelled as two different people: keep the
+        higher-confidence recognition, no user conflict raised."""
+        with session_scope() as s:
+            img = _add_image(s)
+            eva = _add_person(s, "Éva")
+            marton = _add_person(s, "Márton")
+            weak = _add_face(
+                s, img, marton, (12, 11, 50, 50), _vec(0, 0.02, 7),
+                source="deep_recognition", assignment_confidence=0.55,
+            )
+            strong = _add_face(
+                s, img, eva, (10, 10, 50, 50), _vec(0),
+                source="deep_recognition", assignment_confidence=0.92,
+            )
+
+        stats = _resolve()
+        assert stats.faces_removed == 1
+        assert stats.pairs_resolved == 1
+        assert stats.conflicts_skipped == 0
+        with session_scope() as s:
+            assert s.get(Face, strong) is not None
+            assert s.get(Face, weak) is None
+
+    def test_human_box_beats_ai_duplicate_of_other_person(self, tmp_db):
+        with session_scope() as s:
+            img = _add_image(s)
+            eva = _add_person(s, "Éva")
+            marton = _add_person(s, "Márton")
+            human = _add_face(
+                s, img, eva, (10, 10, 50, 50), _vec(0),
+                source="manual", backend="manual",
+            )
+            ai_dup = _add_face(
+                s, img, marton, (13, 12, 50, 50), _vec(0, 0.02, 8),
+                source="deep_recognition", assignment_confidence=0.99,
+            )
+
+        stats = _resolve()
+        assert stats.faces_removed == 1
+        assert stats.conflicts_skipped == 0
+        with session_scope() as s:
+            assert s.get(Face, human) is not None
+            assert s.get(Face, ai_dup) is None
+
+    def test_two_human_named_persons_still_untouchable(self, tmp_db):
+        with session_scope() as s:
+            img = _add_image(s)
+            eva = _add_person(s, "Éva")
+            marton = _add_person(s, "Márton")
+            f1 = _add_face(s, img, eva, (10, 10, 50, 50), _vec(0), source="manual")
+            f2 = _add_face(
+                s, img, marton, (12, 11, 50, 50), _vec(0), source="suggestion_approved"
+            )
+
+        stats = _resolve()
+        assert stats.faces_removed == 0
+        assert stats.conflicts_skipped >= 1
+        with session_scope() as s:
+            assert s.get(Face, f1) is not None
+            assert s.get(Face, f2) is not None
+
+    def test_orphan_unknown_removed_after_overlap_delete(self, tmp_db):
+        with session_scope() as s:
+            img = _add_image(s)
+            anna = _add_person(s, "Anna")
+            unknown = _add_person(s, "Unknown 9", auto=True)
+            _add_face(s, img, anna, (10, 10, 50, 50), _vec(0), source="manual")
+            _add_face(
+                s, img, unknown, (13, 12, 50, 50), _vec(0, 0.02, 9),
+                source="clustering",
+            )
+
+        stats = _resolve()
+        assert stats.faces_removed == 1
+        with session_scope() as s:
+            assert s.get(Person, unknown) is None
 
     def test_manual_box_beats_assigned_auto_box(self, tmp_db):
         with session_scope() as s:

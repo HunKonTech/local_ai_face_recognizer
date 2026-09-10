@@ -498,6 +498,7 @@ class FamilyTreePanel(QWidget):
                     gender=dlg.gender(),
                     family_code=dlg.family_code(),
                     external_family_code=dlg.external_family_code(),
+                    name_prefix=dlg.name_prefix(),
                     last_name=dlg.last_name(),
                     first_name=dlg.first_name(),
                     second_name=dlg.second_name(),

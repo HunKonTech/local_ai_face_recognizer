@@ -11,9 +11,9 @@ import json
 import os
 import stat
 import sys
+from datetime import datetime
 from pathlib import Path
 
-import piexif
 import pytest
 from PIL import Image as PilImage
 
@@ -70,6 +70,15 @@ def _make_face(session, image, person=None, *, x=10, y=20, w=30, h=40,
     session.add(f)
     session.flush()
     return f
+
+
+def _read_user_comment(path: Path) -> bytes:
+    """The raw EXIF UserComment bytes of *path* (piexif-independent)."""
+    with PilImage.open(path) as im:
+        raw = im.getexif().get_ifd(0x8769).get(0x9286)
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", errors="replace")
+    return raw or b""
 
 
 def _write_jpeg(path: Path, *, exif: bytes | None = None) -> None:
@@ -208,11 +217,7 @@ def test_export_embeds_exif_comment_and_is_idempotent(db):
     assert r2.success and r2.write_mode == meta.WRITE_MODE_EXIF_USER_COMMENT
 
     # The UserComment is overwritten in place — a re-export does not duplicate.
-    import piexif
-    with PilImage.open(jpg) as im:
-        exif = piexif.load(im.info["exif"])
-    comment = exif["Exif"][piexif.ExifIFD.UserComment]
-    assert comment.count(b'"schema"') == 1
+    assert _read_user_comment(jpg).count(b'"schema"') == 1
 
     # And the data round-trips.
     payload = meta.read_face_metadata(jpg)
@@ -241,19 +246,12 @@ def test_export_xmp_when_exif_comment_disabled(db):
 # ---------------------------------------------------------------------------
 
 def test_existing_exif_preserved(db):
+    from app.utils.exif import read_exif_gps, write_exif_date, write_exif_gps
+
     jpg = db / "gps.jpg"
-    exif_dict = {
-        "0th": {piexif.ImageIFD.DateTime: b"2019:05:01 12:00:00"},
-        "Exif": {piexif.ExifIFD.DateTimeOriginal: b"2019:05:01 12:00:00"},
-        "GPS": {
-            piexif.GPSIFD.GPSLatitudeRef: b"N",
-            piexif.GPSIFD.GPSLatitude: [(47, 1), (30, 1), (0, 1)],
-            piexif.GPSIFD.GPSLongitudeRef: b"E",
-            piexif.GPSIFD.GPSLongitude: [(19, 1), (3, 1), (0, 1)],
-        },
-        "1st": {}, "thumbnail": None,
-    }
-    _write_jpeg(jpg, exif=piexif.dump(exif_dict))
+    _write_jpeg(jpg)
+    assert write_exif_gps(jpg, 47.5, 19.05)
+    assert write_exif_date(jpg, datetime(2019, 5, 1, 12, 0, 0))
 
     with session_scope() as session:
         alice = _make_person(session, "Alice")
@@ -261,11 +259,11 @@ def test_existing_exif_preserved(db):
         _make_face(session, img, alice)
         FaceMetadataExportService(session).export_image(img.id)
 
+    lat, lon = read_exif_gps(jpg)
+    assert round(lat, 4) == 47.5
+    assert round(lon, 4) == 19.05
     with PilImage.open(jpg) as im:
-        after = piexif.load(im.info["exif"])
-    assert after["GPS"][piexif.GPSIFD.GPSLatitudeRef] == b"N"
-    assert after["GPS"][piexif.GPSIFD.GPSLatitude] == ((47, 1), (30, 1), (0, 1))
-    assert after["0th"][piexif.ImageIFD.DateTime] == b"2019:05:01 12:00:00"
+        assert im.getexif().get(0x0132) == "2019:05:01 12:00:00"
 
 
 # ---------------------------------------------------------------------------
@@ -525,3 +523,65 @@ def test_no_cancel_processes_all(db):
     # Progress reports the filename of the image being processed.
     names = {name for _, _, name in seen if name}
     assert names == {p.name for p in paths}
+
+
+# ---------------------------------------------------------------------------
+# piexif is optional — a machine without it must still get real EXIF
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def no_piexif(monkeypatch):
+    """Make ``import piexif`` fail, as it does on an install missing the package."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "piexif":
+            raise ImportError("piexif is not installed (simulated)")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.delitem(sys.modules, "piexif", raising=False)
+
+
+def test_exif_written_without_piexif(db, no_piexif):
+    """Regression: a missing piexif used to silently downgrade to a sidecar JSON."""
+    jpg = db / "nopiexif.jpg"
+    _write_jpeg(jpg)
+
+    with session_scope() as session:
+        alice = _make_person(session, "Alice")
+        img = _make_image(session, jpg)
+        _make_face(session, img, alice)
+        result = FaceMetadataExportService(session).export_image(img.id)
+
+    assert result.success
+    assert result.write_mode == meta.WRITE_MODE_EXIF_USER_COMMENT
+    assert not meta.sidecar_path_for(jpg).exists()
+
+    comment = _read_user_comment(jpg)
+    assert comment.startswith(b"ASCII\x00\x00\x00")
+    assert json.loads(comment[8:].decode("utf-8"))["faces"][0]["person_name"] == "Alice"
+
+    payload = meta.read_face_metadata(jpg)
+    assert payload["faces"][0]["person_name"] == "Alice"
+
+
+def test_existing_exif_preserved_without_piexif(db, no_piexif):
+    """Unrelated EXIF (camera make) survives the piexif-free write path."""
+    jpg = db / "keep_exif.jpg"
+    img_obj = PilImage.new("RGB", (60, 40), (10, 20, 30))
+    exif = img_obj.getexif()
+    exif[0x010F] = "TestCam"
+    img_obj.save(jpg, format="JPEG", exif=exif.tobytes())
+
+    with session_scope() as session:
+        alice = _make_person(session, "Alice")
+        image = _make_image(session, jpg)
+        _make_face(session, image, alice)
+        FaceMetadataExportService(session).export_image(image.id)
+
+    with PilImage.open(jpg) as im:
+        assert im.getexif().get(0x010F) == "TestCam"
+    assert meta.read_face_metadata(jpg)["faces"][0]["person_name"] == "Alice"

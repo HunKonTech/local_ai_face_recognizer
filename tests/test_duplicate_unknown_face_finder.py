@@ -401,3 +401,81 @@ def test_embedding_named_face_is_kept_as_reference(tmp_db):
     with session_scope() as session:
         assert session.get(Face, named.id) is not None
         assert session.get(Face, unknown.id) is None
+
+
+# ── Cross-identity intersecting pairs (issue #160) ────────────────────────────
+
+
+def test_partially_intersecting_unknown_and_named_needs_cross_identity(tmp_db):
+    """Boxes that only clip each other stay below the strict thresholds; the
+    looser cross-identity pass is what surfaces them."""
+    with session_scope() as session:
+        image = _add_image(session)
+        rozika = _add_person(session, "Rozika")
+        _add_face(session, image, (0, 0, 100, 100), rozika)
+        _add_face(session, image, (70, 0, 100, 100))
+
+    with session_scope() as session:
+        strict = DuplicateUnknownFaceFinder(session).find()
+    assert strict == []
+
+    with session_scope() as session:
+        loose = DuplicateUnknownFaceFinder(
+            session, iou_threshold=0.01, containment_threshold=0.05,
+            cross_identity=True,
+        ).find()
+    assert len(loose) == 1
+    assert loose[0].known_person_name == "Rozika"
+
+
+def test_intersecting_faces_of_two_unknown_clusters_are_listed(tmp_db):
+    with session_scope() as session:
+        image = _add_image(session)
+        u1 = _add_person(session, "Unknown 1", auto=True)
+        u2 = _add_person(session, "Unknown 2", auto=True)
+        _add_face(session, image, (0, 0, 100, 100), u1)
+        _add_face(session, image, (60, 0, 100, 100), u2)
+
+    with session_scope() as session:
+        finder = DuplicateUnknownFaceFinder(
+            session, iou_threshold=0.01, containment_threshold=0.05,
+            cross_identity=True,
+        )
+        matches = finder.find()
+        assert len(matches) == 1
+        # The victim is an unknown face, so deletion is allowed.
+        result = finder.delete_unknown_faces([matches[0].unknown_face_id])
+    assert result.deleted == 1
+
+
+def test_cross_identity_never_lists_two_named_faces(tmp_db):
+    with session_scope() as session:
+        image = _add_image(session)
+        alice = _add_person(session, "Alice")
+        bob = _add_person(session, "Bob")
+        _add_face(session, image, (0, 0, 100, 100), alice)
+        _add_face(session, image, (60, 0, 100, 100), bob)
+
+    with session_scope() as session:
+        matches = DuplicateUnknownFaceFinder(
+            session, iou_threshold=0.01, containment_threshold=0.05,
+            cross_identity=True,
+        ).find()
+
+    assert matches == []
+
+
+def test_non_touching_boxes_stay_unlisted_at_loosest_level(tmp_db):
+    with session_scope() as session:
+        image = _add_image(session)
+        alice = _add_person(session, "Alice")
+        _add_face(session, image, (0, 0, 100, 100), alice)
+        _add_face(session, image, (400, 400, 100, 100))
+
+    with session_scope() as session:
+        matches = DuplicateUnknownFaceFinder(
+            session, iou_threshold=0.01, containment_threshold=0.05,
+            cross_identity=True,
+        ).find()
+
+    assert matches == []

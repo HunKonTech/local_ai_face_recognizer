@@ -1504,6 +1504,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
 
     # ── Person details ───────────────────────────────────────────────────
     "person_info_title": {"en": "Person Info — {name}", "hu": "Személyadatok — {name}"},
+    "name_prefix":       {"en": "Name prefix:", "hu": "Név előtag:"},
     "last_name":         {"en": "Last name:", "hu": "Vezetéknév:"},
     "first_name":        {"en": "First name:", "hu": "Keresztnév:"},
     "second_name":       {"en": "Second name:", "hu": "Keresztnév 2:"},
@@ -1514,6 +1515,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "death_date":        {"en": "Death date:", "hu": "Halálozás ideje:"},
     "death_place":       {"en": "Death place:", "hu": "Halálozás helye:"},
     "notes":             {"en": "Notes:", "hu": "Egyéb megjegyzés:"},
+    "example_name_prefix": {"en": "e.g. Csicseri (optional)", "hu": "pl. Csicseri, Nagy-Ajtai (opcionális)"},
     "example_last_name": {"en": "e.g. Smith", "hu": "pl. Kovács"},
     "example_first_name": {"en": "e.g. John", "hu": "pl. János"},
     "example_second_name": {"en": "e.g. William (optional)", "hu": "pl. István (opcionális)"},
@@ -1662,6 +1664,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "face_tooltip":      {"en": "<b>{person}</b><br>Face #{id} · confidence {confidence:.2f}<br>Backend: {backend}<br>File: {file}",
                           "hu": "<b>{person}</b><br>Arc #{id} · konfidencia {confidence:.2f}<br>Backend: {backend}<br>Fájl: {file}"},
     "all_faces":         {"en": "All Faces", "hu": "Összes arc"},
+    "sidebar_only_unknown": {"en": "Only unknown", "hu": "Csak ismeretlenek"},
+    "sidebar_unknown_badge_tip": {
+        "en": "Unknown person, not named yet",
+        "hu": "Ismeretlen személy, még nincs elnevezve",
+    },
     "preview_empty":     {"en": "Click a face thumbnail to preview",
                           "hu": "Kattints egy arc bélyegképre az előnézethez"},
     "preview_tip":       {"en": "Click a face to select it\nRight-click for options\nClick empty area to zoom",
@@ -1728,9 +1735,6 @@ _STRINGS: Dict[str, Dict[str, str]] = {
 
     # ── Toolbar — short labels (no emoji) ────────────────────────────────
     "tb_export":              {"en": "Export",       "hu": "Export"},
-    "tb_tools_menu":          {"en": "Tools ▾",      "hu": "Eszközök ▾"},
-    "tb_merge_menu":          {"en": "Merge ▾",      "hu": "Összevonás ▾"},
-    "tb_system_menu":         {"en": "System ▾",     "hu": "Rendszer ▾"},
     "mb_file":                {"en": "File",         "hu": "Fájl"},
     "mb_scan":                {"en": "Scan",         "hu": "Szkennelés"},
     "mb_tools":               {"en": "Tools",        "hu": "Eszközök"},
@@ -2156,6 +2160,25 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "ibp_note_tooltip":     {"en": "Free-text note attached to this image",
                              "hu": "Szabad szöveges megjegyzés a képhez"},
 
+    # ── Image metadata dialog (face-recognition preview) ────────────────
+    "imeta_title":         {"en": "Image data", "hu": "Kép adatai"},
+    "imeta_btn":           {"en": "🏷 Image data", "hu": "🏷 Kép adatai"},
+    "imeta_btn_tip":       {
+        "en": "Set where and when this photo was taken",
+        "hu": "Add meg, hol és mikor készült a kép",
+    },
+    "imeta_place_hdr":     {"en": "Where was this photo taken?",
+                            "hu": "Hol készült a kép?"},
+    "imeta_place_current": {"en": "Current place: {name}", "hu": "Jelenlegi hely: {name}"},
+    "imeta_place_none":    {"en": "No place assigned", "hu": "Nincs hely hozzárendelve"},
+    "imeta_place_hint":    {
+        "en": "Pick a place from the list, or type a new name and press Enter to create it.",
+        "hu": "Válassz helyet a listából, vagy írj be egy új nevet és nyomj Entert a létrehozáshoz.",
+    },
+    "imeta_place_clear":   {"en": "Remove place", "hu": "Hely törlése"},
+    "imeta_save_error":    {"en": "Could not save the image data: {error}",
+                            "hu": "A kép adatai nem menthetők: {error}"},
+
     # ── EXIF date update button ─────────────────────────────────────────
     "ibp_update_exif_date_btn":  {"en": "Update EXIF date from photo date",
                                   "hu": "EXIF készítési dátum frissítése a kép dátuma alapján"},
@@ -2300,6 +2323,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "persons_col_name":       {"en": "Name", "hu": "Név"},
     "persons_col_family_code":{"en": "Family code", "hu": "Családi kód"},
     "persons_col_groups":     {"en": "Groups", "hu": "Társaságok"},
+    "persons_col_name_prefix":{"en": "Name prefix", "hu": "Név előtag"},
     "persons_col_last_name":  {"en": "Last name", "hu": "Vezetéknév"},
     "persons_col_first_name": {"en": "First name", "hu": "Keresztnév"},
     "persons_col_second_name":{"en": "Second name", "hu": "Második név"},
@@ -2500,14 +2524,12 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                        "mindkét változaton megjelennek."},
     "deoldified_sync_toggle":   {"en": "Automatically copy data between paired images",
                                  "hu": "Adatok automatikus átvétele a párképek közt"},
-    "deoldified_sync_toggle_tip": {"en": "When a deoldified pair is opened, copy faces and image "
-                                       "data from the side that has them into the empty side. "
-                                       "Only runs when exactly one side is empty; never "
-                                       "overwrites existing data.",
-                                 "hu": "Deoldified pár megnyitásakor az arcok és képadatok "
-                                       "átmásolása a kitöltött oldalról az üresbe. Csak akkor "
-                                       "fut, ha pontosan az egyik oldal üres; meglévő adatot "
-                                       "nem ír felül."},
+    "deoldified_sync_toggle_tip": {"en": "When a deoldified pair is opened, copy whatever the "
+                                       "colorized side is missing: faces, image data and object "
+                                       "tags. Existing data is never overwritten.",
+                                 "hu": "Deoldified pár megnyitásakor mindannak az átmásolása, "
+                                       "ami a színezett oldalról hiányzik: arcok, képadatok és "
+                                       "objektumjelölések. Meglévő adatot soha nem ír felül."},
     "ibp_deol_pair_lbl":        {"en": "View:",               "hu": "Nézet:"},
     "ibp_view_original_bw":     {"en": "Original B&W",        "hu": "Eredeti fekete-fehér"},
     "ibp_view_colorized":       {"en": "Colorized",            "hu": "Színezett változat"},
@@ -2519,19 +2541,22 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "ibp_deol_left":            {"en": "Left:",                "hu": "Bal:"},
     "ibp_deol_right":           {"en": "Right:",               "hu": "Jobb:"},
     "ibp_deol_bw_label":        {"en": "Black & white",        "hu": "Fekete-fehér"},
+    "ibp_deol_variant_missing": {"en": "Colorized version file is missing; showing black & white.",
+                                 "hu": "A színezett változat fájlja hiányzik; a fekete-fehér nézet látható."},
     "ibp_deol_sync":            {"en": "Copy data from pair",  "hu": "Adatok átvétele a párról"},
-    "ibp_deol_sync_tip":        {"en": "Copy faces and image data from the paired image into "
-                                       "the empty one. Only runs when exactly one of the two "
-                                       "images has data; never overwrites existing data.",
-                                 "hu": "Arcok és képadatok másolása a párképről az üres képbe. "
-                                       "Csak akkor fut le, ha a kettő közül pontosan az egyiken "
-                                       "van adat; meglévő adatot soha nem ír felül."},
-    "ibp_deol_sync_done":       {"en": "Copied {faces} face(s) and {fields} metadata field(s).",
-                                 "hu": "{faces} arc és {fields} metaadat-mező átmásolva."},
-    "ibp_deol_sync_skipped":    {"en": "Nothing copied: both images already have data, or both "
-                                       "are empty.",
-                                 "hu": "Nem történt másolás: mindkét képen van adat, vagy "
-                                       "mindkettő üres."},
+    "ibp_deol_sync_tip":        {"en": "Copy whatever the paired image is missing: faces, image "
+                                       "data and object tags. Existing data is never overwritten.",
+                                 "hu": "Minden átmásolása, ami a párképről hiányzik: arcok, "
+                                       "képadatok és objektumjelölések. Meglévő adatot soha nem "
+                                       "ír felül."},
+    "ibp_deol_sync_done":       {"en": "Copied {faces} new face(s), completed {updated} face(s), "
+                                       "moved {objects} object tag(s) and copied {fields} "
+                                       "metadata field(s).",
+                                 "hu": "{faces} új arc átmásolva, {updated} arc kiegészítve, "
+                                       "{objects} objektumjelölés áthelyezve és {fields} "
+                                       "metaadat-mező átmásolva."},
+    "ibp_deol_sync_skipped":    {"en": "Nothing new to copy: the pair is already in sync.",
+                                 "hu": "Nincs átmásolható új adat: a pár már szinkronban van."},
     "ibp_deol_sync_no_pair":    {"en": "No paired image found for the current image.",
                                  "hu": "Nincs párkép a jelenlegi képhez."},
 
@@ -2987,40 +3012,29 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         {"en": "Rebuild Unknown Identities",
          "hu": "Unknown személyek újraépítése"},
     "scanModes.resetUnknowns.description":
-        {"en": "Completely deletes every automatically created 'Unknown N' person and makes "
-               "their faces unassigned again. Face boxes and embeddings are preserved. "
-               "Afterwards, unassigned faces are re-clustered into fresh Unknown groups "
-               "(fast -- no image scanning or model training).",
-         "hu": "Teljesen törli az összes automatikusan létrehozott 'Unknown N' személyt, és az "
-               "arcaikat újra hozzárendeletlen állapotba teszi. Az arckeretek és embeddingek "
-               "megmaradnak. Ezután a hozzárendeletlen arcok újra klaszterezésre kerülnek "
-               "friss Unknown csoportokba (gyors - nem fut újra a detektálás vagy a tanítás)."} ,
+        {"en": "Deletes every automatically created 'Unknown N' person, makes their faces "
+               "unassigned again and re-clusters them into fresh Unknown groups "
+               "(fast -- no image scanning or model training). Face boxes and embeddings "
+               "are preserved unless you tick the face-deletion step below. Named and "
+               "protected people are never touched.",
+         "hu": "Törli az összes automatikusan létrehozott 'Unknown N' személyt, az arcaikat "
+               "újra hozzárendeletlen állapotba teszi, majd friss Unknown csoportokba "
+               "klaszterezi őket (gyors - nem fut újra a detektálás vagy a tanítás). Az "
+               "arckeretek és embeddingek megmaradnak, hacsak be nem jelöli az alábbi "
+               "arctörlési lépést. Az elnevezett és védett személyeket soha nem érinti."} ,
     "scanModes.resetUnknowns.startButton":
         {"en": "Rebuild Unknown Identities",
          "hu": "Unknown személyek újraépítése"},
     "scanModes.resetUnknowns.warning":
         {"en": "Auto-created Unknown groups will be deleted and rebuilt",
          "hu": "Az automatikus Unknown csoportok törlődnek és újraépülnek"},
-    "reset_unknowns_title":
-        {"en": "Rebuild Unknown Identities",
-         "hu": "Unknown személyek újraépítése"},
-    "reset_unknowns_msg":
-        {"en": "Delete every automatically created 'Unknown N' person and run recognition again?\n\n"
-               "Named people, face boxes and embeddings will be preserved.",
-         "hu": "Törli az összes automatikusan létrehozott „Unknown N” személyt, majd újra "
-               "futtatja a felismerést?\n\n"
-               "Az elnevezett személyek, arckeretek és embeddingek megmaradnak."},
     "reset_unknowns_status":
-        {"en": "Rebuilding Unknown identities: {persons} person(s) deleted, {faces} face(s) reset",
-         "hu": "Unknown személyek újraépítése: {persons} személy törölve, {faces} arc alaphelyzetbe állítva"},
+        {"en": "Rebuilding Unknown identities: {persons} person(s) deleted, "
+               "{faces} face(s) reset, {deleted} face(s) deleted",
+         "hu": "Unknown személyek újraépítése: {persons} személy törölve, "
+               "{faces} arc alaphelyzetbe állítva, {deleted} arc törölve"},
 
-    # Reset Unknown Persons Dialog
-    "resetUnknownOptions.title":
-        {"en": "Configure Unknown Persons Reset",
-         "hu": "Unknown személyek visszaállításának konfigurálása"},
-    "resetUnknownOptions.description":
-        {"en": "Choose which steps to perform when rebuilding Unknown identities:",
-         "hu": "Válassza ki, mely lépéseket szeretné végrehajtani az Unknown személyek újraépítéséhez:"},
+    # Reset Unknown Persons options (inline in the Scan & Maintenance dialog)
     "resetUnknownOptions.deletePersons":
         {"en": "Delete auto-created 'Unknown N' persons",
          "hu": "Automatikusan létrehozott 'Unknown N' személyek törlése"},
@@ -3034,44 +3048,60 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         {"en": "Remove person assignments, allowing faces to be re-identified",
          "hu": "A személyhozzárendelések eltávolítása, lehetővé téve az arcok újra azonosítását"},
     "resetUnknownOptions.deleteFaceData":
-        {"en": "Delete face detection data (embeddings, bounding boxes)",
-         "hu": "Arcfelismerési adatok törlése (beágyazások, határoló keretek)"},
+        {"en": "Delete the Unknown persons' faces entirely",
+         "hu": "Az Unknown személyek arcainak teljes törlése"},
     "resetUnknownOptions.deleteFaceDataTooltip":
-        {"en": "⚠ Advanced: Removes embeddings and bounding boxes. Only use if faces need full re-detection.",
-         "hu": "⚠ Haladó: Eltávolítja az embeddingeket és kereteket. Csak akkor használja, ha az arcok teljes újra-detektálása szükséges."},
+        {"en": "⚠ Advanced: permanently deletes the face records themselves — box, embedding "
+               "and crop file. The faces disappear from the images and only a full "
+               "re-detection scan can bring them back. Named and protected people are "
+               "never touched.",
+         "hu": "⚠ Haladó: véglegesen törli magukat az arc rekordokat — keret, embedding és "
+               "kivágott kép. Az arcok eltűnnek a képekről, és csak egy teljes újra-detektálás "
+               "hozza vissza őket. Az elnevezett és védett személyeket nem érinti."},
     "resetUnknownOptions.rebuildClusters":
         {"en": "Rebuild Unknown clusters after reset",
          "hu": "Unknown klaszterek újraépítése a törlés után"},
     "resetUnknownOptions.rebuildClustersTooltip":
         {"en": "After deleting Unknown persons, automatically re-cluster all unassigned faces into new Unknown groups (fast -- no image scanning or model training)",
          "hu": "Az Unknown személyek törlése után automatikusan újra klaszterezi a nem hozzárendelt arcokat új Unknown csoportokba (gyors - nem fut újra a detektálás vagy a tanítás)"},
-    "resetUnknownOptions.reset":
-        {"en": "Reset to Defaults",
-         "hu": "Alapértelmezett értékek visszaállítása"},
-    "resetUnknownOptions.ok":
-        {"en": "OK",
-         "hu": "OK"},
-    "resetUnknownOptions.cancel":
-        {"en": "Cancel",
-         "hu": "Mégse"},
 
     # overlapping question-mark cleanup
     "scanModes.overlapCleanup.title":
-        {"en": "Find Overlapping ? Boxes",
-         "hu": "Átfedő ? keretek keresése"},
+        {"en": "Find Overlapping / Intersecting ? Boxes",
+         "hu": "Átfedő / metsző ? keretek keresése"},
     "scanModes.overlapCleanup.description":
         {"en": "Searches the current database for unassigned question-mark face boxes "
-               "that significantly overlap already named faces. It only lists suspicious "
+               "that overlap already named faces. It only lists suspicious "
                "candidates first; nothing is deleted until you review the list, keep the "
                "checkboxes you want, and confirm deletion.",
          "hu": "Megkeresi az adatbázisban azokat a kérdőjeles, személyhez nem rendelt "
-               "arckereteket, amelyek jelentősen átfednek egy már elnevezett arccal. "
+               "arckereteket, amelyek átfednek vagy metszenek egy másik arckeretet. "
                "Először csak listázza a gyanús találatokat; semmit nem töröl addig, "
                "amíg át nem nézed a listát, ki nem választod a törlendőket, és meg "
                "nem erősíted a törlést."},
+    "scanModes.overlapCleanup.sensitivity":
+        {"en": "Sensitivity:", "hu": "Érzékenység:"},
+    "scanModes.overlapCleanup.sensitivityTip":
+        {"en": "The strict level only lists heavily overlapping boxes. The looser "
+               "levels also list boxes that merely intersect, and boxes belonging to "
+               "two different identities — more finds, more false candidates to skip "
+               "in the review list.",
+         "hu": "A szigorú szint csak az erősen átfedő kereteket listázza. A lazább "
+               "szintek a csak metsző kereteket is megtalálják, és a két különböző "
+               "személyhez tartozó párokat is — több találat, de több téves jelölt is "
+               "az átnézendő listán."},
+    "overlapSensitivity.strict":
+        {"en": "Strict — heavy overlap only (default)",
+         "hu": "Szigorú — csak erős átfedés (alapértelmezett)"},
+    "overlapSensitivity.medium":
+        {"en": "Medium — partial overlap, across identities too",
+         "hu": "Közepes — részleges átfedés, más személlyel is"},
+    "overlapSensitivity.any":
+        {"en": "Loose — every intersecting box pair",
+         "hu": "Laza — minden metsző keretpár"},
     "scanModes.overlapCleanup.startButton":
         {"en": "Find Overlapping ? Boxes",
-         "hu": "Átfedő ? keretek keresése"},
+         "hu": "Átfedő / metsző keretek keresése"},
     "scanModes.overlapCleanup.warning":
         {"en": "Review step included — known named faces are never deleted",
          "hu": "Átnézési lépéssel — az ismert, elnevezett arcokat soha nem törli"},
@@ -3798,6 +3828,62 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "object_ctx_delete_occurrence": {"en": "Delete object marker here",
                              "hu": "Objektum-jelölő törlése"},
 
+    # ── Object matching: same region found in other images (#164) ────────────
+    "object_match_search":  {"en": "🔍 Search in library",   "hu": "🔍 Keresés a könyvtárban"},
+    "object_match_search_tip": {
+        "en": "Look for this same picture region in other images, at any size",
+        "hu": "Ugyanennek a képrészletnek a keresése más képeken, bármilyen méretben"},
+    "object_ctx_find_similar": {"en": "Search on other images …",
+                             "hu": "Keresés más képeken …"},
+    "object_match_scope":    {"en": "Where to search",       "hu": "Hol keressen"},
+    "object_match_scope_library": {"en": "Whole library",    "hu": "Teljes könyvtár"},
+    "object_match_scope_folder": {"en": "Current folder only",
+                             "hu": "Csak az aktuális mappa"},
+    "object_match_sensitivity": {"en": "Sensitivity",        "hu": "Érzékenység"},
+    "object_match_sensitivity_tip": {
+        "en": "Higher finds more but proposes more wrong hits too",
+        "hu": "Magasabb érték többet talál, de több téves találatot is javasol"},
+    "object_match_auto_after_tag": {
+        "en": "Search automatically after tagging a new object frame",
+        "hu": "Új objektum-keret bejelölése után automatikusan keressen"},
+    "object_match_running":  {"en": "Searching for object …", "hu": "Objektum keresése …"},
+    "object_match_no_reference": {
+        "en": "This object has no frame yet. Draw a rectangle around it on an "
+              "image first, then the search has something to look for.",
+        "hu": "Ehhez az objektumhoz még nincs keret. Húzz köré egy téglalapot "
+              "egy képen, akkor lesz mit keresnie."},
+    "object_match_none_found": {"en": "No further images found for this object.",
+                             "hu": "Nem található több kép ehhez az objektumhoz."},
+    "object_match_found_n":  {"en": "{n} possible hit(s) found — click to review",
+                             "hu": "{n} lehetséges találat — kattints az áttekintéshez"},
+
+    # Review dialog
+    "object_match_review_title": {"en": "Object hits for review",
+                             "hu": "Objektum-találatok áttekintése"},
+    "object_match_review_intro": {
+        "en": "Each hit is the same picture region found somewhere else. "
+              "Accept to mark the object there; reject to never propose it again.",
+        "hu": "Minden találat ugyanaz a képrészlet, máshol megtalálva. "
+              "Elfogadás esetén ott is megjelölődik az objektum; elutasítás "
+              "esetén többé nem ajánlja fel."},
+    "object_match_accept":   {"en": "✔ Accept",              "hu": "✔ Elfogadás"},
+    "object_match_reject":   {"en": "✘ Reject",              "hu": "✘ Elutasítás"},
+    "object_match_accept_above": {"en": "Accept all above",  "hu": "Összes elfogadása efölött"},
+    "object_match_score":    {"en": "Match",                 "hu": "Egyezés"},
+    "object_match_size":     {"en": "Size",                  "hu": "Méret"},
+    "object_match_empty":    {"en": "Nothing left to review.",
+                             "hu": "Nincs több áttekintendő találat."},
+    "object_match_done":     {"en": "{accepted} accepted, {rejected} rejected.",
+                             "hu": "{accepted} elfogadva, {rejected} elutasítva."},
+
+    # Batch mode in the Scan & Maintenance dialog
+    "scan_object_matching":  {"en": "Object matching",       "hu": "Objektum-felismerés"},
+    "scan_object_matching_desc": {
+        "en": "Look for every tagged object across the whole library and "
+              "collect the hits for review.",
+        "hu": "Minden megjelölt objektum keresése az egész könyvtárban, a "
+              "találatok áttekintésre gyűjtve."},
+
     # ── Background tasks / Task Manager ───────────────────────────────────────
     "tasks_btn":            {"en": "⚙ Tasks",                "hu": "⚙ Feladatok"},
     "tasks_title":          {"en": "Task Manager",           "hu": "Feladatkezelő"},
@@ -3916,6 +4002,102 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                              "hu": "{used} / {total} MB ({pct:.0f}%)"},
     "perf_ram_value_app":   {"en": "{used} MB ({pct:.1f}%)",
                              "hu": "{used} MB ({pct:.1f}%)"},
+
+    # ── Face image export (#175) — faces of an image into separate files ──
+    "fexp_title":           {"en": "Export faces as separate images",
+                             "hu": "Arcok exportálása külön képekbe"},
+    "fexp_header":          {"en": "{images} image(s), {faces} face(s) to export.",
+                             "hu": "{images} kép, {faces} exportálandó arc."},
+    "fexp_pattern_group":   {"en": "File name pattern",
+                             "hu": "Fájlnév minta"},
+    "fexp_token_hint":      {"en": "Use #Token# placeholders. A missing value is "
+                                   "dropped and the extra separators are merged.",
+                             "hu": "Használj #Token# helyettesítőket. A hiányzó "
+                                   "érték kimarad, a fölös elválasztók összeolvadnak."},
+    "fexp_token_table_tip": {"en": "Double-click a row to insert the token.",
+                             "hu": "Duplaklikk a sorra a token beszúrásához."},
+    "fexp_col_token":       {"en": "Token", "hu": "Token"},
+    "fexp_col_meaning":     {"en": "Meaning", "hu": "Jelentés"},
+    "fexp_preview":         {"en": "Preview:", "hu": "Előnézet:"},
+    "fexp_preview_empty":   {"en": "No face matches the current settings.",
+                             "hu": "A jelenlegi beállításokkal nincs egyetlen arc sem."},
+    "fexp_unknown_tokens":  {"en": "Unknown token(s): {tokens} — they will be dropped.",
+                             "hu": "Ismeretlen token(ek): {tokens} — ezek kimaradnak."},
+    "fexp_crop_group":      {"en": "Cropping", "hu": "Kivágás"},
+    "fexp_mode_original":   {"en": "Original resolution",
+                             "hu": "Eredeti felbontás"},
+    "fexp_mode_original_tip": {"en": "The face box plus the margin, cut from the "
+                                     "original photo without resizing.",
+                               "hu": "Az arc kerete a margóval, az eredeti "
+                                     "fotóból, átméretezés nélkül."},
+    "fexp_mode_square":     {"en": "Square, fixed size",
+                             "hu": "Négyzetes, fix méret"},
+    "fexp_mode_square_tip": {"en": "Aspect-preserving square crop scaled to the "
+                                   "given edge length.",
+                             "hu": "Arányőrző négyzetes kivágás a megadott "
+                                   "élhosszra méretezve."},
+    "fexp_square_size":     {"en": "Edge length:", "hu": "Élhossz:"},
+    "fexp_margin":          {"en": "Margin around the face:",
+                             "hu": "Margó az arc körül:"},
+    "fexp_quality":         {"en": "JPEG quality:", "hu": "JPEG minőség:"},
+    "fexp_faces_group":     {"en": "Which faces", "hu": "Mely arcok"},
+    "fexp_include_unknown": {"en": "Include faces without a person",
+                             "hu": "Személyhez nem kötött arcok is"},
+    "fexp_skip_excluded":   {"en": "Skip excluded and low-quality faces",
+                             "hu": "Kizárt és gyenge minőségű arcok kihagyása"},
+    "fexp_single_face_note": {"en": "Only the selected face will be exported.",
+                              "hu": "Csak a kijelölt arc kerül exportálásra."},
+    "fexp_dest_group":      {"en": "Destination folder", "hu": "Célmappa"},
+    "fexp_dest_placeholder": {"en": "No folder selected", "hu": "Nincs mappa kiválasztva"},
+    "fexp_need_folder":     {"en": "Choose a destination folder first.",
+                             "hu": "Először válassz célmappát."},
+    "fexp_no_faces":        {"en": "There is no face to export with these settings.",
+                             "hu": "Ezekkel a beállításokkal nincs exportálandó arc."},
+    "fexp_start":           {"en": "Export", "hu": "Exportálás"},
+    "fexp_done_title":      {"en": "Faces exported", "hu": "Arcok exportálva"},
+    "fexp_done_body":       {"en": "{written} file(s) written, {skipped} skipped.\n{folder}",
+                             "hu": "{written} fájl kiírva, {skipped} kihagyva.\n{folder}"},
+    "task_face_image_export": {"en": "Face image export",
+                               "hu": "Arcképek exportálása"},
+    "fexp_tok_family_code": {"en": "Family code of the person",
+                             "hu": "A személy családi kódja"},
+    "fexp_tok_external_family_code": {"en": "External family code of the person",
+                                      "hu": "A személy külső családi kódja"},
+    "fexp_tok_name":        {"en": "Full displayed name",
+                             "hu": "Teljes megjelenített név"},
+    "fexp_tok_name_prefix": {"en": "Name prefix (e.g. Csicseri)",
+                             "hu": "Név előtag (pl. Csicseri)"},
+    "fexp_tok_last_name":   {"en": "Last name", "hu": "Vezetéknév"},
+    "fexp_tok_first_name":  {"en": "First name", "hu": "Keresztnév"},
+    "fexp_tok_nickname":    {"en": "Nickname", "hu": "Becenév"},
+    "fexp_tok_date":        {"en": "Photo date (e.g. 2023.06.17, kb. 1920)",
+                             "hu": "A kép dátuma (pl. 2023.06.17, kb. 1920)"},
+    "fexp_tok_year":        {"en": "Year of the photo date",
+                             "hu": "A kép dátumának éve"},
+    "fexp_tok_source_name": {"en": "Name of the source image, without extension",
+                             "hu": "A forrás kép neve, kiterjesztés nélkül"},
+    "fexp_tok_index":       {"en": "Index of the face within the image (1, 2, 3…)",
+                             "hu": "Az arc sorszáma a képen belül (1, 2, 3…)"},
+    "fexp_tok_face_id":     {"en": "Database id of the face",
+                             "hu": "Az arc adatbázis-azonosítója"},
+    "fexp_tok_image_id":    {"en": "Database id of the image",
+                             "hu": "A kép adatbázis-azonosítója"},
+    "ibp_ctx_export_faces_one": {"en": "Export faces as separate images…",
+                                 "hu": "Arcok exportálása külön képekbe…"},
+    "ibp_ctx_export_faces_many": {"en": "Export faces of {n} images as separate images…",
+                                  "hu": "{n} kép arcainak exportálása külön képekbe…"},
+    "ibp_ctx_export_this_face": {"en": "Export this face as an image…",
+                                 "hu": "Ez az arc exportálása képbe…"},
+    "export_faces_group":   {"en": "Faces of the current image",
+                             "hu": "Az aktuális kép arcai"},
+    "export_faces_desc":    {"en": "Export the faces detected on the currently "
+                                   "open image into separate image files, with a "
+                                   "file name pattern.",
+                             "hu": "A most megnyitott képen felismert arcok "
+                                   "exportálása külön képfájlokba, fájlnév minta "
+                                   "szerint."},
+    "export_faces_need_image_tip": {"en": "Open an image first.",
+                                    "hu": "Először nyiss meg egy képet."},
 }
 
 

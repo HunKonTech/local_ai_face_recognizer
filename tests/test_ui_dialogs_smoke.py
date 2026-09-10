@@ -160,6 +160,14 @@ def _make_family_code_scheme_dialog(cfg: AppConfig) -> QWidget:
 _register("family_code_scheme_dialog", _make_family_code_scheme_dialog)
 
 _register(
+    "face_image_export_dialog",
+    lambda _cfg: __import__(
+        "app.ui.dialogs.face_image_export_dialog",
+        fromlist=["FaceImageExportDialog"],
+    ).FaceImageExportDialog([]),
+)
+
+_register(
     "gdrive_settings_tab",
     lambda _cfg: __import__(
         "app.ui.dialogs.gdrive_settings_tab",

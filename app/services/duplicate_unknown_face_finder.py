@@ -21,6 +21,41 @@ DEFAULT_OVERLAP_IOU_THRESHOLD = 0.35
 # when this fraction of the *smaller* box lies inside the other box.
 DEFAULT_CONTAINMENT_THRESHOLD = 0.80
 
+
+@dataclass(frozen=True)
+class OverlapSensitivity:
+    """One preset of the geometric overlap search.
+
+    *iou* / *containment* are the two thresholds a pair of boxes must clear to
+    count as overlapping. *cross_identity* additionally enables pass 3, which
+    pairs boxes belonging to two *different* identities (two Unknown clusters,
+    or an Unknown and a named face) — the case the strict presets miss when the
+    two boxes only clip each other's edge.
+    """
+
+    key: str
+    iou: float
+    containment: float
+    cross_identity: bool
+
+
+# Ordered loosest-last; the UI renders them in this order.
+OVERLAP_SENSITIVITIES: tuple[OverlapSensitivity, ...] = (
+    OverlapSensitivity("strict", DEFAULT_OVERLAP_IOU_THRESHOLD,
+                       DEFAULT_CONTAINMENT_THRESHOLD, False),
+    OverlapSensitivity("medium", 0.15, 0.50, True),
+    OverlapSensitivity("any", 0.01, 0.05, True),
+)
+DEFAULT_OVERLAP_SENSITIVITY = "strict"
+
+
+def overlap_sensitivity(key: str | None) -> OverlapSensitivity:
+    """Return the preset for *key*, falling back to the strict default."""
+    for preset in OVERLAP_SENSITIVITIES:
+        if preset.key == key:
+            return preset
+    return OVERLAP_SENSITIVITIES[0]
+
 # Matches common placeholder/unknown name patterns (case-insensitive, trimmed):
 #   "?", "??", "Unknown", "Unknown 96", "Unknown_96", "unknown",
 #   "Ismeretlen", "Ismeretlen 5", "ismeretlen_3", etc.
@@ -81,10 +116,12 @@ class DuplicateUnknownFaceFinder:
         session: Session,
         iou_threshold: float = DEFAULT_OVERLAP_IOU_THRESHOLD,
         containment_threshold: float = DEFAULT_CONTAINMENT_THRESHOLD,
+        cross_identity: bool = False,
     ) -> None:
         self._session = session
         self._iou_threshold = iou_threshold
         self._containment_threshold = containment_threshold
+        self._cross_identity = cross_identity
         self.images_examined: int = 0
         # Face IDs that were flagged as same-person duplicates; may be deleted
         # even if _is_unknown() returns False for them.
@@ -186,12 +223,49 @@ class DuplicateUnknownFaceFinder:
                         reported_unknown_ids.add(unk.id)
                         self._same_person_duplicate_ids.add(unk.id)
 
+            # ── Pass 3: intersecting boxes of two *different* identities ──────
+            # Passes 1 and 2 only pair an unknown with a *named* face, or two
+            # boxes of one identity. A box shared between two different Unknown
+            # clusters — or clipping a named face by less than the strict
+            # thresholds — falls through both. This pass closes that gap; it is
+            # opt-in because at loose thresholds two genuinely adjacent people
+            # can clip each other's boxes.
+            if not self._cross_identity:
+                continue
+            for i, fa in enumerate(visible_faces):
+                for fb in visible_faces[i + 1:]:
+                    key = self._overlap_score(fa, fb)
+                    if key is None:
+                        continue
+                    keeper, victim = self._pick_victim(fa, fb)
+                    if victim is None or victim.id in reported_unknown_ids:
+                        continue
+                    person_name = keeper.person.name if keeper.person else ""
+                    matches.append(
+                        OverlappingUnknownFaceMatch(
+                            image_id=image.id,
+                            image_path=image.file_path,
+                            image_relative_path=image.relative_path,
+                            unknown_face_id=victim.id,
+                            known_face_id=keeper.id,
+                            known_person_name=person_name,
+                            overlap=key[0],
+                            unknown_bbox=_bbox_tuple(victim),
+                            known_bbox=_bbox_tuple(keeper),
+                        )
+                    )
+                    reported_unknown_ids.add(victim.id)
+
         log.info(
             "Overlapping face search: examined %d image(s), found %d candidate(s) "
-            "(%d same-person duplicates)",
+            "(%d same-person duplicates; iou>=%.2f, containment>=%.2f, "
+            "cross_identity=%s)",
             self.images_examined,
             len(matches),
             len(self._same_person_duplicate_ids),
+            self._iou_threshold,
+            self._containment_threshold,
+            self._cross_identity,
         )
         return matches
 

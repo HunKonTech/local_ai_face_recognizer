@@ -63,20 +63,21 @@ COL_THUMB = 1
 COL_NAME = 2
 COL_FAMILY_CODE = 3
 COL_GROUPS = 4
-COL_LAST_NAME = 5
-COL_FIRST_NAME = 6
-COL_SECOND_NAME = 7
-COL_NICKNAME = 8
-COL_MARRIED_NAME = 9
-COL_GENDER = 10
-COL_BIRTH_PLACE = 11
-COL_BIRTH_DATE = 12
-COL_DEATH_PLACE = 13
-COL_DEATH_DATE = 14
-COL_NOTES = 15
-COL_AUTO_NAMED = 16
-COL_PROTECTED = 17
-_COL_COUNT = 18
+COL_NAME_PREFIX = 5
+COL_LAST_NAME = 6
+COL_FIRST_NAME = 7
+COL_SECOND_NAME = 8
+COL_NICKNAME = 9
+COL_MARRIED_NAME = 10
+COL_GENDER = 11
+COL_BIRTH_PLACE = 12
+COL_BIRTH_DATE = 13
+COL_DEATH_PLACE = 14
+COL_DEATH_DATE = 15
+COL_NOTES = 16
+COL_AUTO_NAMED = 17
+COL_PROTECTED = 18
+_COL_COUNT = 19
 
 
 class _NumericItem(QTableWidgetItem):
@@ -368,6 +369,7 @@ class PersonsPanel(QWidget):
             t("persons_col_name"),
             t("persons_col_family_code"),
             t("persons_col_groups"),
+            t("persons_col_name_prefix"),
             t("persons_col_last_name"),
             t("persons_col_first_name"),
             t("persons_col_second_name"),
@@ -476,6 +478,7 @@ class PersonsPanel(QWidget):
             COL_NAME: s.name,
             COL_FAMILY_CODE: s.family_code or "",
             COL_GROUPS: ", ".join(s.groups),
+            COL_NAME_PREFIX: s.name_prefix or "",
             COL_LAST_NAME: s.last_name or "",
             COL_FIRST_NAME: s.first_name or "",
             COL_SECOND_NAME: s.second_name or "",
@@ -713,6 +716,7 @@ class PersonsPanel(QWidget):
                     gender=dlg.gender(),
                     family_code=dlg.family_code(),
                     external_family_code=dlg.external_family_code(),
+                    name_prefix=dlg.name_prefix(),
                     last_name=dlg.last_name(),
                     first_name=dlg.first_name(),
                     second_name=dlg.second_name(),

@@ -178,6 +178,27 @@ def test_drag_while_not_in_compare_only_records_split(db, qtbot):
     assert panel._deol_split == 72
 
 
+def test_single_colorized_view_falls_back_to_bw_when_variant_missing(db, qtbot, tmp_path):
+    """A dead colorized path must not freeze the panel — show B&W instead."""
+    bw_path = tmp_path / "bw.jpg"
+    save_image_bgr(bw_path, np.zeros((10, 20, 3), dtype=np.uint8))
+
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._current_path = str(bw_path)
+    panel._deol_pair_orig_id = None  # current tree image IS the B&W original
+    panel._deol_pair_color_path = str(tmp_path / "gone-deoldified (artistic).jpg")
+    panel._deol_viewing_color = True
+
+    panel._apply_single_view(True, reset_zoom=False)
+
+    assert panel._deol_viewing_color is False
+    assert panel._deol_mode == "bw"
+    assert panel._btn_view_bw.isChecked() is True
+    assert panel._btn_view_color.isChecked() is False
+    assert panel._orig_img_bgr is not None
+
+
 def test_label_compare_divider_x_requires_pixmap(db, qtbot):
     panel = ImageBrowserPanel(config=None)
     qtbot.addWidget(panel)
@@ -188,3 +209,53 @@ def test_label_compare_divider_x_requires_pixmap(db, qtbot):
     assert label._compare is True
     label.set_compare_mode(False)
     assert label._compare is False
+
+
+def test_opened_colorized_file_wins_over_remembered_bw(db, qtbot):
+    """Clicking a '-deoldified' file shows it in colour even after choosing B&W."""
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._deol_group = [ComparisonMember(1, "bw.jpg", "", True),
+                         ComparisonMember(2, "bw-deoldified.jpg", "deoldified", False)]
+    panel._deol_mode = "bw"          # user last looked at black and white
+    panel._deol_opened_is_color = True  # but the tree selection is colorized
+
+    panel._deol_apply_remembered_mode()
+
+    assert panel._deol_mode == "color"
+
+
+def test_opened_bw_file_wins_over_remembered_color(db, qtbot):
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._deol_group = [ComparisonMember(1, "bw.jpg", "", True),
+                         ComparisonMember(2, "bw-deoldified.jpg", "deoldified", False)]
+    panel._deol_mode = "color"
+    panel._deol_opened_is_color = False
+
+    panel._deol_apply_remembered_mode()
+
+    assert panel._deol_mode == "bw"
+
+
+def test_compare_mode_survives_opening_another_image(db, qtbot, tmp_path):
+    """Compare is a property of the pair, so it stays on across navigation."""
+    bw_path = tmp_path / "bw.jpg"
+    color_path = tmp_path / "bw-deoldified.jpg"
+    save_image_bgr(bw_path, np.zeros((10, 20, 3), dtype=np.uint8))
+    save_image_bgr(color_path, np.full((10, 20, 3), 255, dtype=np.uint8))
+
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._deol_mode = "compare"
+    panel._deol_opened_is_color = True
+    panel._deol_group = [
+        ComparisonMember(1, str(bw_path), "", True),
+        ComparisonMember(2, str(color_path), "deoldified", False),
+    ]
+    panel._deol_left_idx, panel._deol_right_idx = 0, 1
+
+    panel._deol_apply_remembered_mode()
+
+    assert panel._deol_mode == "compare"
+    assert panel._deol_compare is True

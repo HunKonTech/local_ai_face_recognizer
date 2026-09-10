@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QIcon
@@ -17,7 +18,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTabWidget,
     QToolBar,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -37,7 +36,11 @@ from app.db.database import ensure_unknown_person, init_db, session_scope
 from app.db.models import Face, Image, Person
 from app.logging_setup import QLogHandler
 from app.paths import app_icon_path
-from app.services.duplicate_unknown_face_finder import DuplicateUnknownFaceFinder
+from app.services.duplicate_unknown_face_finder import (
+    DEFAULT_OVERLAP_SENSITIVITY,
+    DuplicateUnknownFaceFinder,
+    overlap_sensitivity,
+)
 from app.services.identity_service import BulkReassignResult, IdentityService
 from app.services.unknown_merge_service import UnknownMergeService
 from app.ui.dialogs.export_dialog import ExportDialog
@@ -106,6 +109,7 @@ class MainWindow(QMainWindow):
         # The scan / AI pipeline runs as a Task Manager task; these hold the
         # live task handle and its worker (kept alive while it runs).
         self._active_pipeline_task = None
+        self._object_search_task = None
         self._active_pipeline_worker = None
         self._current_person_id: Optional[int] = None
         self._current_face_id: Optional[int] = None
@@ -214,7 +218,6 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         self._build_menu_bar()
         self._build_toolbar()
-        self._wire_menu_bar_actions()
         self._build_central()
         self._build_log_dock()
         self._build_status_bar()
@@ -237,11 +240,39 @@ class MainWindow(QMainWindow):
         )
 
         # ── Eszközök ──────────────────────────────────────────────────────
-        # Actions are created in _build_toolbar(); wired here after that call.
-        # We defer population to _wire_menu_bar_actions() called at end of _build_ui.
         self._mb_tools_menu = mb.addMenu("")
+        self._export_action = self._mb_tools_menu.addAction("", self._on_open_export)
+        self._no_face_action = self._mb_tools_menu.addAction(
+            "", self._on_no_face_images
+        )
+
+        # ── Összevonás ────────────────────────────────────────────────────
         self._mb_merge_menu = mb.addMenu("")
+        self._suggestions_action = self._mb_merge_menu.addAction(
+            "", self._on_show_suggestions
+        )
+        self._suggestions_action.setToolTip(t("suggestions_tip"))
+        self._amerge_action = self._mb_merge_menu.addAction(
+            "", self._on_open_amerge_review
+        )
+
+        # ── Rendszer ──────────────────────────────────────────────────────
         self._mb_system_menu = mb.addMenu("")
+        self._settings_action = self._mb_system_menu.addAction("", self._on_settings)
+        self._tasks_action = self._mb_system_menu.addAction(
+            "", self._on_open_task_manager
+        )
+        self._mb_system_menu.addSeparator()
+        self._gdrive_action = self._mb_system_menu.addAction(
+            "", self._on_toggle_drive_project
+        )
+        self._gdrive_action.setVisible(False)
+        self._mb_system_menu.addSeparator()
+        self._log_action = self._mb_system_menu.addAction(
+            "", self._on_log_action_toggled
+        )
+        self._log_action.setCheckable(True)
+        self._log_action.setChecked(True)
 
         # ── Debug ─────────────────────────────────────────────────────────
         self._mb_debug_menu = mb.addMenu("")
@@ -255,21 +286,6 @@ class MainWindow(QMainWindow):
         self._tasks_debug_action = self._mb_debug_menu.addAction(
             "", self._on_open_task_manager
         )
-
-    def _wire_menu_bar_actions(self) -> None:
-        """Populate the menu bar menus with the QActions built by _build_toolbar."""
-        self._mb_tools_menu.addAction(self._export_action)
-        self._mb_tools_menu.addAction(self._no_face_action)
-
-        self._mb_merge_menu.addAction(self._suggestions_action)
-        self._mb_merge_menu.addAction(self._amerge_action)
-
-        self._mb_system_menu.addAction(self._settings_action)
-        self._mb_system_menu.addAction(self._tasks_action)
-        self._mb_system_menu.addSeparator()
-        self._mb_system_menu.addAction(self._gdrive_action)
-        self._mb_system_menu.addSeparator()
-        self._mb_system_menu.addAction(self._log_action)
 
     def _build_toolbar(self) -> None:
         tb = QToolBar(t("main_toolbar"))
@@ -292,47 +308,6 @@ class MainWindow(QMainWindow):
         self._scan_modes_btn.setEnabled(True)
         self._scan_modes_btn.clicked.connect(self._on_open_scan_modes)
         tb.addWidget(self._scan_modes_btn)
-
-        tb.addSeparator()
-
-        # ── Eszközök dropdown ──────────────────────────────────────────────
-        self._tools_menu = QMenu(self)
-        self._export_action = self._tools_menu.addAction("", self._on_open_export)
-        self._no_face_action = self._tools_menu.addAction("", self._on_no_face_images)
-        self._tools_menu_btn = QToolButton()
-        self._tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._tools_menu_btn.setMenu(self._tools_menu)
-        tb.addWidget(self._tools_menu_btn)
-
-        tb.addSeparator()
-
-        # ── Összevonás dropdown ────────────────────────────────────────────
-        self._merge_menu = QMenu(self)
-        self._suggestions_action = self._merge_menu.addAction("", self._on_show_suggestions)
-        self._suggestions_action.setToolTip(t("suggestions_tip"))
-        self._amerge_action = self._merge_menu.addAction("", self._on_open_amerge_review)
-        self._merge_menu_btn = QToolButton()
-        self._merge_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._merge_menu_btn.setMenu(self._merge_menu)
-        tb.addWidget(self._merge_menu_btn)
-
-        tb.addSeparator()
-
-        # ── Rendszer dropdown ──────────────────────────────────────────────
-        self._system_menu = QMenu(self)
-        self._settings_action = self._system_menu.addAction("", self._on_settings)
-        self._tasks_action = self._system_menu.addAction("", self._on_open_task_manager)
-        self._system_menu.addSeparator()
-        self._gdrive_action = self._system_menu.addAction("", self._on_toggle_drive_project)
-        self._gdrive_action.setVisible(False)
-        self._system_menu.addSeparator()
-        self._log_action = self._system_menu.addAction("", self._on_log_action_toggled)
-        self._log_action.setCheckable(True)
-        self._log_action.setChecked(True)
-        self._system_menu_btn = QToolButton()
-        self._system_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._system_menu_btn.setMenu(self._system_menu)
-        tb.addWidget(self._system_menu_btn)
 
         tb.addSeparator()
 
@@ -450,6 +425,9 @@ class MainWindow(QMainWindow):
             self._on_browser_person_changed
         )
         self._image_browser.object_open_requested.connect(self._open_object_sheet)
+        self._image_browser.object_search_requested.connect(
+            self._on_object_search_requested
+        )
         self._tabs.addTab(self._image_browser, t("tab_image_browser"))
 
         # --- Tab 2: Családi kereső ---
@@ -470,6 +448,9 @@ class MainWindow(QMainWindow):
         self._objects_panel = ObjectsPanel()
         self._objects_panel.object_data_changed.connect(
             self._refresh_preview_object_markers
+        )
+        self._objects_panel.object_search_requested.connect(
+            self._on_object_search_requested
         )
         self._tabs.addTab(self._objects_panel, t("tab_objects"))
 
@@ -634,14 +615,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_root_folders") or not self._root_folders:
             self._folder_label.setText(f"  {t('no_folder')}")
         self._scan_modes_btn.setText(t("scanModes.openButton"))
-        self._tools_menu_btn.setText(t("tb_tools_menu"))
         self._export_action.setText(t("tb_export"))
         self._no_face_action.setText(t("view_no_face"))
-        self._merge_menu_btn.setText(t("tb_merge_menu"))
         self._suggestions_action.setText(t("suggestions_btn"))
         self._suggestions_action.setToolTip(t("suggestions_tip"))
         self._refresh_amerge_btn()
-        self._system_menu_btn.setText(t("tb_system_menu"))
         self._settings_action.setText(t("settings"))
         self._tasks_action.setText(t("tasks_btn"))
         if hasattr(self, "_tasks_status_btn"):
@@ -740,6 +718,7 @@ class MainWindow(QMainWindow):
     def _restore_last_folder(self) -> None:
         """Re-select the folder(s) used in the previous session."""
         import json
+
         from app.app_settings import app_qsettings
 
         qs = app_qsettings()
@@ -767,6 +746,7 @@ class MainWindow(QMainWindow):
 
     def _save_folders(self, folders) -> None:
         import json
+
         from app.app_settings import app_qsettings
 
         app_qsettings().setValue("paths/source_folders", json.dumps(folders))
@@ -776,6 +756,7 @@ class MainWindow(QMainWindow):
         dlg = ScanModesDialog(parent=self, config=self._config)
         dlg.scan_workflow_started.connect(self._on_scan_workflow_started)
         dlg.maintenance_action_started.connect(self._on_scan_maintenance_action)
+        dlg.reset_unknown_requested.connect(self._on_reset_unknown_persons)
         dlg.exec()
 
     @Slot(str)
@@ -790,6 +771,8 @@ class MainWindow(QMainWindow):
             self._on_deep_rebuild()
         elif workflow_name == "train_model":
             self._on_deep_train()
+        elif workflow_name == "object_matching":
+            self._start_object_search(object_id=None, image_ids=None)
 
     @Slot(str)
     def _on_scan_maintenance_action(self, action: str) -> None:
@@ -798,7 +781,6 @@ class MainWindow(QMainWindow):
         the redesigned detection pipeline; the tab keeps them manually
         launchable for debugging and one-off fixes."""
         handlers = {
-            "reset_unknown_persons": self._on_reset_unknown_persons,
             "overlap_cleanup": self._on_find_overlapping_unknown_faces,
             "embedding_duplicates": self._on_find_embedding_duplicate_faces,
             "identity_repair": self._on_identity_repair_scan,
@@ -989,8 +971,11 @@ class MainWindow(QMainWindow):
         self._set_scanning_state(False)
         self._status_label.setText(t("ready"))
 
-    @Slot()
-    def _on_reset_unknown_persons(self) -> None:
+    @Slot(object)
+    def _on_reset_unknown_persons(self, options) -> None:
+        """Run an Unknown-identity reset with the options chosen inline in the
+        Scan & Maintenance dialog.  The checkboxes there are the confirmation,
+        so no extra prompt is shown."""
         from app.gdrive import preferences as _gprefs
 
         prefs = _gprefs.load()
@@ -1006,28 +991,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, t("busy_title"), t("busy_msg"))
             return
 
-        reply = QMessageBox.question(
-            self,
-            t("reset_unknowns_title"),
-            t("reset_unknowns_msg"),
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
+        # Hard-deleting faces walks the rows one by one on the UI thread.
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            with session_scope() as session:
+                from app.services.unknown_person_reset_service import (
+                    UnknownPersonResetService,
+                )
 
-        # Show options dialog to let user configure reset steps
-        from app.ui.dialogs.reset_unknown_options_dialog import ResetUnknownOptionsDialog
-
-        options_dialog = ResetUnknownOptionsDialog(self)
-        if options_dialog.exec() != QDialog.Accepted:
-            return
-
-        options = options_dialog.get_options()
-
-        with session_scope() as session:
-            from app.services.unknown_person_reset_service import UnknownPersonResetService
-
-            result = UnknownPersonResetService(session).reset(options)
+                result = UnknownPersonResetService(session).reset(options)
+        finally:
+            QApplication.restoreOverrideCursor()
 
         self._current_person_id = None
         self._current_face_id = None
@@ -1035,16 +1009,12 @@ class MainWindow(QMainWindow):
         self._preview_panel.clear()
         self._refresh_persons()
         self._image_browser._reload_current_face_data()
-        log.info(
-            "Unknown identity reset: deleted %d person(s), unassigned %d face(s).",
-            result.deleted_persons,
-            result.unassigned_faces,
-        )
         self._status_label.setText(
             t(
                 "reset_unknowns_status",
                 persons=result.deleted_persons,
                 faces=result.unassigned_faces,
+                deleted=result.deleted_faces,
             )
         )
 
@@ -1172,8 +1142,8 @@ class MainWindow(QMainWindow):
 
         progress_dialog = None
         try:
-            from PySide6.QtWidgets import QProgressDialog
             from PySide6.QtCore import Qt
+            from PySide6.QtWidgets import QProgressDialog
 
             progress_dialog = QProgressDialog(
                 t("retro_verify_title"), None, 0, 0, self
@@ -1394,14 +1364,21 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, t("busy_title"), t("busy_msg"))
             return
 
-        threshold = self._config.detection.duplicate_unknown_iou_threshold
-        containment = self._config.detection.duplicate_unknown_containment_threshold
+        preset = self._overlap_sensitivity()
+        if preset.key == DEFAULT_OVERLAP_SENSITIVITY:
+            # Strict level keeps honouring the configured detection thresholds.
+            threshold = self._config.detection.duplicate_unknown_iou_threshold
+            containment = self._config.detection.duplicate_unknown_containment_threshold
+        else:
+            threshold = preset.iou
+            containment = preset.containment
         try:
             with session_scope() as session:
                 finder = DuplicateUnknownFaceFinder(
                     session,
                     iou_threshold=threshold,
                     containment_threshold=containment,
+                    cross_identity=preset.cross_identity,
                 )
                 matches = finder.find()
                 images_examined = finder.images_examined
@@ -1411,7 +1388,8 @@ class MainWindow(QMainWindow):
             return
 
         log.info(
-            "Átfedő arckeretek keresése: %d kép vizsgálva, %d találat.",
+            "Átfedő/metsző arckeretek keresése (%s): %d kép vizsgálva, %d találat.",
+            preset.key,
             images_examined,
             len(matches),
         )
@@ -1421,6 +1399,15 @@ class MainWindow(QMainWindow):
             iou_threshold=threshold,
             containment_threshold=containment,
         )
+
+    def _overlap_sensitivity(self):
+        """Sensitivity preset chosen in the maintenance dialog (persisted)."""
+        from app.app_settings import app_qsettings
+
+        key = app_qsettings().value(
+            "overlap_cleanup/sensitivity", DEFAULT_OVERLAP_SENSITIVITY
+        )
+        return overlap_sensitivity(str(key))
 
     @Slot()
     def _on_find_embedding_duplicate_faces(self) -> None:
@@ -2577,10 +2564,15 @@ class MainWindow(QMainWindow):
             self._preview_panel.set_object_occurrences([])
             return
         from app.db.models import TaggedObject
+        from app.services.deoldified_pairing_service import DeoldifiedPairingService
         from app.services.object_service import ObjectService
         markers = []
         try:
             with session_scope() as session:
+                # Object tags live on the B&W original of a deoldified pair.
+                image_id = DeoldifiedPairingService.canonical_image_id(
+                    session, image_id
+                )
                 for occ in ObjectService(session).get_occurrences_for_image(image_id):
                     if occ.point_x is None or occ.point_y is None:
                         continue
@@ -2595,6 +2587,7 @@ class MainWindow(QMainWindow):
     @Slot(int, int, int)
     def _on_preview_object_create(self, image_id: int, x: int, y: int) -> None:
         """Open the object picker for a clicked point and record the occurrence."""
+        from app.services.deoldified_pairing_service import DeoldifiedPairingService
         from app.services.object_service import ObjectService
         from app.ui.dialogs.object_picker_dialog import ObjectPickerDialog
 
@@ -2603,8 +2596,12 @@ class MainWindow(QMainWindow):
             return
         try:
             with session_scope() as session:
+                # Store the tag on the B&W original so both sides show it.
+                target_id = DeoldifiedPairingService.canonical_image_id(
+                    session, image_id
+                )
                 ObjectService(session).add_occurrence(
-                    dlg.chosen_object_id, image_id, x, y, note=dlg.occurrence_note
+                    dlg.chosen_object_id, target_id, x, y, note=dlg.occurrence_note
                 )
         except Exception:
             log.exception("Failed to add object occurrence")
@@ -2621,6 +2618,141 @@ class MainWindow(QMainWindow):
             return
         self._tabs.setCurrentWidget(self._objects_panel)
         self._objects_panel.open_object(object_id)
+
+    # ------------------------------------------------------------------
+    # Object matching — find the same region on other images (#164)
+    # ------------------------------------------------------------------
+
+    @Slot(int, str)
+    def _on_object_search_requested(self, object_id: int, scope: str) -> None:
+        """Start a search from the Objects tab, resolving its scope choice."""
+        image_ids = None
+        if scope == "folder":
+            image_ids = self._current_folder_image_ids()
+            if not image_ids:
+                image_ids = None
+        self._start_object_search(object_id=object_id, image_ids=image_ids)
+
+    def _current_folder_image_ids(self) -> Optional[List[int]]:
+        """Image ids of the folder open in the browser, when it can tell us."""
+        browser = getattr(self, "_image_browser", None)
+        getter = getattr(browser, "current_folder_image_ids", None)
+        if getter is None:
+            return None
+        try:
+            return [int(i) for i in getter()]
+        except Exception:
+            log.debug("Could not resolve the current folder's images", exc_info=True)
+            return None
+
+    def _start_object_search(
+        self,
+        object_id: Optional[int],
+        image_ids: Optional[List[int]] = None,
+    ) -> None:
+        """Run an object search in the background and offer the hits for review.
+
+        Never blocks: progress shows in the status bar and the review dialog is
+        only offered once the run finishes, so tagging can continue meanwhile.
+        """
+        from app.tasks import TaskPriority, get_task_manager
+        from app.workers.object_match_worker import ObjectMatchWorker
+
+        if self._object_search_task is not None and not (
+            self._object_search_task.state.is_final
+        ):
+            QMessageBox.information(self, t("busy_title"), t("busy_msg"))
+            return
+
+        config = self._object_matching_config()
+        worker = ObjectMatchWorker(
+            object_id=object_id, image_ids=image_ids, config=config
+        )
+
+        def work(ctx):
+            return worker.run_in_task(ctx)
+
+        task = get_task_manager().submit(
+            t("object_match_running"),
+            work,
+            supports_pause=True,
+            priority=TaskPriority.NORMAL,
+            on_done=lambda result: self._on_object_search_done(object_id, result),
+            on_error=self._on_object_search_error,
+            on_cancelled=self._on_object_search_cancelled,
+        )
+        self._object_search_task = task
+        task.progress_changed.connect(self._on_task_progress)
+        self._status_label.setText(t("object_match_running"))
+
+    def _object_matching_config(self):
+        """Matching parameters, with the panel's sensitivity slider applied.
+
+        The slider moves the two gates that actually decide how permissive a run
+        is — the score floor and the required inlier count — between a strict
+        and a loose end of the range.
+        """
+        from app.app_settings import app_qsettings
+        from app.config import ObjectMatchingConfig
+
+        base = getattr(self._config, "object_matching", None) or ObjectMatchingConfig()
+        sensitivity = 50
+        try:
+            sensitivity = int(
+                app_qsettings().value("object_matching/sensitivity", 50)
+            )
+        except (TypeError, ValueError):
+            pass
+        fraction = max(0.0, min(1.0, sensitivity / 100.0))
+        return replace(
+            base,
+            min_score=round(0.55 - 0.30 * fraction, 3),
+            min_inliers=int(round(20 - 12 * fraction)),
+        )
+
+    def _on_object_search_done(self, object_id: Optional[int], result: object) -> None:
+        self._object_search_task = None
+        found = int(getattr(result, "suggestions_created", 0) or 0)
+        skipped = int(getattr(result, "skipped_no_reference", 0) or 0)
+        searched = int(getattr(result, "objects_searched", 0) or 0)
+        self._status_label.setText(t("ready"))
+
+        if skipped and skipped == searched:
+            QMessageBox.information(
+                self, t("object_match_review_title"), t("object_match_no_reference")
+            )
+            return
+        if not found:
+            self.statusBar().showMessage(t("object_match_none_found"), 5000)
+            return
+        self._open_object_match_review(object_id)
+
+    def _open_object_match_review(self, object_id: Optional[int]) -> None:
+        from app.ui.dialogs.object_match_review_dialog import ObjectMatchReviewDialog
+
+        dialog = ObjectMatchReviewDialog(self, object_id=object_id)
+        dialog.exec()
+        if dialog.accepted_count or dialog.rejected_count:
+            self._refresh_preview_object_markers()
+            if hasattr(self, "_objects_panel"):
+                self._objects_panel.refresh()
+            self._image_browser.refresh_object_markers()
+            self.statusBar().showMessage(
+                t("object_match_done").format(
+                    accepted=dialog.accepted_count, rejected=dialog.rejected_count
+                ),
+                5000,
+            )
+
+    def _on_object_search_error(self, message: str) -> None:
+        self._object_search_task = None
+        self._status_label.setText(t("ready"))
+        log.error("Object matching failed: %s", message)
+        QMessageBox.warning(self, t("object_match_review_title"), str(message))
+
+    def _on_object_search_cancelled(self) -> None:
+        self._object_search_task = None
+        self._status_label.setText(t("ready"))
 
     @Slot(int, int, int)
     def _on_cluster_face_right_clicked(self, face_id: int, gx: int, gy: int) -> None:
@@ -3315,6 +3447,7 @@ class MainWindow(QMainWindow):
             person.gender = dlg.gender()
             person.family_code = dlg.family_code() or None
             person.external_family_code = dlg.external_family_code() or None
+            person.name_prefix = dlg.name_prefix() or None
             person.last_name = dlg.last_name() or None
             person.first_name = dlg.first_name() or None
             person.second_name = dlg.second_name() or None
@@ -4242,7 +4375,8 @@ class MainWindow(QMainWindow):
             with session_scope() as session:
                 person_rows = session.execute(
                     _sql(
-                        "SELECT id, name, is_protected, thumbnail_path "
+                        "SELECT id, name, is_protected, is_auto_named,"
+                        "       thumbnail_path "
                         "FROM persons ORDER BY name"
                     )
                 ).fetchall()
@@ -4303,7 +4437,7 @@ class MainWindow(QMainWindow):
                         face_detail[pid] = (fid, crop, img, (bx, by, bw, bh))
 
             persons: list[SidebarPerson] = []
-            for pid, name, is_protected, thumbnail_path in person_rows:
+            for pid, name, is_protected, is_auto_named, thumbnail_path in person_rows:
                 detail = face_detail.get(pid)
                 if detail is not None:
                     fid, crop, img, bbox = detail
@@ -4324,6 +4458,7 @@ class MainWindow(QMainWindow):
                         is_protected=bool(is_protected),
                         face_count=face_counts.get(pid, 0),
                         face=fd,
+                        is_auto_named=bool(is_auto_named),
                     )
                 )
             self._sidebar.populate(persons)

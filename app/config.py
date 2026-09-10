@@ -339,6 +339,32 @@ class IntraImageDuplicateConfig:
 
 
 @dataclass
+class RecognitionIdentityGuardConfig:
+    """Per-image identity uniqueness guard for the recognition passes.
+
+    Stops the AI from attaching the *same* named person to two overlapping
+    boxes on one photo (the "same person recognised twice" bug).  Deliberately
+    conservative: only boxes that geometrically overlap or are embedding-near-
+    identical are treated as the same face, so a person genuinely appearing
+    twice in one frame (mirror, wall portrait) is untouched.
+    """
+
+    # When False the recognition passes skip the guard entirely.
+    enabled: bool = True
+    # Bounding-box IoU at/above which two boxes may be the same physical face.
+    dup_iou_threshold: float = 0.30
+    # Containment (intersection / smaller-box area) catching a nested box.
+    dup_containment_threshold: float = 0.75
+    # At moderate overlap, require at least this cosine between the two
+    # embeddings before treating the boxes as one face (guards two different
+    # people photographed close together).
+    dup_embedding_guard: float = 0.60
+    # Above this IoU the boxes are the same spot — collapse regardless of
+    # embedding agreement (one crop may be corrupt).
+    dup_hard_iou_threshold: float = 0.60
+
+
+@dataclass
 class IdentityRepairConfig:
     """Parameters for the global Identity Repair Scan.
 
@@ -535,6 +561,63 @@ class AiFaceDetectionConfig:
 
 
 @dataclass
+class ObjectMatchingConfig:
+    """Parameters for "recognise the same image region" object matching (#164).
+
+    Local ORB keypoints plus a RANSAC similarity transform: the same picture
+    region is found again in other photos even at a different size (a shrunk
+    copy inside a collage).  Deliberately *not* viewpoint invariant — that is
+    a later step.  Nothing here touches face recognition.
+    """
+
+    enabled: bool = True
+
+    # Keypoints kept per image / per reference crop.  More features find more
+    # small copies but cost linearly more time and storage.
+    max_features: int = 1500
+    # Keypoints kept per scale of a reference crop.
+    max_patch_features: int = 1200
+
+    # A reference crop is described at several sizes, not just its own.  ORB
+    # allots very few keypoints to its coarsest pyramid levels, so a crop
+    # described only at full size loses almost all of its evidence against a
+    # quarter-size copy.  Re-describing the crop at these fractions puts the
+    # bulk of the keypoint budget at each size, which is what makes a shrunk
+    # collage copy findable.  All scales share one coordinate frame, so a
+    # single RANSAC fit still decides.
+    patch_query_scales: tuple = (1.0, 0.6, 0.35, 0.2, 0.12)
+
+    # ORB pyramid.  12 levels at 1.2 covers roughly a 7x size difference,
+    # enough for a quarter-size collage copy with margin.
+    pyramid_levels: int = 12
+    scale_factor: float = 1.2
+    fast_threshold: int = 12
+
+    # Images are downscaled to at most this many pixels on the long edge
+    # before extraction, so a 40 MP scan does not dominate the run.
+    max_work_edge: int = 1600
+
+    # Lowe ratio test: a match counts only if the best neighbour is this much
+    # closer than the second best.  Lower = stricter.
+    ratio_test: float = 0.75
+
+    # Geometric verification.
+    ransac_reproj_threshold: float = 4.0
+    min_inliers: int = 12
+    min_inlier_ratio: float = 0.25
+    # Plausible size ratio target/reference; outside this the hit is noise.
+    min_scale: float = 0.12
+    max_scale: float = 8.0
+
+    # Minimum normalised score for a suggestion to be recorded.
+    min_score: float = 0.35
+
+    # Hard cap on extraction worker threads; the resource governor may lower
+    # it further when the machine is busy.
+    max_workers: int = 4
+
+
+@dataclass
 class OverlapResolutionConfig:
     """Parameters for the same-image overlapping-box resolution pass.
 
@@ -685,6 +768,9 @@ class AppConfig:
     intra_image_duplicate: IntraImageDuplicateConfig = field(
         default_factory=IntraImageDuplicateConfig
     )
+    recognition_identity_guard: RecognitionIdentityGuardConfig = field(
+        default_factory=RecognitionIdentityGuardConfig
+    )
     identity_repair: IdentityRepairConfig = field(default_factory=IdentityRepairConfig)
     recognition: RecognitionConfig = field(default_factory=RecognitionConfig)
     deep_recognition: DeepRecognitionConfig = field(
@@ -692,6 +778,9 @@ class AppConfig:
     )
     ai_face_detection: AiFaceDetectionConfig = field(
         default_factory=AiFaceDetectionConfig
+    )
+    object_matching: ObjectMatchingConfig = field(
+        default_factory=ObjectMatchingConfig
     )
     overlap_resolution: OverlapResolutionConfig = field(
         default_factory=OverlapResolutionConfig
@@ -929,6 +1018,29 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             ),
         )
 
+        rig = raw.get("recognition_identity_guard", {})
+        cfg.recognition_identity_guard = RecognitionIdentityGuardConfig(
+            enabled=rig.get(
+                "enabled", cfg.recognition_identity_guard.enabled
+            ),
+            dup_iou_threshold=rig.get(
+                "dup_iou_threshold",
+                cfg.recognition_identity_guard.dup_iou_threshold,
+            ),
+            dup_containment_threshold=rig.get(
+                "dup_containment_threshold",
+                cfg.recognition_identity_guard.dup_containment_threshold,
+            ),
+            dup_embedding_guard=rig.get(
+                "dup_embedding_guard",
+                cfg.recognition_identity_guard.dup_embedding_guard,
+            ),
+            dup_hard_iou_threshold=rig.get(
+                "dup_hard_iou_threshold",
+                cfg.recognition_identity_guard.dup_hard_iou_threshold,
+            ),
+        )
+
         rep = raw.get("identity_repair", {})
         cfg.identity_repair = IdentityRepairConfig(
             merge_similarity=rep.get(
@@ -1081,6 +1193,35 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             verification_enabled=aifd.get(
                 "verification_enabled", cfg.ai_face_detection.verification_enabled
             ),
+        )
+
+        objm = raw.get("object_matching", {})
+        base_objm = cfg.object_matching
+        cfg.object_matching = ObjectMatchingConfig(
+            enabled=objm.get("enabled", base_objm.enabled),
+            max_features=objm.get("max_features", base_objm.max_features),
+            max_patch_features=objm.get(
+                "max_patch_features", base_objm.max_patch_features
+            ),
+            patch_query_scales=tuple(
+                objm.get("patch_query_scales", base_objm.patch_query_scales)
+            ),
+            pyramid_levels=objm.get("pyramid_levels", base_objm.pyramid_levels),
+            scale_factor=objm.get("scale_factor", base_objm.scale_factor),
+            fast_threshold=objm.get("fast_threshold", base_objm.fast_threshold),
+            max_work_edge=objm.get("max_work_edge", base_objm.max_work_edge),
+            ratio_test=objm.get("ratio_test", base_objm.ratio_test),
+            ransac_reproj_threshold=objm.get(
+                "ransac_reproj_threshold", base_objm.ransac_reproj_threshold
+            ),
+            min_inliers=objm.get("min_inliers", base_objm.min_inliers),
+            min_inlier_ratio=objm.get(
+                "min_inlier_ratio", base_objm.min_inlier_ratio
+            ),
+            min_scale=objm.get("min_scale", base_objm.min_scale),
+            max_scale=objm.get("max_scale", base_objm.max_scale),
+            min_score=objm.get("min_score", base_objm.min_score),
+            max_workers=objm.get("max_workers", base_objm.max_workers),
         )
 
         ovr = raw.get("overlap_resolution", {})

@@ -8,8 +8,13 @@ a rebuild), exactly one box must survive:
   unknown one — an existing recognition is never displaced by a duplicate;
 * between two unknown boxes the better one is kept (quality, detector
   confidence, size);
-* two boxes assigned to two *different named* persons are never touched —
-  that is a user-level conflict, not detector noise.
+* two boxes assigned to two *different named* persons are never touched when
+  at least one of them is a human decision — that is a user-level conflict, not
+  detector noise;
+* two boxes the *AI* recognised as two different named persons (both automatic)
+  on the same physical face are resolved: the higher-confidence recognition
+  wins.  This is the "same person recognised twice on one photo" repair for
+  archives processed before the per-image identity guard existed.
 
 The geometric overlap is combined with an embedding check so that two real,
 tightly cropped faces (cheek-to-cheek) are not mistaken for duplicates.
@@ -31,6 +36,10 @@ log = logging.getLogger(__name__)
 
 # Sources marking a human decision (legacy rows have NULL source).
 _MANUAL_SOURCES = {"manual", "manual_merge", "suggestion_approved", "deep_confirmed"}
+
+# Sources written by the automatic recognition passes — two of these on one
+# physical face may be resolved by confidence without a user decision.
+_AUTO_RECOGNITION_SOURCES = {"deep_recognition", "intra_image", "rerecognition"}
 
 
 @dataclass
@@ -103,6 +112,7 @@ class OverlapResolutionService:
                 synchronize_session="fetch"
             )
             stats.faces_removed = len(to_delete)
+            self._cleanup_orphan_auto_persons()
         self._session.commit()
 
         if stats.faces_removed:
@@ -177,9 +187,13 @@ class OverlapResolutionService:
         """Decide which face survives; ``(None, None)`` ⇒ untouchable conflict."""
         named_a, named_b = self._named_person_id(a), self._named_person_id(b)
         if named_a is not None and named_b is not None and named_a != named_b:
-            # Two different named people on heavily overlapping boxes — a user
-            # decision is required, automation must not destroy either.
-            return None, None
+            if self._is_human(a) and self._is_human(b):
+                # Two human decisions on heavily overlapping boxes — automation
+                # must not destroy either.
+                return None, None
+            # Otherwise at least one side is an automatic recognition: keep the
+            # human box (via _rank below) or, when both are automatic, the
+            # higher-confidence recognition (via _assignment_confidence below).
 
         rank_a, rank_b = self._rank(a), self._rank(b)
         if rank_a > rank_b:
@@ -187,8 +201,14 @@ class OverlapResolutionService:
         if rank_b > rank_a:
             return b, a
 
-        # Equal rank (typically two unknown boxes): keep the better detection.
-        for key in (self._quality, self._confidence, self._area):
+        # Equal rank (two unknown boxes, or two automatic recognitions): keep
+        # the better one — recognition confidence first, then detection quality.
+        for key in (
+            self._assignment_confidence,
+            self._quality,
+            self._confidence,
+            self._area,
+        ):
             ka, kb = key(a), key(b)
             if ka > kb:
                 return a, b
@@ -229,6 +249,23 @@ class OverlapResolutionService:
         return person.id
 
     @staticmethod
+    def _is_human(face: Face) -> bool:
+        """True when this box reflects a human decision (or a legacy NULL row)."""
+        return (
+            face.detector_backend == "manual"
+            or face.assignment_source is None
+            or face.assignment_source in _MANUAL_SOURCES
+        )
+
+    @staticmethod
+    def _assignment_confidence(face: Face) -> float:
+        return (
+            face.assignment_confidence
+            if face.assignment_confidence is not None
+            else -1.0
+        )
+
+    @staticmethod
     def _quality(face: Face) -> float:
         return face.quality_score if face.quality_score is not None else 0.5
 
@@ -243,6 +280,24 @@ class OverlapResolutionService:
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
+
+    def _cleanup_orphan_auto_persons(self) -> None:
+        """Delete auto-named ("Unknown N") persons left with no faces."""
+        self._session.flush()
+        orphans: List[Person] = (
+            self._session.query(Person)
+            .filter(Person.is_auto_named == True)  # noqa: E712
+            .filter(~Person.faces.any())
+            .all()
+        )
+        for person in orphans:
+            self._session.expire(person, ["faces"])
+            self._session.delete(person)
+        if orphans:
+            log.info(
+                "Overlap resolution: removed %d empty Unknown person(s)",
+                len(orphans),
+            )
 
     def _load_faces_by_image(self) -> Dict[int, List[Face]]:
         grouped: Dict[int, List[Face]] = {}

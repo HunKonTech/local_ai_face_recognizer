@@ -131,6 +131,20 @@ class FaceMetadataExportSummary:
         return sum(1 for r in self.results if not r.success)
 
     @property
+    def fallback_reasons(self) -> list[str]:
+        """Why images ended up as sidecar JSON instead of embedded metadata.
+
+        Grouped by cause with a count, because a systemic reason (a missing
+        optional dependency, a read-only folder) otherwise repeats once per
+        image and buries the actual explanation.
+        """
+        counts: dict[str, int] = {}
+        for r in self.results:
+            if r.write_mode == meta.WRITE_MODE_SIDECAR and r.error_message:
+                counts[r.error_message] = counts.get(r.error_message, 0) + 1
+        return [f"{reason} ({count}×)" for reason, count in counts.items()]
+
+    @property
     def errors(self) -> list[str]:
         out: list[str] = []
         for r in self.results:

@@ -406,7 +406,7 @@ def _make_face(image_id: int, person_id: int):
 
 
 class TestSyncPairData:
-    """One-directional copy of annotations between a deoldified pair."""
+    """Merging annotations between the two sides of a deoldified pair."""
 
     def test_copies_faces_and_metadata_into_empty_side(self, tmp_db) -> None:
         from app.db.database import session_scope
@@ -460,7 +460,7 @@ class TestSyncPairData:
             orig = s.query(Image).filter(Image.file_hash == "src_full").first()
             assert len(orig.faces) == 1
 
-    def test_skips_when_both_sides_have_data(self, tmp_db) -> None:
+    def test_skips_when_pair_already_in_sync(self, tmp_db) -> None:
         from app.db.database import session_scope
         from app.db.models import Image, Person
 
@@ -574,6 +574,177 @@ class TestSyncPairData:
             assert result["metadata_fields"] == ["note"]
 
 
+class TestSyncPairMerge:
+    """Incremental merge: only what the other side is missing gets copied."""
+
+    def _pair(self, s, tag: str):
+        """Create a B&W/colorized pair and return both Image rows."""
+        from app.db.models import Image
+
+        orig = Image(
+            file_path=f"/bw/{tag}.jpg", file_hash=f"{tag}_bw", file_mtime=0.0
+        )
+        color = Image(
+            file_path=f"/color/{tag}-deoldified.jpg",
+            file_hash=f"{tag}_color",
+            file_mtime=0.0,
+        )
+        s.add_all([orig, color])
+        s.flush()
+        return orig, color
+
+    def _reload(self, s, tag: str):
+        from app.db.models import Image
+
+        return (
+            s.query(Image).filter(Image.file_hash == f"{tag}_bw").first(),
+            s.query(Image).filter(Image.file_hash == f"{tag}_color").first(),
+        )
+
+    def test_copies_the_face_added_later_to_the_filled_pair(self, tmp_db) -> None:
+        """A face drawn on the original reaches a colorized side that already has data."""
+        from app.db.database import session_scope
+        from app.db.models import Person
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "later")
+            p = Person(name="Pósa Jenő", is_auto_named=False)
+            s.add(p)
+            s.flush()
+            shared = _make_face(orig.id, p.id)
+            s.add(shared)
+            s.add(_make_face(color.id, p.id))
+            extra = _make_face(orig.id, p.id)
+            extra.bbox_x, extra.bbox_y = 400, 500
+            s.add(extra)
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "later")
+            result = DeoldifiedPairingService(s).sync_pair_data(orig, color)
+            assert result is not None
+            assert result["faces_copied"] == 1
+
+        with session_scope() as s:
+            _orig, color = self._reload(s, "later")
+            assert len(color.faces) == 2
+            assert {(f.bbox_x, f.bbox_y) for f in color.faces} == {(10, 20), (400, 500)}
+
+    def test_overlapping_face_is_not_duplicated(self, tmp_db) -> None:
+        """A slightly nudged box still counts as the same face."""
+        from app.db.database import session_scope
+        from app.db.models import Person
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "iou")
+            p = Person(name="Anna", is_auto_named=False)
+            s.add(p)
+            s.flush()
+            s.add(_make_face(orig.id, p.id))
+            nudged = _make_face(color.id, p.id)
+            nudged.bbox_x += 6
+            nudged.bbox_y += 6
+            s.add(nudged)
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "iou")
+            assert DeoldifiedPairingService(s).sync_pair_data(orig, color) is None
+
+        with session_scope() as s:
+            _orig, color = self._reload(s, "iou")
+            assert len(color.faces) == 1
+
+    def test_unassigned_counterpart_gets_the_person(self, tmp_db) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Person
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "assign")
+            p = Person(name="Emő", is_auto_named=False)
+            s.add(p)
+            s.flush()
+            s.add(_make_face(orig.id, p.id))
+            s.add(_make_face(color.id, None))
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "assign")
+            result = DeoldifiedPairingService(s).sync_pair_data(orig, color)
+            assert result is not None
+            assert result["faces_copied"] == 0
+            assert result["faces_updated"] == 1
+
+        with session_scope() as s:
+            _orig, color = self._reload(s, "assign")
+            assert color.faces[0].person.name == "Emő"
+
+    def test_existing_assignment_is_never_overwritten(self, tmp_db) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Person
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "keep")
+            a = Person(name="A", is_auto_named=False)
+            b = Person(name="B", is_auto_named=False)
+            s.add_all([a, b])
+            s.flush()
+            s.add(_make_face(orig.id, a.id))
+            s.add(_make_face(color.id, b.id))
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "keep")
+            assert DeoldifiedPairingService(s).sync_pair_data(orig, color) is None
+
+        with session_scope() as s:
+            _orig, color = self._reload(s, "keep")
+            assert color.faces[0].person.name == "B"
+
+    def test_object_tag_moves_onto_the_original(self, tmp_db) -> None:
+        from app.db.database import session_scope
+        from app.db.models import ObjectOccurrence
+        from app.services.object_service import ObjectService
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "obj")
+            obj = ObjectService(s).create_object("Iblistan szekta")
+            ObjectService(s).add_occurrence_bbox(obj.id, color.id, 30, 40, 50, 60)
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "obj")
+            result = DeoldifiedPairingService(s).sync_pair_data(color, orig)
+            assert result is not None
+            assert result["objects_moved"] == 1
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "obj")
+            rows = s.query(ObjectOccurrence).all()
+            assert len(rows) == 1
+            assert rows[0].image_id == orig.id
+            assert (rows[0].bbox_x, rows[0].bbox_y) == (30, 40)
+
+    def test_duplicate_object_tag_is_dropped_not_moved(self, tmp_db) -> None:
+        """The same tag on both sides collapses to one row on the original."""
+        from app.db.database import session_scope
+        from app.db.models import ObjectOccurrence
+        from app.services.object_service import ObjectService
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "dup")
+            obj = ObjectService(s).create_object("Sátor")
+            ObjectService(s).add_occurrence_bbox(obj.id, orig.id, 30, 40, 50, 60)
+            ObjectService(s).add_occurrence_bbox(obj.id, color.id, 30, 40, 50, 60)
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "dup")
+            result = DeoldifiedPairingService(s).sync_pair_data(orig, color)
+            assert result is not None
+            assert result["objects_moved"] == 1
+
+        with session_scope() as s:
+            orig, _color = self._reload(s, "dup")
+            rows = s.query(ObjectOccurrence).all()
+            assert len(rows) == 1
+            assert rows[0].image_id == orig.id
+
+
 class TestExtractVariantLabel:
     def test_artistic(self) -> None:
         assert extract_variant_label("photo-deoldified (artistic)") == "(artistic)"
@@ -616,22 +787,31 @@ class TestFindAllDeoldifiedForOriginal:
 
 
 class TestGetComparisonGroup:
-    def _seed(self, session) -> None:
+    def _seed(self, session, folder) -> dict:
+        """Create real files on disk plus their DB rows; return the paths."""
         from app.db.models import Image
+        paths = {
+            "orig": folder / "photo.jpg",
+            "artistic": folder / "photo-deoldified (artistic).jpg",
+            "stable": folder / "photo-deoldified (stable).jpg",
+        }
+        for p in paths.values():
+            p.write_bytes(b"x")
         session.add_all([
-            Image(file_path="/f/photo.jpg", file_hash="orig", file_mtime=0.0),
-            Image(file_path="/f/photo-deoldified (artistic).jpg",
+            Image(file_path=str(paths["orig"]), file_hash="orig", file_mtime=0.0),
+            Image(file_path=str(paths["artistic"]),
                   file_hash="artistic", file_mtime=0.0),
-            Image(file_path="/f/photo-deoldified (stable).jpg",
+            Image(file_path=str(paths["stable"]),
                   file_hash="stable", file_mtime=0.0),
         ])
+        return paths
 
-    def test_group_from_original_orders_bw_first(self, tmp_db) -> None:
+    def test_group_from_original_orders_bw_first(self, tmp_db, tmp_path) -> None:
         from app.db.database import session_scope
         from app.db.models import Image
 
         with session_scope() as s:
-            self._seed(s)
+            self._seed(s, tmp_path)
         with session_scope() as s:
             orig = s.query(Image).filter(Image.file_hash == "orig").first()
             group = DeoldifiedPairingService(s).get_comparison_group(orig)
@@ -639,12 +819,12 @@ class TestGetComparisonGroup:
             assert [m.label for m in group] == ["", "(artistic)", "(stable)"]
             assert all(isinstance(m, ComparisonMember) for m in group)
 
-    def test_group_from_a_colorized_variant_is_identical(self, tmp_db) -> None:
+    def test_group_from_a_colorized_variant_is_identical(self, tmp_db, tmp_path) -> None:
         from app.db.database import session_scope
         from app.db.models import Image
 
         with session_scope() as s:
-            self._seed(s)
+            self._seed(s, tmp_path)
         with session_scope() as s:
             stable = s.query(Image).filter(Image.file_hash == "stable").first()
             group = DeoldifiedPairingService(s).get_comparison_group(stable)
@@ -652,12 +832,49 @@ class TestGetComparisonGroup:
             assert group[0].is_bw is True
             assert [m.label for m in group[1:]] == ["(artistic)", "(stable)"]
 
-    def test_no_group_for_lone_image(self, tmp_db) -> None:
+    def test_no_group_for_lone_image(self, tmp_db, tmp_path) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Image
+
+        solo = tmp_path / "solo.jpg"
+        solo.write_bytes(b"x")
+        with session_scope() as s:
+            s.add(Image(file_path=str(solo), file_hash="solo", file_mtime=0.0))
+        with session_scope() as s:
+            solo_img = s.query(Image).filter(Image.file_hash == "solo").first()
+            assert DeoldifiedPairingService(s).get_comparison_group(solo_img) == []
+
+    def test_variant_with_missing_file_is_dropped(self, tmp_db, tmp_path) -> None:
         from app.db.database import session_scope
         from app.db.models import Image
 
         with session_scope() as s:
-            s.add(Image(file_path="/f/solo.jpg", file_hash="solo", file_mtime=0.0))
+            paths = self._seed(s, tmp_path)
+        paths["artistic"].unlink()  # variant file vanished since last scan
         with session_scope() as s:
-            solo = s.query(Image).filter(Image.file_hash == "solo").first()
-            assert DeoldifiedPairingService(s).get_comparison_group(solo) == []
+            orig = s.query(Image).filter(Image.file_hash == "orig").first()
+            group = DeoldifiedPairingService(s).get_comparison_group(orig)
+            assert [m.label for m in group] == ["", "(stable)"]
+
+    def test_no_group_when_every_variant_file_missing(self, tmp_db, tmp_path) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Image
+
+        with session_scope() as s:
+            paths = self._seed(s, tmp_path)
+        paths["artistic"].unlink()
+        paths["stable"].unlink()
+        with session_scope() as s:
+            orig = s.query(Image).filter(Image.file_hash == "orig").first()
+            assert DeoldifiedPairingService(s).get_comparison_group(orig) == []
+
+    def test_no_group_when_bw_original_file_missing(self, tmp_db, tmp_path) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Image
+
+        with session_scope() as s:
+            paths = self._seed(s, tmp_path)
+        paths["orig"].unlink()
+        with session_scope() as s:
+            stable = s.query(Image).filter(Image.file_hash == "stable").first()
+            assert DeoldifiedPairingService(s).get_comparison_group(stable) == []

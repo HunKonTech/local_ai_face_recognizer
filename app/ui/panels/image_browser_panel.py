@@ -25,7 +25,18 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -64,23 +75,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.ui.widgets.person_search_select import PersonSearchSelect
-from app.ui.widgets.place_search_select import PlaceSearchSelect
-from app.ui.widgets.universal_search_bar import UniversalSearchBar
-
 from app.db.database import session_scope
 from app.db.models import Face, Image, Person, Place
 from app.services.family_service import FamilyImageSearchCriteria, FamilyService
 from app.services.identity_service import IdentityService
-from app.services.unknown_merge_service import UnknownMergeService
 from app.services.image_browser_service import (
     FolderSummary,
     ImageBrowserService,
-    ImageSummary,
 )
 from app.services.place_service import ANONYMOUS_GPS_PLACE_NAME, PlaceService
+from app.services.unknown_merge_service import UnknownMergeService
 from app.ui.dialogs.person_info_dialog import PersonInfoDialog
 from app.ui.i18n import t
+from app.ui.widgets.person_search_select import PersonSearchSelect
+from app.ui.widgets.place_search_select import PlaceSearchSelect
+from app.ui.widgets.universal_search_bar import UniversalSearchBar
 from app.workers.thumbnail_worker import ThumbnailRunnable
 
 log = logging.getLogger(__name__)
@@ -221,6 +230,7 @@ def _get_pil_font(size: int):
     dominates redraw time once a photo has more than a few faces.
     """
     import sys
+
     from PIL import ImageFont
     if sys.platform == "darwin":
         candidates = [
@@ -260,7 +270,8 @@ def _draw_faces(
     label_opacity: float = 1.0,
     pending_ids: Optional[set] = None,
 ) -> np.ndarray:
-    from PIL import Image as PILImage, ImageDraw
+    from PIL import Image as PILImage
+    from PIL import ImageDraw
 
     from app.ui.helpers.label_placement import FaceLabel, place_labels
 
@@ -1608,6 +1619,9 @@ class ImageBrowserPanel(QWidget):
     active_person_changed = Signal(object)
     # Emitted when the user asks to open a tagged object's data sheet (object_id)
     object_open_requested = Signal(int)
+    # Emitted when the user asks to look for an object on other images:
+    # (object_id, scope) where scope is "library" or "folder".
+    object_search_requested = Signal(int, str)
 
     def __init__(self, config=None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1691,6 +1705,7 @@ class ImageBrowserPanel(QWidget):
         self._deol_viewing_color: bool = False         # True = showing colorized pixels
         self._deol_compare: bool = False               # True = compare divider active now
         self._deol_mode: Optional[str] = None          # remembered choice: 'bw'|'color'|'compare'
+        self._deol_opened_is_color: bool = False       # tree selection is a colorized variant
         self._deol_split: int = 50                     # remembered split position (percent)
         # Comparison group: B&W original first, then colorized variants. The
         # compare view composes any two of them, chosen by left/right index.
@@ -2555,8 +2570,8 @@ class ImageBrowserPanel(QWidget):
             return
 
         from app.services.deoldified_pairing_service import (
-            is_deoldified_path,
             DeoldifiedPairingService,
+            is_deoldified_path,
         )
 
         with session_scope() as session:
@@ -2570,6 +2585,7 @@ class ImageBrowserPanel(QWidget):
         self._deol_group = group
         bw_member = group[0]  # is_bw=True by construction
         current_is_color = is_deoldified_path(image_path)
+        self._deol_opened_is_color = current_is_color
 
         # Default selection: left = B&W original, right = colorized. When the
         # tree image is itself a colorized variant, prefer it on the right so the
@@ -2776,8 +2792,8 @@ class ImageBrowserPanel(QWidget):
         self, show_colorized: bool, *, reset_zoom: bool
     ) -> None:
         """Display one side of the pair, with the compare divider off."""
-        from app.utils.image_utils import load_image_bgr_normalized as load_image_bgr
         from app.services.image_library_service import resolve_image_path
+        from app.utils.image_utils import load_image_bgr_normalized as load_image_bgr
 
         if show_colorized:
             path = self._deol_pair_color_path
@@ -2795,7 +2811,29 @@ class ImageBrowserPanel(QWidget):
         img_bgr = load_image_bgr(path)
         if img_bgr is None:
             log.warning("Cannot load image for deoldified view: %s", path)
-            return
+            if show_colorized:
+                # Colorized variant file is gone — degrade to the B&W side
+                # instead of leaving the panel frozen on the previous view.
+                if self._deol_pair_orig_id is not None:
+                    with session_scope() as session:
+                        orig = session.get(Image, self._deol_pair_orig_id)
+                        resolved = resolve_image_path(orig) if orig else None
+                        bw_path = (
+                            str(resolved) if resolved
+                            else (orig.file_path if orig else None)
+                        )
+                else:
+                    bw_path = self._current_path
+                bw_bgr = load_image_bgr(bw_path) if bw_path else None
+                if bw_bgr is not None:
+                    self._deol_mode = "bw"
+                    img_bgr = bw_bgr
+                    show_colorized = False
+                    self._deol_lbl.setText(t("ibp_deol_variant_missing"))
+                else:
+                    return
+            else:
+                return
 
         self._deol_compare = False
         self._image_label.set_compare_mode(False)
@@ -2882,16 +2920,21 @@ class ImageBrowserPanel(QWidget):
             self._redraw_faces()
 
     def _deol_apply_remembered_mode(self) -> None:
-        """Re-apply the remembered B&W/color/compare choice to a new image."""
-        if not self._deoldified_bar.isVisible() or self._deol_mode is None:
+        """Re-apply the remembered view choice to a newly opened image.
+
+        Compare mode is a property of the pair, so it survives navigation.  The
+        B&W/colorized choice does not: the file picked in the tree decides which
+        side is shown, otherwise clicking a '-deoldified' file would keep
+        showing black and white.  ``_load_image`` has already loaded that side,
+        so this only records the matching mode.
+        """
+        if not self._deol_group:
             return
         if self._deol_mode == "compare":
             if not self._enter_compare(reset_zoom=False):
                 self._deol_mode = None
-        elif self._deol_mode == "color":
-            self._apply_single_view(True, reset_zoom=False)
-        elif self._deol_mode == "bw":
-            self._apply_single_view(False, reset_zoom=False)
+            return
+        self._deol_mode = "color" if self._deol_opened_is_color else "bw"
 
     def _deol_clear_for_new_image(self) -> None:
         """Per-image reset: drop cached pixels and the compare divider.
@@ -2899,6 +2942,7 @@ class ImageBrowserPanel(QWidget):
         Keeps the remembered mode/split so the choice persists across images.
         """
         self._deol_compare = False
+        self._deol_opened_is_color = False
         self._deol_left_bgr = None
         self._deol_right_bgr = None
         self._deol_group = []
@@ -2950,13 +2994,17 @@ class ImageBrowserPanel(QWidget):
 
         if result is not None:
             log.info(
-                "Deoldified sync: %d face(s), metadata=%s (%d → %d)",
+                "Deoldified sync: %d new face(s), %d updated, %d object(s), "
+                "metadata=%s (%d → %d)",
                 result["faces_copied"],
+                result["faces_updated"],
+                result["objects_moved"],
                 result["metadata_fields"],
                 result["source_id"],
                 result["target_id"],
             )
             self._reload_current_face_data()
+            self._refresh_object_markers()
 
         if announce:
             if result is None:
@@ -2969,6 +3017,8 @@ class ImageBrowserPanel(QWidget):
                     t("ibp_deol_sync"),
                     t("ibp_deol_sync_done").format(
                         faces=result["faces_copied"],
+                        updated=result["faces_updated"],
+                        objects=result["objects_moved"],
                         fields=len(result["metadata_fields"]),
                     ),
                 )
@@ -3211,6 +3261,15 @@ class ImageBrowserPanel(QWidget):
             deep_action = rerec_menu.addAction(t("rerec_ctx_engine_deep"))
             deep_action.triggered.connect(
                 lambda: self._start_rerecognition(image_ids, engine="deep")
+            )
+            menu.addSeparator()
+
+            export_faces = menu.addAction(
+                t("ibp_ctx_export_faces_one") if n == 1
+                else t("ibp_ctx_export_faces_many", n=n)
+            )
+            export_faces.triggered.connect(
+                lambda: self._export_faces_as_images(image_ids)
             )
             menu.addSeparator()
 
@@ -3765,7 +3824,6 @@ class ImageBrowserPanel(QWidget):
         if cache_key not in self._thumb_cache:
             tree_item = self._tree_items.get(cache_key)
             if tree_item is not None:
-                from app.workers.drive_image_worker import DriveThumbRunnable
                 from app.workers.thumbnail_worker import ThumbnailRunnable
                 # File is now in mirror — generate thumbnail normally.
                 worker = ThumbnailRunnable(
@@ -4230,6 +4288,7 @@ class ImageBrowserPanel(QWidget):
             object_note_action = menu.addAction(t("object_ctx_edit_note"))
             menu.addSeparator()
             object_open_action = menu.addAction(t("object_ctx_open"))
+            object_find_action = menu.addAction(t("object_ctx_find_similar"))
             object_delete_action = menu.addAction(t("object_ctx_delete_occurrence"))
             menu.addSeparator()
             object_mark_action = menu.addAction(t("object_ctx_mark_here"))
@@ -4243,6 +4302,8 @@ class ImageBrowserPanel(QWidget):
                 self._edit_object_note(_occ_id)
             elif chosen is object_open_action:
                 self.object_open_requested.emit(_object_id)
+            elif chosen is object_find_action:
+                self.object_search_requested.emit(int(_object_id), "library")
             elif chosen is object_delete_action:
                 self._delete_object_occurrence(_occ_id)
             elif chosen is object_mark_action:
@@ -4278,6 +4339,14 @@ class ImageBrowserPanel(QWidget):
         manual_mark_action = menu.addAction(t("ibp_ctx_manual_mark"))
         object_mark_action = menu.addAction(t("object_ctx_mark_here"))
 
+        export_face_action: Optional[object] = None
+        export_all_action: Optional[object] = None
+        if self._current_image_id is not None:
+            menu.addSeparator()
+            if face_id is not None:
+                export_face_action = menu.addAction(t("ibp_ctx_export_this_face"))
+            export_all_action = menu.addAction(t("ibp_ctx_export_faces_one"))
+
         global_pos = self._image_label.mapToGlobal(QPoint(lx, ly))
         chosen = menu.exec(global_pos)
         log.debug(
@@ -4298,6 +4367,22 @@ class ImageBrowserPanel(QWidget):
             self._draw_mode_btn.setChecked(True)
         elif chosen is object_mark_action:
             self._object_mode_btn.setChecked(True)
+        elif export_face_action is not None and chosen is export_face_action:
+            self._export_faces_as_images(
+                [self._current_image_id], face_ids=[face_id]
+            )
+        elif export_all_action is not None and chosen is export_all_action:
+            self._export_faces_as_images([self._current_image_id])
+
+    def _export_faces_as_images(
+        self,
+        image_ids: List[int],
+        face_ids: Optional[List[int]] = None,
+    ) -> None:
+        """Open the face-image export dialog for *image_ids* (see #175)."""
+        from app.ui.helpers.face_image_export import run_face_image_export
+
+        run_face_image_export(image_ids, parent=self, face_ids=face_ids)
 
     def _delete_object_occurrence(self, occurrence_id: int) -> None:
         """Remove a single object occurrence marker from the current image."""
@@ -4318,11 +4403,15 @@ class ImageBrowserPanel(QWidget):
         self, occurrence_id: int, x: int, y: int, w: int, h: int
     ) -> None:
         """Persist a resized/moved object bounding box."""
+        from app.services.object_feature_service import ObjectFeatureService
         from app.services.object_service import ObjectService
 
         try:
             with session_scope() as session:
                 ObjectService(session).update_occurrence_bbox(occurrence_id, x, y, w, h)
+                # The frame now covers different pixels, so its cached match
+                # features describe the old crop; drop them to be re-extracted.
+                ObjectFeatureService(session).invalidate_patch(occurrence_id)
         except Exception:
             log.exception("Failed to update object bbox for occurrence %d", occurrence_id)
 
@@ -4425,6 +4514,15 @@ class ImageBrowserPanel(QWidget):
             self._hide_inline_editor()
             self._draw_hint.setText(t("object_rect_hint"))
 
+    def _object_image_id(self) -> Optional[int]:
+        """Image that owns the object tags — the B&W original when paired.
+
+        Mirrors the rule faces already follow (`_fetch_face_data`), so a tag
+        drawn on either side of a deoldified pair shows up in both views and is
+        stored only once.
+        """
+        return self._deol_pair_orig_id or self._current_image_id
+
     def _on_object_rect_drawn(self, label_rect: QRect) -> None:
         """A rectangle was drawn in object mode → pick object, store bbox."""
         if self._current_image_id is None or self._full_pixmap is None:
@@ -4448,7 +4546,7 @@ class ImageBrowserPanel(QWidget):
             with session_scope() as session:
                 ObjectService(session).add_occurrence_bbox(
                     dlg.chosen_object_id,
-                    self._current_image_id,
+                    self._object_image_id(),
                     bx, by, bw, bh,
                     note=dlg.occurrence_note,
                 )
@@ -4456,10 +4554,53 @@ class ImageBrowserPanel(QWidget):
             log.exception("Failed to add object bbox occurrence in image browser")
             return
         self._refresh_object_markers()
+        self._maybe_auto_search_object(dlg.chosen_object_id)
+
+    def _maybe_auto_search_object(self, object_id: int) -> None:
+        """Offer to look for the freshly framed object on other images.
+
+        Opt-in, and it only asks the search to start — the run happens in the
+        background, so tagging is never interrupted by it.
+        """
+        from app.app_settings import app_qsettings
+
+        enabled = str(
+            app_qsettings().value("object_matching/auto_search_after_tag", "false")
+        ).lower() in ("1", "true", "yes")
+        if not enabled:
+            return
+        self.object_search_requested.emit(int(object_id), "library")
+
+    def refresh_object_markers(self) -> None:
+        """Public redraw of the object overlay (after an external change)."""
+        self._refresh_object_markers()
+
+    def current_folder_image_ids(self) -> List[int]:
+        """Image ids in the folder currently open in the browser."""
+        folder = self._current_folder
+        if not folder:
+            return []
+        from sqlalchemy import select
+
+        from app.db.models import Image as _Image
+
+        try:
+            with session_scope() as session:
+                rows = session.execute(select(_Image.id, _Image.file_path)).all()
+        except Exception:
+            log.exception("Failed to list the current folder's images")
+            return []
+        wanted = str(Path(folder))
+        return [
+            int(image_id)
+            for image_id, file_path in rows
+            if file_path and str(Path(file_path).parent) == wanted
+        ]
 
     def _refresh_object_markers(self) -> None:
         """Load object occurrences for the current image and overlay them."""
-        if self._current_image_id is None:
+        image_id = self._object_image_id()
+        if image_id is None:
             self._object_marker_data = []
             self._selected_occurrence_id = None
             self._image_label.set_object_markers([])
@@ -4472,7 +4613,7 @@ class ImageBrowserPanel(QWidget):
         try:
             with session_scope() as session:
                 svc = ObjectService(session)
-                for occ in svc.get_occurrences_for_image(self._current_image_id):
+                for occ in svc.get_occurrences_for_image(image_id):
                     if occ.point_x is None or occ.point_y is None:
                         continue
                     obj = session.get(TaggedObject, occ.object_id)
@@ -5742,6 +5883,7 @@ class ImageBrowserPanel(QWidget):
                 place_lon = place.longitude
         except Exception as exc:  # noqa: BLE001
             from PySide6.QtWidgets import QMessageBox
+
             from app.ui.i18n import t
             QMessageBox.critical(
                 self,
@@ -5903,8 +6045,12 @@ class ImageBrowserPanel(QWidget):
 
     def _run_tree_search(self, tokens) -> None:
         from app.ui.widgets.universal_search_bar import (
-            TOKEN_ANY, TOKEN_DATE, TOKEN_FAMILY_CODE, TOKEN_IMAGE,
-            TOKEN_NICKNAME, TOKEN_PERSON, TOKEN_PLACE,
+            TOKEN_DATE,
+            TOKEN_FAMILY_CODE,
+            TOKEN_IMAGE,
+            TOKEN_NICKNAME,
+            TOKEN_PERSON,
+            TOKEN_PLACE,
         )
         name_terms: list[str] = []
         any_terms: list[str] = []
@@ -6134,6 +6280,7 @@ class ImageBrowserPanel(QWidget):
             person.gender = dlg.gender()
             person.family_code = dlg.family_code() or None
             person.external_family_code = dlg.external_family_code() or None
+            person.name_prefix = dlg.name_prefix() or None
             person.last_name = dlg.last_name() or None
             person.first_name = dlg.first_name() or None
             person.second_name = dlg.second_name() or None

@@ -12,9 +12,10 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -27,18 +28,32 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.app_settings import app_qsettings
+from app.services.duplicate_unknown_face_finder import (
+    DEFAULT_OVERLAP_SENSITIVITY,
+    OVERLAP_SENSITIVITIES,
+)
+from app.services.unknown_person_reset_service import UnknownPersonResetOptions
 from app.ui.i18n import t
 
 log = logging.getLogger(__name__)
+
+# QSettings key holding the last chosen overlap-search sensitivity preset.
+_OVERLAP_SENSITIVITY_SETTING = "overlap_cleanup/sensitivity"
+
 
 
 class ScanModesDialog(QDialog):
     """Modal dialog for choosing a scan or maintenance workflow."""
 
-    # "face_detection" | "full_rescan" | "train_model"
+    # "face_detection" | "full_rescan" | "train_model" | "object_matching"
     scan_workflow_started = Signal(str)
     # Maintenance action key, e.g. "overlap_cleanup", "identity_repair", …
     maintenance_action_started = Signal(str)
+    # Carries the UnknownPersonResetOptions chosen in the maintenance card.
+    # Separate from maintenance_action_started because the launch helpers close
+    # the dialog before emitting, so the checkbox state has to travel along.
+    reset_unknown_requested = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None, config=None) -> None:
         super().__init__(parent)
@@ -105,6 +120,12 @@ class ScanModesDialog(QDialog):
             danger=False,
         ))
         cards.addWidget(self._make_card(
+            title=t("scan_object_matching"),
+            desc=t("scan_object_matching_desc"),
+            on_click=lambda: self._launch_workflow("object_matching"),
+            danger=False,
+        ))
+        cards.addWidget(self._make_card(
             title=t("workflow_full_rescan_title"),
             desc=t("workflow_full_rescan_desc"),
             on_click=lambda: self._launch_workflow("full_rescan"),
@@ -152,10 +173,30 @@ class ScanModesDialog(QDialog):
 
         scroll, cards = self._make_scroll()
 
+        # Built outside the loop below: this is the one card carrying options.
+        cards.addWidget(self._make_card(
+            title=t("scanModes.resetUnknowns.title"),
+            desc=t("scanModes.resetUnknowns.description"),
+            on_click=self._launch_reset_unknown,
+            danger=False,
+            button_label=t("scanModes.resetUnknowns.startButton"),
+            warning=t("scanModes.resetUnknowns.warning"),
+            options_widget=self._build_reset_unknown_options(),
+        ))
+
+        # The overlap search carries its own sensitivity selector.
+        cards.addWidget(self._make_card(
+            title=t("scanModes.overlapCleanup.title"),
+            desc=t("scanModes.overlapCleanup.description"),
+            on_click=lambda: self._launch_maintenance("overlap_cleanup"),
+            danger=False,
+            button_label=t("scanModes.overlapCleanup.startButton"),
+            warning=t("scanModes.overlapCleanup.warning"),
+            options_widget=self._build_overlap_options(),
+        ))
+
         # Order mirrors the legacy "Klasszikus" maintenance list.
         maintenance = [
-            ("resetUnknowns", "reset_unknown_persons", False),
-            ("overlapCleanup", "overlap_cleanup", False),
             ("embeddingDuplicates", "embedding_duplicates", False),
             ("identityRepair", "identity_repair", False),
             ("cleanupEmptyUnknowns", "cleanup_empty_unknowns", False),
@@ -178,6 +219,91 @@ class ScanModesDialog(QDialog):
         layout.addWidget(scroll)
         return tab
 
+    def _build_reset_unknown_options(self) -> QWidget:
+        """Checkbox group rendered inside the "Rebuild Unknown identities" card."""
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        defaults = UnknownPersonResetOptions()
+        specs = [
+            ("_chk_delete_unknown_persons", "deletePersons",
+             defaults.delete_unknown_persons),
+            ("_chk_delete_face_assignments", "deleteFaceAssignments",
+             defaults.delete_face_assignments),
+            ("_chk_delete_face_data", "deleteFaceData",
+             defaults.delete_face_data),
+            ("_chk_rebuild_clusters", "rebuildClusters",
+             defaults.rebuild_clusters),
+        ]
+        for attr, key, checked in specs:
+            chk = QCheckBox(t(f"resetUnknownOptions.{key}"))
+            chk.setToolTip(t(f"resetUnknownOptions.{key}Tooltip"))
+            chk.setChecked(checked)
+            setattr(self, attr, chk)
+            layout.addWidget(chk)
+
+        # Deleting the face rows outright makes un-assigning them meaningless,
+        # and the service treats the two as exclusive — mirror that here so the
+        # checkbox cannot promise something that will be ignored.
+        self._chk_delete_face_data.toggled.connect(
+            lambda on: self._chk_delete_face_assignments.setEnabled(not on)
+        )
+        return box
+
+    def _build_overlap_options(self) -> QWidget:
+        """Sensitivity selector rendered inside the overlap-cleanup card.
+
+        The strict default only lists boxes that heavily overlap; the looser
+        levels also list boxes that merely intersect, which is what finds the
+        leftovers a strict pass walks past.
+        """
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        label = QLabel(t("scanModes.overlapCleanup.sensitivity"))
+        layout.addWidget(label)
+
+        self._overlap_sensitivity_combo = QComboBox()
+        for preset in OVERLAP_SENSITIVITIES:
+            self._overlap_sensitivity_combo.addItem(
+                t(f"overlapSensitivity.{preset.key}"), preset.key
+            )
+        saved = str(
+            app_qsettings().value(
+                _OVERLAP_SENSITIVITY_SETTING, DEFAULT_OVERLAP_SENSITIVITY
+            )
+        )
+        index = self._overlap_sensitivity_combo.findData(saved)
+        self._overlap_sensitivity_combo.setCurrentIndex(max(0, index))
+        self._overlap_sensitivity_combo.currentIndexChanged.connect(
+            self._on_overlap_sensitivity_changed
+        )
+        layout.addWidget(self._overlap_sensitivity_combo)
+
+        tip = QLabel(t("scanModes.overlapCleanup.sensitivityTip"))
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: #A6ADC8; font-size: 11px;")
+        layout.addWidget(tip)
+        return box
+
+    def _on_overlap_sensitivity_changed(self, _index: int) -> None:
+        key = self._overlap_sensitivity_combo.currentData()
+        app_qsettings().setValue(_OVERLAP_SENSITIVITY_SETTING, key)
+        log.info("Overlap search sensitivity set to %s", key)
+
+    def reset_unknown_options(self) -> UnknownPersonResetOptions:
+        """Current state of the inline Unknown-reset checkboxes."""
+        return UnknownPersonResetOptions(
+            delete_unknown_persons=self._chk_delete_unknown_persons.isChecked(),
+            delete_face_assignments=self._chk_delete_face_assignments.isChecked(),
+            delete_face_data=self._chk_delete_face_data.isChecked(),
+            rebuild_clusters=self._chk_rebuild_clusters.isChecked(),
+        )
+
     # ------------------------------------------------------------------
 
     def _make_card(
@@ -188,6 +314,7 @@ class ScanModesDialog(QDialog):
         danger: bool,
         button_label: Optional[str] = None,
         warning: Optional[str] = None,
+        options_widget: Optional[QWidget] = None,
     ) -> QFrame:
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
@@ -213,6 +340,9 @@ class ScanModesDialog(QDialog):
             warn_lbl.setWordWrap(True)
             warn_lbl.setStyleSheet("color: #F38BA8;" if danger else "color: #F9E2AF;")
             layout.addWidget(warn_lbl)
+
+        if options_widget is not None:
+            layout.addWidget(options_widget)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -249,3 +379,8 @@ class ScanModesDialog(QDialog):
     def _launch_maintenance(self, action: str) -> None:
         self.accept()
         self.maintenance_action_started.emit(action)
+
+    def _launch_reset_unknown(self) -> None:
+        options = self.reset_unknown_options()
+        self.accept()
+        self.reset_unknown_requested.emit(options)

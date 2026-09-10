@@ -310,6 +310,9 @@ class Person(Base):
     external_family_code: Mapped[Optional[str]] = mapped_column(
         String(128), nullable=True, index=True
     )
+    # Name prefix / historical predicate that precedes the surname
+    # (e.g. "Csicseri", "Nagy-Ajtai"). Purely informational, never auto-filled.
+    name_prefix: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     last_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     second_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -1691,4 +1694,159 @@ class AiFaceDetection(Base):
             f"<AiFaceDetection image={self.image_id} "
             f"bbox=({self.bbox_x},{self.bbox_y},{self.bbox_w},{self.bbox_h}) "
             f"conf={self.confidence:.3f} detector={self.detector_name!r}>"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Object matching (#164) — "same image region" recognition
+# ---------------------------------------------------------------------------
+
+# Status values for ObjectMatchSuggestion.status.
+OBJECT_MATCH_PENDING = "pending"
+OBJECT_MATCH_ACCEPTED = "accepted"
+OBJECT_MATCH_REJECTED = "rejected"
+
+
+class ImageFeatures(Base):
+    """Cached local keypoint features (ORB) for one image.
+
+    A side table on purpose, exactly like :class:`FaceBlob`: the descriptor
+    blob is tens of kilobytes, so keeping it out of ``images`` means no
+    existing query pays for it.
+
+    ``params_hash`` fingerprints the extractor settings.  When the settings
+    change the row is simply stale and gets recomputed on next use, so there
+    is never a mix of incomparable descriptors.
+    """
+
+    __tablename__ = "image_features"
+
+    image_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("images.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    # cv2 descriptor matrix, uint8, shape (n_features, 32), raw bytes.
+    descriptors: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    # float32 (n_features, 3): x, y, size — enough to re-create cv2.KeyPoint.
+    keypoints: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+
+    n_features: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Dimensions of the image the keypoints refer to (original pixels).
+    img_w: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    img_h: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Scale applied before extraction (working image / original), <= 1.0.
+    work_scale: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+
+    params_hash: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<ImageFeatures image={self.image_id} n={self.n_features}>"
+
+
+class ObjectPatchFeatures(Base):
+    """Cached local keypoint features of one object occurrence's crop.
+
+    Every bbox occurrence of a :class:`TaggedObject` is a reference sample.
+    This is where the "learning" of #164 lives: accepting a match creates a
+    new occurrence, which in turn becomes another reference sample here.
+    """
+
+    __tablename__ = "object_patch_features"
+
+    occurrence_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("object_occurrences.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    object_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tagged_objects.id", ondelete="CASCADE"), nullable=False
+    )
+
+    descriptors: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    keypoints: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+
+    n_features: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Size of the crop the keypoints refer to (original image pixels).
+    patch_w: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    patch_h: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    work_scale: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+
+    params_hash: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ObjectPatchFeatures occ={self.occurrence_id} "
+            f"object={self.object_id} n={self.n_features}>"
+        )
+
+
+class ObjectMatchSuggestion(Base):
+    """A candidate "this object also appears here" hit awaiting review.
+
+    Analogous to :class:`AiFaceDetection`: raw matcher output kept separate
+    from the manual ``object_occurrences`` rows.  Only an explicit accept
+    turns a suggestion into a real occurrence.  A rejected row is kept
+    forever so the same wrong pairing is never suggested again.
+    """
+
+    __tablename__ = "object_match_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "object_id", "image_id", "bbox_x", "bbox_y", name="ux_object_match"
+        ),
+        Index("ix_objmatch_object", "object_id"),
+        Index("ix_objmatch_image", "image_id"),
+        Index("ix_objmatch_status", "status"),
+        Index("ix_objmatch_run", "run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    object_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tagged_objects.id", ondelete="CASCADE"), nullable=False
+    )
+    image_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+
+    bbox_x: Mapped[int] = mapped_column(Integer, nullable=False)
+    bbox_y: Mapped[int] = mapped_column(Integer, nullable=False)
+    bbox_w: Mapped[int] = mapped_column(Integer, nullable=False)
+    bbox_h: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Normalised match quality [0.0 – 1.0]; copied into
+    # ObjectOccurrence.confidence when accepted.
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Number of RANSAC inliers behind the hit — the raw evidence.
+    inliers: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Estimated size ratio target/reference (0.25 = quarter-size collage copy).
+    scale: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+
+    # Which reference sample produced the hit (NULL if it was since deleted).
+    source_occurrence_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("object_occurrences.id", ondelete="SET NULL"), nullable=True
+    )
+    # Occurrence created on accept, so the decision can be traced back.
+    created_occurrence_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("object_occurrences.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # "pending" | "accepted" | "rejected"
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=OBJECT_MATCH_PENDING
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    tagged_object: Mapped["TaggedObject"] = relationship("TaggedObject")
+    image: Mapped["Image"] = relationship("Image")
+
+    def __repr__(self) -> str:
+        return (
+            f"<ObjectMatchSuggestion object={self.object_id} image={self.image_id} "
+            f"score={self.score:.3f} inliers={self.inliers} status={self.status!r}>"
         )

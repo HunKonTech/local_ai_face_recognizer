@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import piexif
 from PIL import Image as PilImage
 
 from app.utils.exif import read_exif_gps, write_exif_date, write_exif_gps
+
+
+def _read_datetime_original(path):
+    """DateTimeOriginal as a string, read without depending on piexif."""
+    with PilImage.open(path) as im:
+        return im.getexif().get_ifd(0x8769).get(0x9003)
 
 
 def _make_jpeg(path, *, exif_bytes: bytes | None = None) -> None:
@@ -29,8 +34,7 @@ def test_write_gps_and_date_roundtrip(tmp_path):
     assert round(lat, 3) == 47.5
     assert round(lon, 3) == 19.05
 
-    ex = piexif.load(str(jpg))
-    assert ex["Exif"][piexif.ExifIFD.DateTimeOriginal] == b"1985:07:20 00:00:00"
+    assert _read_datetime_original(jpg) == "1985:07:20 00:00:00"
 
 
 def test_gps_and_date_coexist(tmp_path):
@@ -42,8 +46,7 @@ def test_gps_and_date_coexist(tmp_path):
     write_exif_date(jpg, datetime(2001, 2, 3))
 
     assert read_exif_gps(jpg) is not None
-    ex = piexif.load(str(jpg))
-    assert ex["Exif"][piexif.ExifIFD.DateTimeOriginal] == b"2001:02:03 00:00:00"
+    assert _read_datetime_original(jpg) == "2001:02:03 00:00:00"
 
 
 def test_write_gps_survives_windows_lock(tmp_path, monkeypatch):

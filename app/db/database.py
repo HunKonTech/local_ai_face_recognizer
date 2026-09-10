@@ -91,6 +91,7 @@ def _migrate_add_columns(engine: Engine) -> None:
             ("gender",               "VARCHAR(16)"),
             ("family_code",          "VARCHAR(64)"),
             ("external_family_code", "VARCHAR(128)"),
+            ("name_prefix",          "VARCHAR(255)"),
             ("last_name",            "VARCHAR(255)"),
             ("first_name",           "VARCHAR(255)"),
             ("second_name",          "VARCHAR(255)"),
@@ -174,6 +175,7 @@ def _migrate_add_columns(engine: Engine) -> None:
     _migrate_geocoding_tables(engine)
     _migrate_place_display_name(engine)
     _migrate_object_tagging(engine)
+    _migrate_object_matching(engine)
     _migrate_deep_recognition_tables(engine)
     _refresh_query_planner_stats(engine)
 
@@ -543,6 +545,108 @@ def _migrate_object_tagging(engine: Engine) -> None:
             )
         )
     log.debug("Migration: object tagging tables ensured")
+
+
+def _migrate_object_matching(engine: Engine) -> None:
+    """Create the object-matching tables if missing (idempotent).
+
+    Feature caches (image_features, object_patch_features) plus the review
+    queue (object_match_suggestions) behind "recognise the same image region
+    in other photos".  The descriptor blobs live in side tables so no existing
+    query on images/object_occurrences gets slower.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS image_features (
+                    image_id    INTEGER PRIMARY KEY
+                        REFERENCES images(id) ON DELETE CASCADE,
+                    descriptors BLOB,
+                    keypoints   BLOB,
+                    n_features  INTEGER NOT NULL DEFAULT 0,
+                    img_w       INTEGER NOT NULL DEFAULT 0,
+                    img_h       INTEGER NOT NULL DEFAULT 0,
+                    work_scale  FLOAT NOT NULL DEFAULT 1.0,
+                    params_hash VARCHAR(32) NOT NULL DEFAULT '',
+                    computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS object_patch_features (
+                    occurrence_id INTEGER PRIMARY KEY
+                        REFERENCES object_occurrences(id) ON DELETE CASCADE,
+                    object_id     INTEGER NOT NULL
+                        REFERENCES tagged_objects(id) ON DELETE CASCADE,
+                    descriptors   BLOB,
+                    keypoints     BLOB,
+                    n_features    INTEGER NOT NULL DEFAULT 0,
+                    patch_w       INTEGER NOT NULL DEFAULT 0,
+                    patch_h       INTEGER NOT NULL DEFAULT 0,
+                    work_scale    FLOAT NOT NULL DEFAULT 1.0,
+                    params_hash   VARCHAR(32) NOT NULL DEFAULT '',
+                    computed_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_opf_object "
+                "ON object_patch_features(object_id)"
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS object_match_suggestions (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    object_id             INTEGER NOT NULL
+                        REFERENCES tagged_objects(id) ON DELETE CASCADE,
+                    image_id              INTEGER NOT NULL
+                        REFERENCES images(id) ON DELETE CASCADE,
+                    bbox_x                INTEGER NOT NULL,
+                    bbox_y                INTEGER NOT NULL,
+                    bbox_w                INTEGER NOT NULL,
+                    bbox_h                INTEGER NOT NULL,
+                    score                 FLOAT NOT NULL DEFAULT 0.0,
+                    inliers               INTEGER NOT NULL DEFAULT 0,
+                    scale                 FLOAT NOT NULL DEFAULT 1.0,
+                    source_occurrence_id  INTEGER
+                        REFERENCES object_occurrences(id) ON DELETE SET NULL,
+                    created_occurrence_id INTEGER
+                        REFERENCES object_occurrences(id) ON DELETE SET NULL,
+                    status                VARCHAR(16) NOT NULL DEFAULT 'pending',
+                    run_id                VARCHAR(64) NOT NULL DEFAULT '',
+                    created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    reviewed_at           DATETIME
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_object_match "
+                "ON object_match_suggestions(object_id, image_id, bbox_x, bbox_y)"
+            )
+        )
+        for name, col in (
+            ("ix_objmatch_object", "object_id"),
+            ("ix_objmatch_image", "image_id"),
+            ("ix_objmatch_status", "status"),
+            ("ix_objmatch_run", "run_id"),
+        ):
+            conn.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS {name} "
+                    f"ON object_match_suggestions({col})"
+                )
+            )
+    log.debug("Migration: object matching tables ensured")
 
 
 def _migrate_geocoding_tables(engine: Engine) -> None:

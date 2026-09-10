@@ -62,7 +62,7 @@ class _DialogDataThread(QThread):
         from app.services.person_group_service import PersonGroupService
 
         data: dict = {
-            "places": [], "last_names": [], "first_names": [],
+            "places": [], "name_prefixes": [], "last_names": [], "first_names": [],
             "all_groups": [], "person_groups": [], "objects": [],
         }
         try:
@@ -80,6 +80,7 @@ class _DialogDataThread(QThread):
                     return sorted(out)
 
                 data["places"] = _values("birth_place", "death_place")
+                data["name_prefixes"] = _values("name_prefix")
                 data["last_names"] = _values("last_name")
                 data["first_names"] = _values("first_name")
 
@@ -185,6 +186,10 @@ class PersonInfoDialog(QDialog):
             lambda: self._code_check_timer.start()
         )
         form.addRow(t("external_family_code"), self._external_family_code)
+
+        self._name_prefix = QLineEdit(person.name_prefix or "")
+        self._name_prefix.setPlaceholderText(t("example_name_prefix"))
+        form.addRow(t("name_prefix"), self._name_prefix)
 
         self._last_name = QLineEdit(person.last_name or "")
         self._last_name.setPlaceholderText(t("example_last_name"))
@@ -494,6 +499,7 @@ class PersonInfoDialog(QDialog):
         """Apply background-loaded autocomplete, group and object data."""
         self._birth_place.setCompleter(self._make_completer(data["places"]))
         self._death_place.setCompleter(self._make_completer(data["places"]))
+        self._name_prefix.setCompleter(self._make_completer(data["name_prefixes"]))
         self._last_name.setCompleter(self._make_completer(data["last_names"]))
         self._first_name.setCompleter(self._make_completer(data["first_names"]))
 
@@ -512,6 +518,9 @@ class PersonInfoDialog(QDialog):
     # ------------------------------------------------------------------
     # Accessors
     # ------------------------------------------------------------------
+
+    def name_prefix(self) -> str:
+        return self._name_prefix.text().strip()
 
     def last_name(self) -> str:
         return self._last_name.text().strip()
@@ -581,6 +590,7 @@ def edit_person_dialog(person_id: int, parent: Optional[QWidget] = None) -> bool
                 gender=dlg.gender(),
                 family_code=dlg.family_code(),
                 external_family_code=dlg.external_family_code(),
+                name_prefix=dlg.name_prefix(),
                 last_name=dlg.last_name(),
                 first_name=dlg.first_name(),
                 second_name=dlg.second_name(),
