@@ -1691,6 +1691,7 @@ class ImageBrowserPanel(QWidget):
         self._deol_viewing_color: bool = False         # True = showing colorized pixels
         self._deol_compare: bool = False               # True = compare divider active now
         self._deol_mode: Optional[str] = None          # remembered choice: 'bw'|'color'|'compare'
+        self._deol_opened_is_color: bool = False       # tree selection is a colorized variant
         self._deol_split: int = 50                     # remembered split position (percent)
         # Comparison group: B&W original first, then colorized variants. The
         # compare view composes any two of them, chosen by left/right index.
@@ -2559,6 +2560,7 @@ class ImageBrowserPanel(QWidget):
         self._deol_group = group
         bw_member = group[0]  # is_bw=True by construction
         current_is_color = is_deoldified_path(image_path)
+        self._deol_opened_is_color = current_is_color
 
         # Default selection: left = B&W original, right = colorized. When the
         # tree image is itself a colorized variant, prefer it on the right so the
@@ -2809,16 +2811,21 @@ class ImageBrowserPanel(QWidget):
             self._redraw_faces()
 
     def _deol_apply_remembered_mode(self) -> None:
-        """Re-apply the remembered B&W/color/compare choice to a new image."""
-        if not self._deoldified_bar.isVisible() or self._deol_mode is None:
+        """Re-apply the remembered view choice to a newly opened image.
+
+        Compare mode is a property of the pair, so it survives navigation.  The
+        B&W/colorized choice does not: the file picked in the tree decides which
+        side is shown, otherwise clicking a '-deoldified' file would keep
+        showing black and white.  ``_load_image`` has already loaded that side,
+        so this only records the matching mode.
+        """
+        if not self._deol_group:
             return
         if self._deol_mode == "compare":
             if not self._enter_compare(reset_zoom=False):
                 self._deol_mode = None
-        elif self._deol_mode == "color":
-            self._apply_single_view(True, reset_zoom=False)
-        elif self._deol_mode == "bw":
-            self._apply_single_view(False, reset_zoom=False)
+            return
+        self._deol_mode = "color" if self._deol_opened_is_color else "bw"
 
     def _deol_clear_for_new_image(self) -> None:
         """Per-image reset: drop cached pixels and the compare divider.
@@ -2826,6 +2833,7 @@ class ImageBrowserPanel(QWidget):
         Keeps the remembered mode/split so the choice persists across images.
         """
         self._deol_compare = False
+        self._deol_opened_is_color = False
         self._deol_left_bgr = None
         self._deol_right_bgr = None
         self._deol_group = []
@@ -2877,13 +2885,17 @@ class ImageBrowserPanel(QWidget):
 
         if result is not None:
             log.info(
-                "Deoldified sync: %d face(s), metadata=%s (%d → %d)",
+                "Deoldified sync: %d new face(s), %d updated, %d object(s), "
+                "metadata=%s (%d → %d)",
                 result["faces_copied"],
+                result["faces_updated"],
+                result["objects_moved"],
                 result["metadata_fields"],
                 result["source_id"],
                 result["target_id"],
             )
             self._reload_current_face_data()
+            self._refresh_object_markers()
 
         if announce:
             if result is None:
@@ -2896,6 +2908,8 @@ class ImageBrowserPanel(QWidget):
                     t("ibp_deol_sync"),
                     t("ibp_deol_sync_done").format(
                         faces=result["faces_copied"],
+                        updated=result["faces_updated"],
+                        objects=result["objects_moved"],
                         fields=len(result["metadata_fields"]),
                     ),
                 )
@@ -4385,6 +4399,15 @@ class ImageBrowserPanel(QWidget):
             self._hide_inline_editor()
             self._draw_hint.setText(t("object_rect_hint"))
 
+    def _object_image_id(self) -> Optional[int]:
+        """Image that owns the object tags — the B&W original when paired.
+
+        Mirrors the rule faces already follow (`_fetch_face_data`), so a tag
+        drawn on either side of a deoldified pair shows up in both views and is
+        stored only once.
+        """
+        return self._deol_pair_orig_id or self._current_image_id
+
     def _on_object_rect_drawn(self, label_rect: QRect) -> None:
         """A rectangle was drawn in object mode → pick object, store bbox."""
         if self._current_image_id is None or self._full_pixmap is None:
@@ -4408,7 +4431,7 @@ class ImageBrowserPanel(QWidget):
             with session_scope() as session:
                 ObjectService(session).add_occurrence_bbox(
                     dlg.chosen_object_id,
-                    self._current_image_id,
+                    self._object_image_id(),
                     bx, by, bw, bh,
                     note=dlg.occurrence_note,
                 )
@@ -4419,7 +4442,8 @@ class ImageBrowserPanel(QWidget):
 
     def _refresh_object_markers(self) -> None:
         """Load object occurrences for the current image and overlay them."""
-        if self._current_image_id is None:
+        image_id = self._object_image_id()
+        if image_id is None:
             self._object_marker_data = []
             self._selected_occurrence_id = None
             self._image_label.set_object_markers([])
@@ -4432,7 +4456,7 @@ class ImageBrowserPanel(QWidget):
         try:
             with session_scope() as session:
                 svc = ObjectService(session)
-                for occ in svc.get_occurrences_for_image(self._current_image_id):
+                for occ in svc.get_occurrences_for_image(image_id):
                     if occ.point_x is None or occ.point_y is None:
                         continue
                     obj = session.get(TaggedObject, occ.object_id)

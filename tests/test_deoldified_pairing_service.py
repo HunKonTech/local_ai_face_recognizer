@@ -406,7 +406,7 @@ def _make_face(image_id: int, person_id: int):
 
 
 class TestSyncPairData:
-    """One-directional copy of annotations between a deoldified pair."""
+    """Merging annotations between the two sides of a deoldified pair."""
 
     def test_copies_faces_and_metadata_into_empty_side(self, tmp_db) -> None:
         from app.db.database import session_scope
@@ -460,7 +460,7 @@ class TestSyncPairData:
             orig = s.query(Image).filter(Image.file_hash == "src_full").first()
             assert len(orig.faces) == 1
 
-    def test_skips_when_both_sides_have_data(self, tmp_db) -> None:
+    def test_skips_when_pair_already_in_sync(self, tmp_db) -> None:
         from app.db.database import session_scope
         from app.db.models import Image, Person
 
@@ -572,6 +572,177 @@ class TestSyncPairData:
             assert result is not None
             assert result["faces_copied"] == 0
             assert result["metadata_fields"] == ["note"]
+
+
+class TestSyncPairMerge:
+    """Incremental merge: only what the other side is missing gets copied."""
+
+    def _pair(self, s, tag: str):
+        """Create a B&W/colorized pair and return both Image rows."""
+        from app.db.models import Image
+
+        orig = Image(
+            file_path=f"/bw/{tag}.jpg", file_hash=f"{tag}_bw", file_mtime=0.0
+        )
+        color = Image(
+            file_path=f"/color/{tag}-deoldified.jpg",
+            file_hash=f"{tag}_color",
+            file_mtime=0.0,
+        )
+        s.add_all([orig, color])
+        s.flush()
+        return orig, color
+
+    def _reload(self, s, tag: str):
+        from app.db.models import Image
+
+        return (
+            s.query(Image).filter(Image.file_hash == f"{tag}_bw").first(),
+            s.query(Image).filter(Image.file_hash == f"{tag}_color").first(),
+        )
+
+    def test_copies_the_face_added_later_to_the_filled_pair(self, tmp_db) -> None:
+        """A face drawn on the original reaches a colorized side that already has data."""
+        from app.db.database import session_scope
+        from app.db.models import Person
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "later")
+            p = Person(name="Pósa Jenő", is_auto_named=False)
+            s.add(p)
+            s.flush()
+            shared = _make_face(orig.id, p.id)
+            s.add(shared)
+            s.add(_make_face(color.id, p.id))
+            extra = _make_face(orig.id, p.id)
+            extra.bbox_x, extra.bbox_y = 400, 500
+            s.add(extra)
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "later")
+            result = DeoldifiedPairingService(s).sync_pair_data(orig, color)
+            assert result is not None
+            assert result["faces_copied"] == 1
+
+        with session_scope() as s:
+            _orig, color = self._reload(s, "later")
+            assert len(color.faces) == 2
+            assert {(f.bbox_x, f.bbox_y) for f in color.faces} == {(10, 20), (400, 500)}
+
+    def test_overlapping_face_is_not_duplicated(self, tmp_db) -> None:
+        """A slightly nudged box still counts as the same face."""
+        from app.db.database import session_scope
+        from app.db.models import Person
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "iou")
+            p = Person(name="Anna", is_auto_named=False)
+            s.add(p)
+            s.flush()
+            s.add(_make_face(orig.id, p.id))
+            nudged = _make_face(color.id, p.id)
+            nudged.bbox_x += 6
+            nudged.bbox_y += 6
+            s.add(nudged)
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "iou")
+            assert DeoldifiedPairingService(s).sync_pair_data(orig, color) is None
+
+        with session_scope() as s:
+            _orig, color = self._reload(s, "iou")
+            assert len(color.faces) == 1
+
+    def test_unassigned_counterpart_gets_the_person(self, tmp_db) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Person
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "assign")
+            p = Person(name="Emő", is_auto_named=False)
+            s.add(p)
+            s.flush()
+            s.add(_make_face(orig.id, p.id))
+            s.add(_make_face(color.id, None))
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "assign")
+            result = DeoldifiedPairingService(s).sync_pair_data(orig, color)
+            assert result is not None
+            assert result["faces_copied"] == 0
+            assert result["faces_updated"] == 1
+
+        with session_scope() as s:
+            _orig, color = self._reload(s, "assign")
+            assert color.faces[0].person.name == "Emő"
+
+    def test_existing_assignment_is_never_overwritten(self, tmp_db) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Person
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "keep")
+            a = Person(name="A", is_auto_named=False)
+            b = Person(name="B", is_auto_named=False)
+            s.add_all([a, b])
+            s.flush()
+            s.add(_make_face(orig.id, a.id))
+            s.add(_make_face(color.id, b.id))
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "keep")
+            assert DeoldifiedPairingService(s).sync_pair_data(orig, color) is None
+
+        with session_scope() as s:
+            _orig, color = self._reload(s, "keep")
+            assert color.faces[0].person.name == "B"
+
+    def test_object_tag_moves_onto_the_original(self, tmp_db) -> None:
+        from app.db.database import session_scope
+        from app.db.models import ObjectOccurrence
+        from app.services.object_service import ObjectService
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "obj")
+            obj = ObjectService(s).create_object("Iblistan szekta")
+            ObjectService(s).add_occurrence_bbox(obj.id, color.id, 30, 40, 50, 60)
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "obj")
+            result = DeoldifiedPairingService(s).sync_pair_data(color, orig)
+            assert result is not None
+            assert result["objects_moved"] == 1
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "obj")
+            rows = s.query(ObjectOccurrence).all()
+            assert len(rows) == 1
+            assert rows[0].image_id == orig.id
+            assert (rows[0].bbox_x, rows[0].bbox_y) == (30, 40)
+
+    def test_duplicate_object_tag_is_dropped_not_moved(self, tmp_db) -> None:
+        """The same tag on both sides collapses to one row on the original."""
+        from app.db.database import session_scope
+        from app.db.models import ObjectOccurrence
+        from app.services.object_service import ObjectService
+
+        with session_scope() as s:
+            orig, color = self._pair(s, "dup")
+            obj = ObjectService(s).create_object("Sátor")
+            ObjectService(s).add_occurrence_bbox(obj.id, orig.id, 30, 40, 50, 60)
+            ObjectService(s).add_occurrence_bbox(obj.id, color.id, 30, 40, 50, 60)
+
+        with session_scope() as s:
+            orig, color = self._reload(s, "dup")
+            result = DeoldifiedPairingService(s).sync_pair_data(orig, color)
+            assert result is not None
+            assert result["objects_moved"] == 1
+
+        with session_scope() as s:
+            orig, _color = self._reload(s, "dup")
+            rows = s.query(ObjectOccurrence).all()
+            assert len(rows) == 1
+            assert rows[0].image_id == orig.id
 
 
 class TestExtractVariantLabel:

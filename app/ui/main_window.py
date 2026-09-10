@@ -2565,10 +2565,15 @@ class MainWindow(QMainWindow):
             self._preview_panel.set_object_occurrences([])
             return
         from app.db.models import TaggedObject
+        from app.services.deoldified_pairing_service import DeoldifiedPairingService
         from app.services.object_service import ObjectService
         markers = []
         try:
             with session_scope() as session:
+                # Object tags live on the B&W original of a deoldified pair.
+                image_id = DeoldifiedPairingService.canonical_image_id(
+                    session, image_id
+                )
                 for occ in ObjectService(session).get_occurrences_for_image(image_id):
                     if occ.point_x is None or occ.point_y is None:
                         continue
@@ -2583,6 +2588,7 @@ class MainWindow(QMainWindow):
     @Slot(int, int, int)
     def _on_preview_object_create(self, image_id: int, x: int, y: int) -> None:
         """Open the object picker for a clicked point and record the occurrence."""
+        from app.services.deoldified_pairing_service import DeoldifiedPairingService
         from app.services.object_service import ObjectService
         from app.ui.dialogs.object_picker_dialog import ObjectPickerDialog
 
@@ -2591,8 +2597,12 @@ class MainWindow(QMainWindow):
             return
         try:
             with session_scope() as session:
+                # Store the tag on the B&W original so both sides show it.
+                target_id = DeoldifiedPairingService.canonical_image_id(
+                    session, image_id
+                )
                 ObjectService(session).add_occurrence(
-                    dlg.chosen_object_id, image_id, x, y, note=dlg.occurrence_note
+                    dlg.chosen_object_id, target_id, x, y, note=dlg.occurrence_note
                 )
         except Exception:
             log.exception("Failed to add object occurrence")
