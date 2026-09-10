@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -27,7 +26,6 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTabWidget,
     QToolBar,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -218,7 +216,6 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         self._build_menu_bar()
         self._build_toolbar()
-        self._wire_menu_bar_actions()
         self._build_central()
         self._build_log_dock()
         self._build_status_bar()
@@ -241,11 +238,39 @@ class MainWindow(QMainWindow):
         )
 
         # ── Eszközök ──────────────────────────────────────────────────────
-        # Actions are created in _build_toolbar(); wired here after that call.
-        # We defer population to _wire_menu_bar_actions() called at end of _build_ui.
         self._mb_tools_menu = mb.addMenu("")
+        self._export_action = self._mb_tools_menu.addAction("", self._on_open_export)
+        self._no_face_action = self._mb_tools_menu.addAction(
+            "", self._on_no_face_images
+        )
+
+        # ── Összevonás ────────────────────────────────────────────────────
         self._mb_merge_menu = mb.addMenu("")
+        self._suggestions_action = self._mb_merge_menu.addAction(
+            "", self._on_show_suggestions
+        )
+        self._suggestions_action.setToolTip(t("suggestions_tip"))
+        self._amerge_action = self._mb_merge_menu.addAction(
+            "", self._on_open_amerge_review
+        )
+
+        # ── Rendszer ──────────────────────────────────────────────────────
         self._mb_system_menu = mb.addMenu("")
+        self._settings_action = self._mb_system_menu.addAction("", self._on_settings)
+        self._tasks_action = self._mb_system_menu.addAction(
+            "", self._on_open_task_manager
+        )
+        self._mb_system_menu.addSeparator()
+        self._gdrive_action = self._mb_system_menu.addAction(
+            "", self._on_toggle_drive_project
+        )
+        self._gdrive_action.setVisible(False)
+        self._mb_system_menu.addSeparator()
+        self._log_action = self._mb_system_menu.addAction(
+            "", self._on_log_action_toggled
+        )
+        self._log_action.setCheckable(True)
+        self._log_action.setChecked(True)
 
         # ── Debug ─────────────────────────────────────────────────────────
         self._mb_debug_menu = mb.addMenu("")
@@ -259,21 +284,6 @@ class MainWindow(QMainWindow):
         self._tasks_debug_action = self._mb_debug_menu.addAction(
             "", self._on_open_task_manager
         )
-
-    def _wire_menu_bar_actions(self) -> None:
-        """Populate the menu bar menus with the QActions built by _build_toolbar."""
-        self._mb_tools_menu.addAction(self._export_action)
-        self._mb_tools_menu.addAction(self._no_face_action)
-
-        self._mb_merge_menu.addAction(self._suggestions_action)
-        self._mb_merge_menu.addAction(self._amerge_action)
-
-        self._mb_system_menu.addAction(self._settings_action)
-        self._mb_system_menu.addAction(self._tasks_action)
-        self._mb_system_menu.addSeparator()
-        self._mb_system_menu.addAction(self._gdrive_action)
-        self._mb_system_menu.addSeparator()
-        self._mb_system_menu.addAction(self._log_action)
 
     def _build_toolbar(self) -> None:
         tb = QToolBar(t("main_toolbar"))
@@ -296,47 +306,6 @@ class MainWindow(QMainWindow):
         self._scan_modes_btn.setEnabled(True)
         self._scan_modes_btn.clicked.connect(self._on_open_scan_modes)
         tb.addWidget(self._scan_modes_btn)
-
-        tb.addSeparator()
-
-        # ── Eszközök dropdown ──────────────────────────────────────────────
-        self._tools_menu = QMenu(self)
-        self._export_action = self._tools_menu.addAction("", self._on_open_export)
-        self._no_face_action = self._tools_menu.addAction("", self._on_no_face_images)
-        self._tools_menu_btn = QToolButton()
-        self._tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._tools_menu_btn.setMenu(self._tools_menu)
-        tb.addWidget(self._tools_menu_btn)
-
-        tb.addSeparator()
-
-        # ── Összevonás dropdown ────────────────────────────────────────────
-        self._merge_menu = QMenu(self)
-        self._suggestions_action = self._merge_menu.addAction("", self._on_show_suggestions)
-        self._suggestions_action.setToolTip(t("suggestions_tip"))
-        self._amerge_action = self._merge_menu.addAction("", self._on_open_amerge_review)
-        self._merge_menu_btn = QToolButton()
-        self._merge_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._merge_menu_btn.setMenu(self._merge_menu)
-        tb.addWidget(self._merge_menu_btn)
-
-        tb.addSeparator()
-
-        # ── Rendszer dropdown ──────────────────────────────────────────────
-        self._system_menu = QMenu(self)
-        self._settings_action = self._system_menu.addAction("", self._on_settings)
-        self._tasks_action = self._system_menu.addAction("", self._on_open_task_manager)
-        self._system_menu.addSeparator()
-        self._gdrive_action = self._system_menu.addAction("", self._on_toggle_drive_project)
-        self._gdrive_action.setVisible(False)
-        self._system_menu.addSeparator()
-        self._log_action = self._system_menu.addAction("", self._on_log_action_toggled)
-        self._log_action.setCheckable(True)
-        self._log_action.setChecked(True)
-        self._system_menu_btn = QToolButton()
-        self._system_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._system_menu_btn.setMenu(self._system_menu)
-        tb.addWidget(self._system_menu_btn)
 
         tb.addSeparator()
 
@@ -638,14 +607,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_root_folders") or not self._root_folders:
             self._folder_label.setText(f"  {t('no_folder')}")
         self._scan_modes_btn.setText(t("scanModes.openButton"))
-        self._tools_menu_btn.setText(t("tb_tools_menu"))
         self._export_action.setText(t("tb_export"))
         self._no_face_action.setText(t("view_no_face"))
-        self._merge_menu_btn.setText(t("tb_merge_menu"))
         self._suggestions_action.setText(t("suggestions_btn"))
         self._suggestions_action.setToolTip(t("suggestions_tip"))
         self._refresh_amerge_btn()
-        self._system_menu_btn.setText(t("tb_system_menu"))
         self._settings_action.setText(t("settings"))
         self._tasks_action.setText(t("tasks_btn"))
         if hasattr(self, "_tasks_status_btn"):

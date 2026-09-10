@@ -1735,9 +1735,6 @@ _STRINGS: Dict[str, Dict[str, str]] = {
 
     # ── Toolbar — short labels (no emoji) ────────────────────────────────
     "tb_export":              {"en": "Export",       "hu": "Export"},
-    "tb_tools_menu":          {"en": "Tools ▾",      "hu": "Eszközök ▾"},
-    "tb_merge_menu":          {"en": "Merge ▾",      "hu": "Összevonás ▾"},
-    "tb_system_menu":         {"en": "System ▾",     "hu": "Rendszer ▾"},
     "mb_file":                {"en": "File",         "hu": "Fájl"},
     "mb_scan":                {"en": "Scan",         "hu": "Szkennelés"},
     "mb_tools":               {"en": "Tools",        "hu": "Eszközök"},
