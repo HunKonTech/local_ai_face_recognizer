@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.services.unknown_person_reset_service import UnknownPersonResetOptions
 from app.ui.i18n import t
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,10 @@ class ScanModesDialog(QDialog):
     scan_workflow_started = Signal(str)
     # Maintenance action key, e.g. "overlap_cleanup", "identity_repair", …
     maintenance_action_started = Signal(str)
+    # Carries the UnknownPersonResetOptions chosen in the maintenance card.
+    # Separate from maintenance_action_started because the launch helpers close
+    # the dialog before emitting, so the checkbox state has to travel along.
+    reset_unknown_requested = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None, config=None) -> None:
         super().__init__(parent)
@@ -152,9 +157,19 @@ class ScanModesDialog(QDialog):
 
         scroll, cards = self._make_scroll()
 
+        # Built outside the loop below: this is the one card carrying options.
+        cards.addWidget(self._make_card(
+            title=t("scanModes.resetUnknowns.title"),
+            desc=t("scanModes.resetUnknowns.description"),
+            on_click=self._launch_reset_unknown,
+            danger=False,
+            button_label=t("scanModes.resetUnknowns.startButton"),
+            warning=t("scanModes.resetUnknowns.warning"),
+            options_widget=self._build_reset_unknown_options(),
+        ))
+
         # Order mirrors the legacy "Klasszikus" maintenance list.
         maintenance = [
-            ("resetUnknowns", "reset_unknown_persons", False),
             ("overlapCleanup", "overlap_cleanup", False),
             ("embeddingDuplicates", "embedding_duplicates", False),
             ("identityRepair", "identity_repair", False),
@@ -178,6 +193,48 @@ class ScanModesDialog(QDialog):
         layout.addWidget(scroll)
         return tab
 
+    def _build_reset_unknown_options(self) -> QWidget:
+        """Checkbox group rendered inside the "Rebuild Unknown identities" card."""
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        defaults = UnknownPersonResetOptions()
+        specs = [
+            ("_chk_delete_unknown_persons", "deletePersons",
+             defaults.delete_unknown_persons),
+            ("_chk_delete_face_assignments", "deleteFaceAssignments",
+             defaults.delete_face_assignments),
+            ("_chk_delete_face_data", "deleteFaceData",
+             defaults.delete_face_data),
+            ("_chk_rebuild_clusters", "rebuildClusters",
+             defaults.rebuild_clusters),
+        ]
+        for attr, key, checked in specs:
+            chk = QCheckBox(t(f"resetUnknownOptions.{key}"))
+            chk.setToolTip(t(f"resetUnknownOptions.{key}Tooltip"))
+            chk.setChecked(checked)
+            setattr(self, attr, chk)
+            layout.addWidget(chk)
+
+        # Deleting the face rows outright makes un-assigning them meaningless,
+        # and the service treats the two as exclusive — mirror that here so the
+        # checkbox cannot promise something that will be ignored.
+        self._chk_delete_face_data.toggled.connect(
+            lambda on: self._chk_delete_face_assignments.setEnabled(not on)
+        )
+        return box
+
+    def reset_unknown_options(self) -> UnknownPersonResetOptions:
+        """Current state of the inline Unknown-reset checkboxes."""
+        return UnknownPersonResetOptions(
+            delete_unknown_persons=self._chk_delete_unknown_persons.isChecked(),
+            delete_face_assignments=self._chk_delete_face_assignments.isChecked(),
+            delete_face_data=self._chk_delete_face_data.isChecked(),
+            rebuild_clusters=self._chk_rebuild_clusters.isChecked(),
+        )
+
     # ------------------------------------------------------------------
 
     def _make_card(
@@ -188,6 +245,7 @@ class ScanModesDialog(QDialog):
         danger: bool,
         button_label: Optional[str] = None,
         warning: Optional[str] = None,
+        options_widget: Optional[QWidget] = None,
     ) -> QFrame:
         card = QFrame()
         card.setFrameShape(QFrame.StyledPanel)
@@ -213,6 +271,9 @@ class ScanModesDialog(QDialog):
             warn_lbl.setWordWrap(True)
             warn_lbl.setStyleSheet("color: #F38BA8;" if danger else "color: #F9E2AF;")
             layout.addWidget(warn_lbl)
+
+        if options_widget is not None:
+            layout.addWidget(options_widget)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -249,3 +310,8 @@ class ScanModesDialog(QDialog):
     def _launch_maintenance(self, action: str) -> None:
         self.accept()
         self.maintenance_action_started.emit(action)
+
+    def _launch_reset_unknown(self) -> None:
+        options = self.reset_unknown_options()
+        self.accept()
+        self.reset_unknown_requested.emit(options)

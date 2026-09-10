@@ -2985,40 +2985,29 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         {"en": "Rebuild Unknown Identities",
          "hu": "Unknown személyek újraépítése"},
     "scanModes.resetUnknowns.description":
-        {"en": "Completely deletes every automatically created 'Unknown N' person and makes "
-               "their faces unassigned again. Face boxes and embeddings are preserved. "
-               "Afterwards, unassigned faces are re-clustered into fresh Unknown groups "
-               "(fast -- no image scanning or model training).",
-         "hu": "Teljesen törli az összes automatikusan létrehozott 'Unknown N' személyt, és az "
-               "arcaikat újra hozzárendeletlen állapotba teszi. Az arckeretek és embeddingek "
-               "megmaradnak. Ezután a hozzárendeletlen arcok újra klaszterezésre kerülnek "
-               "friss Unknown csoportokba (gyors - nem fut újra a detektálás vagy a tanítás)."} ,
+        {"en": "Deletes every automatically created 'Unknown N' person, makes their faces "
+               "unassigned again and re-clusters them into fresh Unknown groups "
+               "(fast -- no image scanning or model training). Face boxes and embeddings "
+               "are preserved unless you tick the face-deletion step below. Named and "
+               "protected people are never touched.",
+         "hu": "Törli az összes automatikusan létrehozott 'Unknown N' személyt, az arcaikat "
+               "újra hozzárendeletlen állapotba teszi, majd friss Unknown csoportokba "
+               "klaszterezi őket (gyors - nem fut újra a detektálás vagy a tanítás). Az "
+               "arckeretek és embeddingek megmaradnak, hacsak be nem jelöli az alábbi "
+               "arctörlési lépést. Az elnevezett és védett személyeket soha nem érinti."} ,
     "scanModes.resetUnknowns.startButton":
         {"en": "Rebuild Unknown Identities",
          "hu": "Unknown személyek újraépítése"},
     "scanModes.resetUnknowns.warning":
         {"en": "Auto-created Unknown groups will be deleted and rebuilt",
          "hu": "Az automatikus Unknown csoportok törlődnek és újraépülnek"},
-    "reset_unknowns_title":
-        {"en": "Rebuild Unknown Identities",
-         "hu": "Unknown személyek újraépítése"},
-    "reset_unknowns_msg":
-        {"en": "Delete every automatically created 'Unknown N' person and run recognition again?\n\n"
-               "Named people, face boxes and embeddings will be preserved.",
-         "hu": "Törli az összes automatikusan létrehozott „Unknown N” személyt, majd újra "
-               "futtatja a felismerést?\n\n"
-               "Az elnevezett személyek, arckeretek és embeddingek megmaradnak."},
     "reset_unknowns_status":
-        {"en": "Rebuilding Unknown identities: {persons} person(s) deleted, {faces} face(s) reset",
-         "hu": "Unknown személyek újraépítése: {persons} személy törölve, {faces} arc alaphelyzetbe állítva"},
+        {"en": "Rebuilding Unknown identities: {persons} person(s) deleted, "
+               "{faces} face(s) reset, {deleted} face(s) deleted",
+         "hu": "Unknown személyek újraépítése: {persons} személy törölve, "
+               "{faces} arc alaphelyzetbe állítva, {deleted} arc törölve"},
 
-    # Reset Unknown Persons Dialog
-    "resetUnknownOptions.title":
-        {"en": "Configure Unknown Persons Reset",
-         "hu": "Unknown személyek visszaállításának konfigurálása"},
-    "resetUnknownOptions.description":
-        {"en": "Choose which steps to perform when rebuilding Unknown identities:",
-         "hu": "Válassza ki, mely lépéseket szeretné végrehajtani az Unknown személyek újraépítéséhez:"},
+    # Reset Unknown Persons options (inline in the Scan & Maintenance dialog)
     "resetUnknownOptions.deletePersons":
         {"en": "Delete auto-created 'Unknown N' persons",
          "hu": "Automatikusan létrehozott 'Unknown N' személyek törlése"},
@@ -3032,26 +3021,22 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         {"en": "Remove person assignments, allowing faces to be re-identified",
          "hu": "A személyhozzárendelések eltávolítása, lehetővé téve az arcok újra azonosítását"},
     "resetUnknownOptions.deleteFaceData":
-        {"en": "Delete face detection data (embeddings, bounding boxes)",
-         "hu": "Arcfelismerési adatok törlése (beágyazások, határoló keretek)"},
+        {"en": "Delete the Unknown persons' faces entirely",
+         "hu": "Az Unknown személyek arcainak teljes törlése"},
     "resetUnknownOptions.deleteFaceDataTooltip":
-        {"en": "⚠ Advanced: Removes embeddings and bounding boxes. Only use if faces need full re-detection.",
-         "hu": "⚠ Haladó: Eltávolítja az embeddingeket és kereteket. Csak akkor használja, ha az arcok teljes újra-detektálása szükséges."},
+        {"en": "⚠ Advanced: permanently deletes the face records themselves — box, embedding "
+               "and crop file. The faces disappear from the images and only a full "
+               "re-detection scan can bring them back. Named and protected people are "
+               "never touched.",
+         "hu": "⚠ Haladó: véglegesen törli magukat az arc rekordokat — keret, embedding és "
+               "kivágott kép. Az arcok eltűnnek a képekről, és csak egy teljes újra-detektálás "
+               "hozza vissza őket. Az elnevezett és védett személyeket nem érinti."},
     "resetUnknownOptions.rebuildClusters":
         {"en": "Rebuild Unknown clusters after reset",
          "hu": "Unknown klaszterek újraépítése a törlés után"},
     "resetUnknownOptions.rebuildClustersTooltip":
         {"en": "After deleting Unknown persons, automatically re-cluster all unassigned faces into new Unknown groups (fast -- no image scanning or model training)",
          "hu": "Az Unknown személyek törlése után automatikusan újra klaszterezi a nem hozzárendelt arcokat új Unknown csoportokba (gyors - nem fut újra a detektálás vagy a tanítás)"},
-    "resetUnknownOptions.reset":
-        {"en": "Reset to Defaults",
-         "hu": "Alapértelmezett értékek visszaállítása"},
-    "resetUnknownOptions.ok":
-        {"en": "OK",
-         "hu": "OK"},
-    "resetUnknownOptions.cancel":
-        {"en": "Cancel",
-         "hu": "Mégse"},
 
     # overlapping question-mark cleanup
     "scanModes.overlapCleanup.title":

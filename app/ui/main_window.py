@@ -776,6 +776,7 @@ class MainWindow(QMainWindow):
         dlg = ScanModesDialog(parent=self, config=self._config)
         dlg.scan_workflow_started.connect(self._on_scan_workflow_started)
         dlg.maintenance_action_started.connect(self._on_scan_maintenance_action)
+        dlg.reset_unknown_requested.connect(self._on_reset_unknown_persons)
         dlg.exec()
 
     @Slot(str)
@@ -798,7 +799,6 @@ class MainWindow(QMainWindow):
         the redesigned detection pipeline; the tab keeps them manually
         launchable for debugging and one-off fixes."""
         handlers = {
-            "reset_unknown_persons": self._on_reset_unknown_persons,
             "overlap_cleanup": self._on_find_overlapping_unknown_faces,
             "embedding_duplicates": self._on_find_embedding_duplicate_faces,
             "identity_repair": self._on_identity_repair_scan,
@@ -989,8 +989,11 @@ class MainWindow(QMainWindow):
         self._set_scanning_state(False)
         self._status_label.setText(t("ready"))
 
-    @Slot()
-    def _on_reset_unknown_persons(self) -> None:
+    @Slot(object)
+    def _on_reset_unknown_persons(self, options) -> None:
+        """Run an Unknown-identity reset with the options chosen inline in the
+        Scan & Maintenance dialog.  The checkboxes there are the confirmation,
+        so no extra prompt is shown."""
         from app.gdrive import preferences as _gprefs
 
         prefs = _gprefs.load()
@@ -1006,28 +1009,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, t("busy_title"), t("busy_msg"))
             return
 
-        reply = QMessageBox.question(
-            self,
-            t("reset_unknowns_title"),
-            t("reset_unknowns_msg"),
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
+        # Hard-deleting faces walks the rows one by one on the UI thread.
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            with session_scope() as session:
+                from app.services.unknown_person_reset_service import (
+                    UnknownPersonResetService,
+                )
 
-        # Show options dialog to let user configure reset steps
-        from app.ui.dialogs.reset_unknown_options_dialog import ResetUnknownOptionsDialog
-
-        options_dialog = ResetUnknownOptionsDialog(self)
-        if options_dialog.exec() != QDialog.Accepted:
-            return
-
-        options = options_dialog.get_options()
-
-        with session_scope() as session:
-            from app.services.unknown_person_reset_service import UnknownPersonResetService
-
-            result = UnknownPersonResetService(session).reset(options)
+                result = UnknownPersonResetService(session).reset(options)
+        finally:
+            QApplication.restoreOverrideCursor()
 
         self._current_person_id = None
         self._current_face_id = None
@@ -1035,16 +1027,12 @@ class MainWindow(QMainWindow):
         self._preview_panel.clear()
         self._refresh_persons()
         self._image_browser._reload_current_face_data()
-        log.info(
-            "Unknown identity reset: deleted %d person(s), unassigned %d face(s).",
-            result.deleted_persons,
-            result.unassigned_faces,
-        )
         self._status_label.setText(
             t(
                 "reset_unknowns_status",
                 persons=result.deleted_persons,
                 faces=result.unassigned_faces,
+                deleted=result.deleted_faces,
             )
         )
 
