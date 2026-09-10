@@ -108,10 +108,80 @@ def _rewrite_with_exif(path: Path, new_exif: bytes) -> None:
     _replace_atomic(tmp, path)
 
 
+# Tag numbers for the piexif-free write path.
+_GPS_IFD_TAG = 0x8825
+_EXIF_IFD_TAG = 0x8769
+_TAG_GPS_LAT_REF, _TAG_GPS_LAT = 0x0001, 0x0002
+_TAG_GPS_LON_REF, _TAG_GPS_LON = 0x0003, 0x0004
+_TAG_DATETIME = 0x0132
+_TAG_DATETIME_ORIGINAL = 0x9003
+_TAG_DATETIME_DIGITIZED = 0x9004
+
+
+def _load_pillow_exif(path: Path):
+    """Return a ``PIL.Image.Exif`` holding the file's current EXIF (or empty)."""
+    from PIL import Image as PilImage
+
+    exif = PilImage.Exif()
+    with PilImage.open(path) as img:
+        raw = img.info.get("exif", b"")
+    if raw:
+        try:
+            exif.load(raw)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Unparsable existing EXIF in %s (%s) — starting fresh", path, exc)
+    return exif
+
+
+def _write_exif_gps_pillow(path: Path, lat: float, lon: float) -> bool:
+    """GPS writer used when piexif is not installed."""
+    try:
+        from PIL.TiffImagePlugin import IFDRational
+
+        def dms(value: float):
+            deg, minutes, seconds = _decimal_to_dms_rational(abs(value))
+            return tuple(IFDRational(n, d) for n, d in (deg, minutes, seconds))
+
+        exif = _load_pillow_exif(path)
+        gps_ifd = exif.get_ifd(_GPS_IFD_TAG)
+        gps_ifd[_TAG_GPS_LAT_REF] = "N" if lat >= 0 else "S"
+        gps_ifd[_TAG_GPS_LAT] = dms(lat)
+        gps_ifd[_TAG_GPS_LON_REF] = "E" if lon >= 0 else "W"
+        gps_ifd[_TAG_GPS_LON] = dms(lon)
+        exif[_GPS_IFD_TAG] = gps_ifd
+
+        _rewrite_with_exif(path, exif.tobytes())
+        log.info("EXIF GPS written (Pillow) for %s: %.6f, %.6f", path, lat, lon)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("EXIF GPS write failed for %s: %s", path, exc)
+        return False
+
+
+def _write_exif_date_pillow(path: Path, dt: datetime) -> bool:
+    """Date writer used when piexif is not installed."""
+    try:
+        stamp = dt.strftime("%Y:%m:%d %H:%M:%S")
+        exif = _load_pillow_exif(path)
+        exif[_TAG_DATETIME] = stamp
+        sub_ifd = exif.get_ifd(_EXIF_IFD_TAG)
+        sub_ifd[_TAG_DATETIME_ORIGINAL] = stamp
+        sub_ifd[_TAG_DATETIME_DIGITIZED] = stamp
+        exif[_EXIF_IFD_TAG] = sub_ifd
+
+        _rewrite_with_exif(path, exif.tobytes())
+        log.info("EXIF date written (Pillow) for %s: %s", path, stamp)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("EXIF date write failed for %s: %s", path, exc)
+        return False
+
+
 def write_exif_gps(path: str | Path, lat: float, lon: float) -> bool:
     """Write GPS coordinates into the EXIF of an image file.
 
-    Uses ``piexif`` if installed; logs and returns False otherwise.
+    Uses ``piexif`` when installed and Pillow's own EXIF writer otherwise, so
+    the write still happens on installs without the optional package.
     The file must exist and be writable. Returns True on success.
     """
     path = Path(path)
@@ -125,8 +195,8 @@ def write_exif_gps(path: str | Path, lat: float, lon: float) -> bool:
     try:
         import piexif  # type: ignore[import]
     except ImportError:
-        log.warning("piexif not installed — EXIF GPS write skipped for %s", path)
-        return False
+        log.debug("piexif not installed — writing EXIF GPS via Pillow for %s", path)
+        return _write_exif_gps_pillow(path, lat, lon)
 
     try:
         from PIL import Image as PilImage
@@ -155,7 +225,7 @@ def write_exif_gps(path: str | Path, lat: float, lon: float) -> bool:
 def write_exif_date(path: str | Path, dt: datetime) -> bool:
     """Write *dt* into the EXIF DateTimeOriginal (and DateTimeDigitized / DateTime) fields.
 
-    Uses ``piexif`` if installed; logs and returns False otherwise.
+    Uses ``piexif`` when installed and Pillow's own EXIF writer otherwise.
     """
     path = Path(path)
     if not path.exists():
@@ -168,8 +238,8 @@ def write_exif_date(path: str | Path, dt: datetime) -> bool:
     try:
         import piexif  # type: ignore[import]
     except ImportError:
-        log.warning("piexif not installed — EXIF date write skipped for %s", path)
-        return False
+        log.debug("piexif not installed — writing EXIF date via Pillow for %s", path)
+        return _write_exif_date_pillow(path, dt)
 
     try:
         from PIL import Image as PilImage

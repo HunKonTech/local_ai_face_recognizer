@@ -947,6 +947,9 @@ class ExportDialog(QDialog):
                 skipped=summary.skipped_count,
                 failed=summary.failed_count,
             )
+        reasons = getattr(summary, "fallback_reasons", [])
+        if reasons:
+            msg += "\n\n" + "\n".join(reasons[:5])
         errors = summary.errors
         if errors:
             msg += "\n\n" + "\n".join(errors[:10])

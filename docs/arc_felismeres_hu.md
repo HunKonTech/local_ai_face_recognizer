@@ -206,7 +206,7 @@ Az arc **192D embedding** bementként egy **4-5 neural network ensemble**-nek:
 | **opencv-python** | ≥4.8 | Képfeldolgozás, Haar/Caffe/YuNet/SFace | — | |
 | **Pillow** | ≥10.0 | Image I/O | — | |
 | **PyYAML** | ≥6.0 | Config.yaml parser | — | |
-| **piexif** | ≥1.1 | EXIF metadata | — | |
+| **piexif** | ≥1.1 | EXIF metaadatok írása | Pillow EXIF író | Opcionális: hiánya esetén a Pillow saját EXIF írója lép működésbe |
 | **SQLAlchemy** | ≥2.0 | ORM database | — | |
 | **scikit-learn** | ≥1.3 | Clustering, PCA | — | |
 | **PySide6** | ≥6.6 | GUI (Qt6) | — | |

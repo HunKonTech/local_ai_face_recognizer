@@ -137,22 +137,32 @@ def write_face_metadata(
 
     if not is_embeddable(path):
         log.debug("Not embeddable (%s) → sidecar: %s", path.suffix, path)
-        return _write_sidecar_result(path, payload)
+        return _write_sidecar_result(
+            path, payload, reason=f"format {path.suffix or '?'} cannot hold embedded metadata"
+        )
 
     if not os.access(path, os.W_OK):
         log.info("Image not writable → sidecar: %s", path)
-        return _write_sidecar_result(path, payload)
+        return _write_sidecar_result(path, payload, reason="image file is read-only")
 
+    reason: Optional[str] = None
     try:
         mode = _embed(path, payload, prefer_exif_comment=prefer_exif_comment)
         if mode is not None:
             if set_finder_comment:
                 write_macos_finder_comment(path, json.dumps(payload, ensure_ascii=False))
             return MetadataWriteResult(mode)
+        reason = "no embedding path for this image format"
     except Exception as exc:  # noqa: BLE001
-        log.warning("Embedding metadata failed for %s: %s — falling back to sidecar", path, exc)
+        # Never lose the data: fall back to a sidecar, but keep the cause so the
+        # UI can explain *why* the image itself was not updated.
+        log.warning(
+            "Embedding metadata failed for %s: %s — falling back to sidecar",
+            path, exc, exc_info=True,
+        )
+        reason = f"embedding failed: {exc}"
 
-    return _write_sidecar_result(path, payload)
+    return _write_sidecar_result(path, payload, reason=reason)
 
 
 def write_macos_finder_comment(image_path: str | Path, text: str) -> bool:
@@ -242,10 +252,14 @@ def read_face_metadata(image_path: str | Path) -> Optional[dict]:
 # Sidecar
 # ---------------------------------------------------------------------------
 
-def _write_sidecar_result(path: Path, payload: dict) -> MetadataWriteResult:
+def _write_sidecar_result(
+    path: Path, payload: dict, *, reason: Optional[str] = None
+) -> MetadataWriteResult:
     try:
         sidecar = write_sidecar(path, payload)
-        return MetadataWriteResult(WRITE_MODE_SIDECAR, sidecar_path=sidecar)
+        return MetadataWriteResult(
+            WRITE_MODE_SIDECAR, sidecar_path=sidecar, error_message=reason
+        )
     except Exception as exc:  # noqa: BLE001
         log.error("Sidecar write failed for %s: %s", path, exc)
         return MetadataWriteResult(WRITE_MODE_FAILED, error_message=str(exc))
@@ -323,6 +337,58 @@ def _save_jpeg(path: Path, img, *, xmp: bytes, exif: bytes) -> None:
     _replace_atomic(tmp, path)
 
 
+# EXIF tag numbers used by the Pillow fallback path (piexif is optional).
+_EXIF_IFD_TAG = 0x8769           # 0th IFD → Exif IFD pointer
+_TAG_USER_COMMENT = 0x9286       # Exif IFD → UserComment
+_TAG_IMAGE_DESCRIPTION = 0x010E  # 0th IFD → ImageDescription
+
+# UserComment carries an 8-byte character-code prefix; "UNICODE\0" with UTF-16,
+# or the ASCII prefix for plain text.  We use the ASCII prefix and store UTF-8
+# JSON bytes after it — widely tolerated and round-trips here.
+_USER_COMMENT_PREFIX = b"ASCII\x00\x00\x00"
+
+
+def _dump_exif_with_user_comment(existing_exif: bytes, json_text: str) -> bytes:
+    """Return *existing_exif* with our JSON added as the EXIF ``UserComment``.
+
+    Uses :mod:`piexif` when it is installed (it round-trips every original tag)
+    and otherwise falls back to Pillow's own EXIF writer.  piexif is therefore
+    optional: a machine without it still gets real EXIF metadata instead of
+    silently degrading to a sidecar JSON file.
+    """
+    try:
+        import piexif
+    except ImportError:
+        log.debug("piexif not installed — writing the EXIF UserComment via Pillow")
+        return _dump_exif_with_user_comment_pillow(existing_exif, json_text)
+
+    exif_dict = piexif.load(existing_exif) if existing_exif else {
+        "0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None,
+    }
+    exif_dict.setdefault("Exif", {})
+    exif_dict["Exif"][piexif.ExifIFD.UserComment] = (
+        _USER_COMMENT_PREFIX + json_text.encode("utf-8")
+    )
+    return piexif.dump(exif_dict)
+
+
+def _dump_exif_with_user_comment_pillow(existing_exif: bytes, json_text: str) -> bytes:
+    """piexif-free EXIF writer built on ``PIL.Image.Exif``."""
+    from PIL import Image as PilImage
+
+    exif = PilImage.Exif()
+    if existing_exif:
+        try:
+            exif.load(existing_exif)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Unparsable existing EXIF (%s) — writing a fresh block", exc)
+
+    sub_ifd = exif.get_ifd(_EXIF_IFD_TAG)
+    sub_ifd[_TAG_USER_COMMENT] = _USER_COMMENT_PREFIX + json_text.encode("utf-8")
+    exif[_EXIF_IFD_TAG] = sub_ifd
+    return exif.tobytes()
+
+
 def _save_jpeg_exif_comment(
     path: Path,
     img,
@@ -331,18 +397,7 @@ def _save_jpeg_exif_comment(
     *,
     existing_xmp=None,
 ) -> str:
-    import piexif
-
-    exif_dict = piexif.load(existing_exif) if existing_exif else {
-        "0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None,
-    }
-    # UserComment requires an 8-byte character-code prefix; "UNICODE\0" with
-    # UTF-16, or the ASCII prefix for plain text.  We use the ASCII prefix and
-    # store UTF-8 JSON bytes after it — widely tolerated and round-trips here.
-    exif_dict.setdefault("Exif", {})
-    comment = b"ASCII\x00\x00\x00" + json_text.encode("utf-8")
-    exif_dict["Exif"][piexif.ExifIFD.UserComment] = comment
-    new_exif = piexif.dump(exif_dict)
+    new_exif = _dump_exif_with_user_comment(existing_exif, json_text)
 
     # Re-attach any pre-existing XMP so an unrelated XMP block survives the write.
     save_kwargs = {"format": "JPEG", "exif": new_exif, "quality": "keep"}
@@ -497,25 +552,59 @@ def _read_exif_comment(exif: bytes) -> Optional[dict]:
         import piexif
 
         exif_dict = piexif.load(exif)
+    except ImportError:
+        return _read_exif_comment_pillow(exif)
     except Exception:  # noqa: BLE001
         return None
 
     raw = exif_dict.get("Exif", {}).get(piexif.ExifIFD.UserComment)
-    if isinstance(raw, bytes) and raw[:8] in (b"ASCII\x00\x00\x00", b"UNICODE\x00"):
-        body = raw[8:]
-        try:
-            return json.loads(body.decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            pass
+    payload = _decode_user_comment(raw)
+    if payload is not None:
+        return payload
 
-    desc = exif_dict.get("0th", {}).get(piexif.ImageIFD.ImageDescription)
-    if isinstance(desc, bytes):
-        try:
-            return json.loads(desc.decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            pass
+    return _decode_json_bytes(exif_dict.get("0th", {}).get(piexif.ImageIFD.ImageDescription))
 
-    return None
+
+def _read_exif_comment_pillow(exif: bytes) -> Optional[dict]:
+    """piexif-free counterpart of :func:`_read_exif_comment`."""
+    from PIL import Image as PilImage
+
+    parsed = PilImage.Exif()
+    try:
+        parsed.load(exif)
+        raw = parsed.get_ifd(_EXIF_IFD_TAG).get(_TAG_USER_COMMENT)
+    except Exception:  # noqa: BLE001
+        return None
+
+    payload = _decode_user_comment(raw)
+    if payload is not None:
+        return payload
+
+    return _decode_json_bytes(parsed.get(_TAG_IMAGE_DESCRIPTION))
+
+
+def _decode_user_comment(raw) -> Optional[dict]:
+    """Strip the 8-byte character-code prefix and parse the JSON body."""
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", errors="replace")
+    if not isinstance(raw, bytes) or raw[:8] not in (b"ASCII\x00\x00\x00", b"UNICODE\x00"):
+        return None
+    return _decode_json_bytes(raw[8:])
+
+
+def _decode_json_bytes(raw) -> Optional[dict]:
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 # ---------------------------------------------------------------------------

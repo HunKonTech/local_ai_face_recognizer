@@ -12,7 +12,7 @@ numpy>=1.24,<2.0
 opencv-python>=4.8
 Pillow>=10.0
 PyYAML>=6.0
-piexif>=1.1
+piexif>=1.1         # optional: preferred EXIF writer (Pillow is the fallback)
 
 # ── GUI ───────────────────────────────────────────────────────────────────────
 PySide6>=6.6
