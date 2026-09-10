@@ -91,6 +91,7 @@ def _migrate_add_columns(engine: Engine) -> None:
             ("gender",               "VARCHAR(16)"),
             ("family_code",          "VARCHAR(64)"),
             ("external_family_code", "VARCHAR(128)"),
+            ("name_prefix",          "VARCHAR(255)"),
             ("last_name",            "VARCHAR(255)"),
             ("first_name",           "VARCHAR(255)"),
             ("second_name",          "VARCHAR(255)"),

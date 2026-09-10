@@ -962,6 +962,7 @@ class FamilyService:
             .filter(
                 or_(
                     Person.name.ilike(pattern),
+                    Person.name_prefix.ilike(pattern),
                     Person.last_name.ilike(pattern),
                     Person.first_name.ilike(pattern),
                     Person.second_name.ilike(pattern),
@@ -991,6 +992,7 @@ class FamilyService:
         return self._image_ids_matching_person_fields(
             or_(
                 Person.name.ilike(pattern),
+                Person.name_prefix.ilike(pattern),
                 Person.last_name.ilike(pattern),
                 Person.first_name.ilike(pattern),
                 Person.second_name.ilike(pattern),
@@ -1085,6 +1087,7 @@ class FamilyService:
                 or_(
                     Person.name.ilike(pattern),
                     Person.first_name.ilike(pattern),
+                    Person.name_prefix.ilike(pattern),
                     Person.last_name.ilike(pattern),
                     Person.second_name.ilike(pattern),
                 )

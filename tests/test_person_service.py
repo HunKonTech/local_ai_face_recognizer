@@ -363,6 +363,7 @@ def test_update_person_writes_all_editable_fields(db):
             gender="male",
             family_code="G1",
             external_family_code="EXT1",
+            name_prefix="Csicseri",
             last_name="Nagy",
             first_name="Péter",
             second_name="János",
@@ -380,6 +381,7 @@ def test_update_person_writes_all_editable_fields(db):
         assert person.gender == "male"
         assert person.family_code == "G1"
         assert person.external_family_code == "EXT1"
+        assert person.name_prefix == "Csicseri"
         assert person.last_name == "Nagy"
         assert person.first_name == "Péter"
         assert person.second_name == "János"

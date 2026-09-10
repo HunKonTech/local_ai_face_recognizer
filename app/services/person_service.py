@@ -38,6 +38,7 @@ class PersonSummary:
     thumbnail_path: Optional[str]
     family_code: Optional[str]
     external_family_code: Optional[str]
+    name_prefix: Optional[str]
     last_name: Optional[str]
     first_name: Optional[str]
     second_name: Optional[str]
@@ -76,6 +77,7 @@ class PersonService:
         "gender",
         "family_code",
         "external_family_code",
+        "name_prefix",
         "last_name",
         "first_name",
         "second_name",
@@ -141,6 +143,7 @@ class PersonService:
             q = q.filter(
                 or_(
                     Person.name.ilike(term),
+                    Person.name_prefix.ilike(term),
                     Person.last_name.ilike(term),
                     Person.first_name.ilike(term),
                     Person.second_name.ilike(term),
@@ -172,6 +175,7 @@ class PersonService:
                 thumbnail_path=person.thumbnail_path or fallback_crop.get(person.id),
                 family_code=person.family_code,
                 external_family_code=person.external_family_code,
+                name_prefix=person.name_prefix,
                 last_name=person.last_name,
                 first_name=person.first_name,
                 second_name=person.second_name,

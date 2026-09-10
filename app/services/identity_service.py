@@ -40,6 +40,7 @@ _PERSON_SNAPSHOT_COLUMNS = (
     "thumbnail_is_manual",
     "family_code",
     "external_family_code",
+    "name_prefix",
     "last_name",
     "first_name",
     "second_name",

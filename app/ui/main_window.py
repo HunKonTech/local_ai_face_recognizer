@@ -3303,6 +3303,7 @@ class MainWindow(QMainWindow):
             person.gender = dlg.gender()
             person.family_code = dlg.family_code() or None
             person.external_family_code = dlg.external_family_code() or None
+            person.name_prefix = dlg.name_prefix() or None
             person.last_name = dlg.last_name() or None
             person.first_name = dlg.first_name() or None
             person.second_name = dlg.second_name() or None

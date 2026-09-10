@@ -1504,6 +1504,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
 
     # ── Person details ───────────────────────────────────────────────────
     "person_info_title": {"en": "Person Info — {name}", "hu": "Személyadatok — {name}"},
+    "name_prefix":       {"en": "Name prefix:", "hu": "Név előtag:"},
     "last_name":         {"en": "Last name:", "hu": "Vezetéknév:"},
     "first_name":        {"en": "First name:", "hu": "Keresztnév:"},
     "second_name":       {"en": "Second name:", "hu": "Keresztnév 2:"},
@@ -1514,6 +1515,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "death_date":        {"en": "Death date:", "hu": "Halálozás ideje:"},
     "death_place":       {"en": "Death place:", "hu": "Halálozás helye:"},
     "notes":             {"en": "Notes:", "hu": "Egyéb megjegyzés:"},
+    "example_name_prefix": {"en": "e.g. Csicseri (optional)", "hu": "pl. Csicseri, Nagy-Ajtai (opcionális)"},
     "example_last_name": {"en": "e.g. Smith", "hu": "pl. Kovács"},
     "example_first_name": {"en": "e.g. John", "hu": "pl. János"},
     "example_second_name": {"en": "e.g. William (optional)", "hu": "pl. István (opcionális)"},
@@ -2319,6 +2321,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "persons_col_name":       {"en": "Name", "hu": "Név"},
     "persons_col_family_code":{"en": "Family code", "hu": "Családi kód"},
     "persons_col_groups":     {"en": "Groups", "hu": "Társaságok"},
+    "persons_col_name_prefix":{"en": "Name prefix", "hu": "Név előtag"},
     "persons_col_last_name":  {"en": "Last name", "hu": "Vezetéknév"},
     "persons_col_first_name": {"en": "First name", "hu": "Keresztnév"},
     "persons_col_second_name":{"en": "Second name", "hu": "Második név"},

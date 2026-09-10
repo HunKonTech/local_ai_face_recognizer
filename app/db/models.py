@@ -310,6 +310,9 @@ class Person(Base):
     external_family_code: Mapped[Optional[str]] = mapped_column(
         String(128), nullable=True, index=True
     )
+    # Name prefix / historical predicate that precedes the surname
+    # (e.g. "Csicseri", "Nagy-Ajtai"). Purely informational, never auto-filled.
+    name_prefix: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     last_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     second_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
