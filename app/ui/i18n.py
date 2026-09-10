@@ -3824,6 +3824,62 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "object_ctx_delete_occurrence": {"en": "Delete object marker here",
                              "hu": "Objektum-jelölő törlése"},
 
+    # ── Object matching: same region found in other images (#164) ────────────
+    "object_match_search":  {"en": "🔍 Search in library",   "hu": "🔍 Keresés a könyvtárban"},
+    "object_match_search_tip": {
+        "en": "Look for this same picture region in other images, at any size",
+        "hu": "Ugyanennek a képrészletnek a keresése más képeken, bármilyen méretben"},
+    "object_ctx_find_similar": {"en": "Search on other images …",
+                             "hu": "Keresés más képeken …"},
+    "object_match_scope":    {"en": "Where to search",       "hu": "Hol keressen"},
+    "object_match_scope_library": {"en": "Whole library",    "hu": "Teljes könyvtár"},
+    "object_match_scope_folder": {"en": "Current folder only",
+                             "hu": "Csak az aktuális mappa"},
+    "object_match_sensitivity": {"en": "Sensitivity",        "hu": "Érzékenység"},
+    "object_match_sensitivity_tip": {
+        "en": "Higher finds more but proposes more wrong hits too",
+        "hu": "Magasabb érték többet talál, de több téves találatot is javasol"},
+    "object_match_auto_after_tag": {
+        "en": "Search automatically after tagging a new object frame",
+        "hu": "Új objektum-keret bejelölése után automatikusan keressen"},
+    "object_match_running":  {"en": "Searching for object …", "hu": "Objektum keresése …"},
+    "object_match_no_reference": {
+        "en": "This object has no frame yet. Draw a rectangle around it on an "
+              "image first, then the search has something to look for.",
+        "hu": "Ehhez az objektumhoz még nincs keret. Húzz köré egy téglalapot "
+              "egy képen, akkor lesz mit keresnie."},
+    "object_match_none_found": {"en": "No further images found for this object.",
+                             "hu": "Nem található több kép ehhez az objektumhoz."},
+    "object_match_found_n":  {"en": "{n} possible hit(s) found — click to review",
+                             "hu": "{n} lehetséges találat — kattints az áttekintéshez"},
+
+    # Review dialog
+    "object_match_review_title": {"en": "Object hits for review",
+                             "hu": "Objektum-találatok áttekintése"},
+    "object_match_review_intro": {
+        "en": "Each hit is the same picture region found somewhere else. "
+              "Accept to mark the object there; reject to never propose it again.",
+        "hu": "Minden találat ugyanaz a képrészlet, máshol megtalálva. "
+              "Elfogadás esetén ott is megjelölődik az objektum; elutasítás "
+              "esetén többé nem ajánlja fel."},
+    "object_match_accept":   {"en": "✔ Accept",              "hu": "✔ Elfogadás"},
+    "object_match_reject":   {"en": "✘ Reject",              "hu": "✘ Elutasítás"},
+    "object_match_accept_above": {"en": "Accept all above",  "hu": "Összes elfogadása efölött"},
+    "object_match_score":    {"en": "Match",                 "hu": "Egyezés"},
+    "object_match_size":     {"en": "Size",                  "hu": "Méret"},
+    "object_match_empty":    {"en": "Nothing left to review.",
+                             "hu": "Nincs több áttekintendő találat."},
+    "object_match_done":     {"en": "{accepted} accepted, {rejected} rejected.",
+                             "hu": "{accepted} elfogadva, {rejected} elutasítva."},
+
+    # Batch mode in the Scan & Maintenance dialog
+    "scan_object_matching":  {"en": "Object matching",       "hu": "Objektum-felismerés"},
+    "scan_object_matching_desc": {
+        "en": "Look for every tagged object across the whole library and "
+              "collect the hits for review.",
+        "hu": "Minden megjelölt objektum keresése az egész könyvtárban, a "
+              "találatok áttekintésre gyűjtve."},
+
     # ── Background tasks / Task Manager ───────────────────────────────────────
     "tasks_btn":            {"en": "⚙ Tasks",                "hu": "⚙ Feladatok"},
     "tasks_title":          {"en": "Task Manager",           "hu": "Feladatkezelő"},

@@ -25,7 +25,18 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -64,23 +75,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.ui.widgets.person_search_select import PersonSearchSelect
-from app.ui.widgets.place_search_select import PlaceSearchSelect
-from app.ui.widgets.universal_search_bar import UniversalSearchBar
-
 from app.db.database import session_scope
 from app.db.models import Face, Image, Person, Place
 from app.services.family_service import FamilyImageSearchCriteria, FamilyService
 from app.services.identity_service import IdentityService
-from app.services.unknown_merge_service import UnknownMergeService
 from app.services.image_browser_service import (
     FolderSummary,
     ImageBrowserService,
-    ImageSummary,
 )
 from app.services.place_service import ANONYMOUS_GPS_PLACE_NAME, PlaceService
+from app.services.unknown_merge_service import UnknownMergeService
 from app.ui.dialogs.person_info_dialog import PersonInfoDialog
 from app.ui.i18n import t
+from app.ui.widgets.person_search_select import PersonSearchSelect
+from app.ui.widgets.place_search_select import PlaceSearchSelect
+from app.ui.widgets.universal_search_bar import UniversalSearchBar
 from app.workers.thumbnail_worker import ThumbnailRunnable
 
 log = logging.getLogger(__name__)
@@ -221,6 +230,7 @@ def _get_pil_font(size: int):
     dominates redraw time once a photo has more than a few faces.
     """
     import sys
+
     from PIL import ImageFont
     if sys.platform == "darwin":
         candidates = [
@@ -260,7 +270,8 @@ def _draw_faces(
     label_opacity: float = 1.0,
     pending_ids: Optional[set] = None,
 ) -> np.ndarray:
-    from PIL import Image as PILImage, ImageDraw
+    from PIL import Image as PILImage
+    from PIL import ImageDraw
 
     from app.ui.helpers.label_placement import FaceLabel, place_labels
 
@@ -1608,6 +1619,9 @@ class ImageBrowserPanel(QWidget):
     active_person_changed = Signal(object)
     # Emitted when the user asks to open a tagged object's data sheet (object_id)
     object_open_requested = Signal(int)
+    # Emitted when the user asks to look for an object on other images:
+    # (object_id, scope) where scope is "library" or "folder".
+    object_search_requested = Signal(int, str)
 
     def __init__(self, config=None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -2545,8 +2559,8 @@ class ImageBrowserPanel(QWidget):
             return
 
         from app.services.deoldified_pairing_service import (
-            is_deoldified_path,
             DeoldifiedPairingService,
+            is_deoldified_path,
         )
 
         with session_scope() as session:
@@ -2683,8 +2697,8 @@ class ImageBrowserPanel(QWidget):
         self, show_colorized: bool, *, reset_zoom: bool
     ) -> None:
         """Display one side of the pair, with the compare divider off."""
-        from app.utils.image_utils import load_image_bgr_normalized as load_image_bgr
         from app.services.image_library_service import resolve_image_path
+        from app.utils.image_utils import load_image_bgr_normalized as load_image_bgr
 
         if show_colorized:
             path = self._deol_pair_color_path
@@ -3715,7 +3729,6 @@ class ImageBrowserPanel(QWidget):
         if cache_key not in self._thumb_cache:
             tree_item = self._tree_items.get(cache_key)
             if tree_item is not None:
-                from app.workers.drive_image_worker import DriveThumbRunnable
                 from app.workers.thumbnail_worker import ThumbnailRunnable
                 # File is now in mirror — generate thumbnail normally.
                 worker = ThumbnailRunnable(
@@ -4180,6 +4193,7 @@ class ImageBrowserPanel(QWidget):
             object_note_action = menu.addAction(t("object_ctx_edit_note"))
             menu.addSeparator()
             object_open_action = menu.addAction(t("object_ctx_open"))
+            object_find_action = menu.addAction(t("object_ctx_find_similar"))
             object_delete_action = menu.addAction(t("object_ctx_delete_occurrence"))
             menu.addSeparator()
             object_mark_action = menu.addAction(t("object_ctx_mark_here"))
@@ -4193,6 +4207,8 @@ class ImageBrowserPanel(QWidget):
                 self._edit_object_note(_occ_id)
             elif chosen is object_open_action:
                 self.object_open_requested.emit(_object_id)
+            elif chosen is object_find_action:
+                self.object_search_requested.emit(int(_object_id), "library")
             elif chosen is object_delete_action:
                 self._delete_object_occurrence(_occ_id)
             elif chosen is object_mark_action:
@@ -4292,11 +4308,15 @@ class ImageBrowserPanel(QWidget):
         self, occurrence_id: int, x: int, y: int, w: int, h: int
     ) -> None:
         """Persist a resized/moved object bounding box."""
+        from app.services.object_feature_service import ObjectFeatureService
         from app.services.object_service import ObjectService
 
         try:
             with session_scope() as session:
                 ObjectService(session).update_occurrence_bbox(occurrence_id, x, y, w, h)
+                # The frame now covers different pixels, so its cached match
+                # features describe the old crop; drop them to be re-extracted.
+                ObjectFeatureService(session).invalidate_patch(occurrence_id)
         except Exception:
             log.exception("Failed to update object bbox for occurrence %d", occurrence_id)
 
@@ -4439,6 +4459,48 @@ class ImageBrowserPanel(QWidget):
             log.exception("Failed to add object bbox occurrence in image browser")
             return
         self._refresh_object_markers()
+        self._maybe_auto_search_object(dlg.chosen_object_id)
+
+    def _maybe_auto_search_object(self, object_id: int) -> None:
+        """Offer to look for the freshly framed object on other images.
+
+        Opt-in, and it only asks the search to start — the run happens in the
+        background, so tagging is never interrupted by it.
+        """
+        from app.app_settings import app_qsettings
+
+        enabled = str(
+            app_qsettings().value("object_matching/auto_search_after_tag", "false")
+        ).lower() in ("1", "true", "yes")
+        if not enabled:
+            return
+        self.object_search_requested.emit(int(object_id), "library")
+
+    def refresh_object_markers(self) -> None:
+        """Public redraw of the object overlay (after an external change)."""
+        self._refresh_object_markers()
+
+    def current_folder_image_ids(self) -> List[int]:
+        """Image ids in the folder currently open in the browser."""
+        folder = self._current_folder
+        if not folder:
+            return []
+        from sqlalchemy import select
+
+        from app.db.models import Image as _Image
+
+        try:
+            with session_scope() as session:
+                rows = session.execute(select(_Image.id, _Image.file_path)).all()
+        except Exception:
+            log.exception("Failed to list the current folder's images")
+            return []
+        wanted = str(Path(folder))
+        return [
+            int(image_id)
+            for image_id, file_path in rows
+            if file_path and str(Path(file_path).parent) == wanted
+        ]
 
     def _refresh_object_markers(self) -> None:
         """Load object occurrences for the current image and overlay them."""
@@ -5726,6 +5788,7 @@ class ImageBrowserPanel(QWidget):
                 place_lon = place.longitude
         except Exception as exc:  # noqa: BLE001
             from PySide6.QtWidgets import QMessageBox
+
             from app.ui.i18n import t
             QMessageBox.critical(
                 self,
@@ -5887,8 +5950,12 @@ class ImageBrowserPanel(QWidget):
 
     def _run_tree_search(self, tokens) -> None:
         from app.ui.widgets.universal_search_bar import (
-            TOKEN_ANY, TOKEN_DATE, TOKEN_FAMILY_CODE, TOKEN_IMAGE,
-            TOKEN_NICKNAME, TOKEN_PERSON, TOKEN_PLACE,
+            TOKEN_DATE,
+            TOKEN_FAMILY_CODE,
+            TOKEN_IMAGE,
+            TOKEN_NICKNAME,
+            TOKEN_PERSON,
+            TOKEN_PLACE,
         )
         name_terms: list[str] = []
         any_terms: list[str] = []

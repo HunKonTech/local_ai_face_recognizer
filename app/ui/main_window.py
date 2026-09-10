@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QIcon
@@ -108,6 +109,7 @@ class MainWindow(QMainWindow):
         # The scan / AI pipeline runs as a Task Manager task; these hold the
         # live task handle and its worker (kept alive while it runs).
         self._active_pipeline_task = None
+        self._object_search_task = None
         self._active_pipeline_worker = None
         self._current_person_id: Optional[int] = None
         self._current_face_id: Optional[int] = None
@@ -423,6 +425,9 @@ class MainWindow(QMainWindow):
             self._on_browser_person_changed
         )
         self._image_browser.object_open_requested.connect(self._open_object_sheet)
+        self._image_browser.object_search_requested.connect(
+            self._on_object_search_requested
+        )
         self._tabs.addTab(self._image_browser, t("tab_image_browser"))
 
         # --- Tab 2: Családi kereső ---
@@ -443,6 +448,9 @@ class MainWindow(QMainWindow):
         self._objects_panel = ObjectsPanel()
         self._objects_panel.object_data_changed.connect(
             self._refresh_preview_object_markers
+        )
+        self._objects_panel.object_search_requested.connect(
+            self._on_object_search_requested
         )
         self._tabs.addTab(self._objects_panel, t("tab_objects"))
 
@@ -710,6 +718,7 @@ class MainWindow(QMainWindow):
     def _restore_last_folder(self) -> None:
         """Re-select the folder(s) used in the previous session."""
         import json
+
         from app.app_settings import app_qsettings
 
         qs = app_qsettings()
@@ -737,6 +746,7 @@ class MainWindow(QMainWindow):
 
     def _save_folders(self, folders) -> None:
         import json
+
         from app.app_settings import app_qsettings
 
         app_qsettings().setValue("paths/source_folders", json.dumps(folders))
@@ -761,6 +771,8 @@ class MainWindow(QMainWindow):
             self._on_deep_rebuild()
         elif workflow_name == "train_model":
             self._on_deep_train()
+        elif workflow_name == "object_matching":
+            self._start_object_search(object_id=None, image_ids=None)
 
     @Slot(str)
     def _on_scan_maintenance_action(self, action: str) -> None:
@@ -1130,8 +1142,8 @@ class MainWindow(QMainWindow):
 
         progress_dialog = None
         try:
-            from PySide6.QtWidgets import QProgressDialog
             from PySide6.QtCore import Qt
+            from PySide6.QtWidgets import QProgressDialog
 
             progress_dialog = QProgressDialog(
                 t("retro_verify_title"), None, 0, 0, self
@@ -2606,6 +2618,141 @@ class MainWindow(QMainWindow):
             return
         self._tabs.setCurrentWidget(self._objects_panel)
         self._objects_panel.open_object(object_id)
+
+    # ------------------------------------------------------------------
+    # Object matching — find the same region on other images (#164)
+    # ------------------------------------------------------------------
+
+    @Slot(int, str)
+    def _on_object_search_requested(self, object_id: int, scope: str) -> None:
+        """Start a search from the Objects tab, resolving its scope choice."""
+        image_ids = None
+        if scope == "folder":
+            image_ids = self._current_folder_image_ids()
+            if not image_ids:
+                image_ids = None
+        self._start_object_search(object_id=object_id, image_ids=image_ids)
+
+    def _current_folder_image_ids(self) -> Optional[List[int]]:
+        """Image ids of the folder open in the browser, when it can tell us."""
+        browser = getattr(self, "_image_browser", None)
+        getter = getattr(browser, "current_folder_image_ids", None)
+        if getter is None:
+            return None
+        try:
+            return [int(i) for i in getter()]
+        except Exception:
+            log.debug("Could not resolve the current folder's images", exc_info=True)
+            return None
+
+    def _start_object_search(
+        self,
+        object_id: Optional[int],
+        image_ids: Optional[List[int]] = None,
+    ) -> None:
+        """Run an object search in the background and offer the hits for review.
+
+        Never blocks: progress shows in the status bar and the review dialog is
+        only offered once the run finishes, so tagging can continue meanwhile.
+        """
+        from app.tasks import TaskPriority, get_task_manager
+        from app.workers.object_match_worker import ObjectMatchWorker
+
+        if self._object_search_task is not None and not (
+            self._object_search_task.state.is_final
+        ):
+            QMessageBox.information(self, t("busy_title"), t("busy_msg"))
+            return
+
+        config = self._object_matching_config()
+        worker = ObjectMatchWorker(
+            object_id=object_id, image_ids=image_ids, config=config
+        )
+
+        def work(ctx):
+            return worker.run_in_task(ctx)
+
+        task = get_task_manager().submit(
+            t("object_match_running"),
+            work,
+            supports_pause=True,
+            priority=TaskPriority.NORMAL,
+            on_done=lambda result: self._on_object_search_done(object_id, result),
+            on_error=self._on_object_search_error,
+            on_cancelled=self._on_object_search_cancelled,
+        )
+        self._object_search_task = task
+        task.progress_changed.connect(self._on_task_progress)
+        self._status_label.setText(t("object_match_running"))
+
+    def _object_matching_config(self):
+        """Matching parameters, with the panel's sensitivity slider applied.
+
+        The slider moves the two gates that actually decide how permissive a run
+        is — the score floor and the required inlier count — between a strict
+        and a loose end of the range.
+        """
+        from app.app_settings import app_qsettings
+        from app.config import ObjectMatchingConfig
+
+        base = getattr(self._config, "object_matching", None) or ObjectMatchingConfig()
+        sensitivity = 50
+        try:
+            sensitivity = int(
+                app_qsettings().value("object_matching/sensitivity", 50)
+            )
+        except (TypeError, ValueError):
+            pass
+        fraction = max(0.0, min(1.0, sensitivity / 100.0))
+        return replace(
+            base,
+            min_score=round(0.55 - 0.30 * fraction, 3),
+            min_inliers=int(round(20 - 12 * fraction)),
+        )
+
+    def _on_object_search_done(self, object_id: Optional[int], result: object) -> None:
+        self._object_search_task = None
+        found = int(getattr(result, "suggestions_created", 0) or 0)
+        skipped = int(getattr(result, "skipped_no_reference", 0) or 0)
+        searched = int(getattr(result, "objects_searched", 0) or 0)
+        self._status_label.setText(t("ready"))
+
+        if skipped and skipped == searched:
+            QMessageBox.information(
+                self, t("object_match_review_title"), t("object_match_no_reference")
+            )
+            return
+        if not found:
+            self.statusBar().showMessage(t("object_match_none_found"), 5000)
+            return
+        self._open_object_match_review(object_id)
+
+    def _open_object_match_review(self, object_id: Optional[int]) -> None:
+        from app.ui.dialogs.object_match_review_dialog import ObjectMatchReviewDialog
+
+        dialog = ObjectMatchReviewDialog(self, object_id=object_id)
+        dialog.exec()
+        if dialog.accepted_count or dialog.rejected_count:
+            self._refresh_preview_object_markers()
+            if hasattr(self, "_objects_panel"):
+                self._objects_panel.refresh()
+            self._image_browser.refresh_object_markers()
+            self.statusBar().showMessage(
+                t("object_match_done").format(
+                    accepted=dialog.accepted_count, rejected=dialog.rejected_count
+                ),
+                5000,
+            )
+
+    def _on_object_search_error(self, message: str) -> None:
+        self._object_search_task = None
+        self._status_label.setText(t("ready"))
+        log.error("Object matching failed: %s", message)
+        QMessageBox.warning(self, t("object_match_review_title"), str(message))
+
+    def _on_object_search_cancelled(self) -> None:
+        self._object_search_task = None
+        self._status_label.setText(t("ready"))
 
     @Slot(int, int, int)
     def _on_cluster_face_right_clicked(self, face_id: int, gx: int, gy: int) -> None:

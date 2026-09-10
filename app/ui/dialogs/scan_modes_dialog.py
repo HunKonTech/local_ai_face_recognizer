@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -46,7 +46,7 @@ _OVERLAP_SENSITIVITY_SETTING = "overlap_cleanup/sensitivity"
 class ScanModesDialog(QDialog):
     """Modal dialog for choosing a scan or maintenance workflow."""
 
-    # "face_detection" | "full_rescan" | "train_model"
+    # "face_detection" | "full_rescan" | "train_model" | "object_matching"
     scan_workflow_started = Signal(str)
     # Maintenance action key, e.g. "overlap_cleanup", "identity_repair", …
     maintenance_action_started = Signal(str)
@@ -117,6 +117,12 @@ class ScanModesDialog(QDialog):
             title=t("workflow_train_model_title"),
             desc=t("workflow_train_model_desc"),
             on_click=lambda: self._launch_workflow("train_model"),
+            danger=False,
+        ))
+        cards.addWidget(self._make_card(
+            title=t("scan_object_matching"),
+            desc=t("scan_object_matching_desc"),
+            on_click=lambda: self._launch_workflow("object_matching"),
             danger=False,
         ))
         cards.addWidget(self._make_card(

@@ -14,10 +14,12 @@ from typing import List, Optional
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -34,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.app_settings import app_qsettings
 from app.db.database import session_scope
 from app.db.models import OBJECT_ROLES, Person
 from app.services.object_service import (
@@ -130,6 +134,9 @@ class ObjectsPanel(QWidget):
     """List, filter, inspect, edit and merge tagged objects."""
 
     object_data_changed = Signal()
+    # (object_id, scope) — scope is "library" or "folder".  The panel does not
+    # know which folder is open in the browser, so MainWindow resolves it.
+    object_search_requested = Signal(int, str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -223,6 +230,8 @@ class ObjectsPanel(QWidget):
         self._edit_btn = QPushButton(t("objects_edit"))
         self._edit_btn.clicked.connect(self._on_edit)
         self._detail_layout.addWidget(self._edit_btn)
+
+        self._detail_layout.addWidget(self._build_search_box())
 
         # Related persons
         self._persons_hdr = QLabel(t("object_detail_persons"))
@@ -337,6 +346,7 @@ class ObjectsPanel(QWidget):
         self._comments_hdr.setText(t("object_detail_comments"))
         self._add_person_btn.setText(t("object_add_person"))
         self._remove_person_btn.setText(t("object_remove_person"))
+        self._retranslate_search_box()
 
     def open_object(self, object_id: int) -> None:
         """Select, highlight and show an object (navigation from other panels)."""
@@ -400,6 +410,7 @@ class ObjectsPanel(QWidget):
         self._edit_btn.setEnabled(False)
         self._add_person_btn.setEnabled(False)
         self._remove_person_btn.setEnabled(False)
+        self._search_btn.setEnabled(False)
 
     def _load_detail(self, object_id: int) -> None:
         try:
@@ -461,6 +472,94 @@ class ObjectsPanel(QWidget):
         self._edit_btn.setEnabled(True)
         self._add_person_btn.setEnabled(True)
         self._remove_person_btn.setEnabled(True)
+        # Only a framed marking gives the matcher something to look for.
+        self._search_btn.setEnabled(any(o.bbox_w for o in occurrences))
+
+    # ------------------------------------------------------------------
+    # Object matching (#164)
+    # ------------------------------------------------------------------
+
+    def _build_search_box(self) -> QGroupBox:
+        """The "find this object elsewhere" box.
+
+        The scope and sensitivity live directly above the button rather than
+        behind a second dialog: the settings themselves are the confirmation.
+        """
+        box = QGroupBox()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        settings = app_qsettings()
+
+        scope_row = QHBoxLayout()
+        self._search_scope_label = QLabel()
+        self._search_scope = QComboBox()
+        self._search_scope.addItem("", "library")
+        self._search_scope.addItem("", "folder")
+        saved_scope = str(settings.value("object_matching/default_scope", "library"))
+        index = self._search_scope.findData(saved_scope)
+        if index >= 0:
+            self._search_scope.setCurrentIndex(index)
+        self._search_scope.currentIndexChanged.connect(self._save_search_settings)
+        scope_row.addWidget(self._search_scope_label)
+        scope_row.addWidget(self._search_scope, 1)
+        layout.addLayout(scope_row)
+
+        sens_row = QHBoxLayout()
+        self._search_sens_label = QLabel()
+        self._search_sens = QSlider(Qt.Horizontal)
+        self._search_sens.setRange(0, 100)
+        self._search_sens.setValue(int(settings.value("object_matching/sensitivity", 50)))
+        self._search_sens.valueChanged.connect(self._save_search_settings)
+        sens_row.addWidget(self._search_sens_label)
+        sens_row.addWidget(self._search_sens, 1)
+        layout.addLayout(sens_row)
+
+        self._search_auto = QCheckBox()
+        self._search_auto.setChecked(
+            str(settings.value("object_matching/auto_search_after_tag", "false")).lower()
+            in ("1", "true", "yes")
+        )
+        self._search_auto.toggled.connect(self._save_search_settings)
+        layout.addWidget(self._search_auto)
+
+        self._search_btn = QPushButton()
+        self._search_btn.setEnabled(False)
+        self._search_btn.clicked.connect(self._on_search)
+        layout.addWidget(self._search_btn)
+
+        self._retranslate_search_box()
+        return box
+
+    def _retranslate_search_box(self) -> None:
+        self._search_scope_label.setText(t("object_match_scope"))
+        self._search_scope.setItemText(0, t("object_match_scope_library"))
+        self._search_scope.setItemText(1, t("object_match_scope_folder"))
+        self._search_sens_label.setText(t("object_match_sensitivity"))
+        self._search_sens.setToolTip(t("object_match_sensitivity_tip"))
+        self._search_auto.setText(t("object_match_auto_after_tag"))
+        self._search_btn.setText(t("object_match_search"))
+        self._search_btn.setToolTip(t("object_match_search_tip"))
+
+    def _save_search_settings(self) -> None:
+        settings = app_qsettings()
+        settings.setValue(
+            "object_matching/default_scope", self._search_scope.currentData()
+        )
+        settings.setValue("object_matching/sensitivity", self._search_sens.value())
+        settings.setValue(
+            "object_matching/auto_search_after_tag", self._search_auto.isChecked()
+        )
+
+    def _on_search(self) -> None:
+        object_id = self._current_object_id
+        if object_id is None:
+            return
+        self._save_search_settings()
+        self.object_search_requested.emit(
+            int(object_id), str(self._search_scope.currentData() or "library")
+        )
 
     # ------------------------------------------------------------------
     # Actions

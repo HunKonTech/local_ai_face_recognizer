@@ -251,6 +251,46 @@ ai_face_detection:
   # on the full image but cannot be re-confirmed in their own enlarged crop.
   verification_enabled: true
 
+object_matching:
+  # "Recognise the same object" (#164): find the same picture region again in
+  # other photos, even at a different size — the driving case is one photo
+  # pasted into a collage at a fraction of its original size. Local ORB
+  # keypoints plus a RANSAC similarity transform; deliberately NOT viewpoint
+  # invariant yet. Entirely separate from face recognition.
+  enabled: true
+  # Keypoints kept per image. More finds more small copies, at linear cost in
+  # time and stored bytes (roughly 32 bytes per keypoint).
+  max_features: 1500
+  # Keypoints kept per size of a reference crop.
+  max_patch_features: 1200
+  # A reference crop is described at each of these fractions of its own size,
+  # not only at full size. ORB spends almost its whole keypoint budget on the
+  # finest pyramid level, so a crop described only at full size has very little
+  # left to match a quarter-size copy with. All scales share one coordinate
+  # frame, so a single RANSAC fit still decides.
+  patch_query_scales: [1.0, 0.6, 0.35, 0.2, 0.12]
+  # ORB pyramid. 12 levels at 1.2 covers about a 7x size difference.
+  pyramid_levels: 12
+  scale_factor: 1.2
+  fast_threshold: 12
+  # Images are downscaled to this long edge before extraction, so a 40 MP scan
+  # does not dominate a run.
+  max_work_edge: 1600
+  # Lowe ratio test; lower is stricter.
+  ratio_test: 0.75
+  # Geometric verification of a candidate hit.
+  ransac_reproj_threshold: 4.0
+  min_inliers: 12
+  min_inlier_ratio: 0.25
+  # Plausible size ratio target/reference; outside this a fit is noise.
+  min_scale: 0.12
+  max_scale: 8.0
+  # Minimum normalised score for a hit to be offered for review.
+  min_score: 0.35
+  # Hard cap on extraction threads; the resource governor may lower it further
+  # while the machine is busy with other work.
+  max_workers: 4
+
 overlap_resolution:
   # Same-image overlapping-box cleanup in the AI pipeline. When the same
   # physical face carries several boxes, one survives: an assigned/manual box
