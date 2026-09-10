@@ -4241,7 +4241,8 @@ class MainWindow(QMainWindow):
             with session_scope() as session:
                 person_rows = session.execute(
                     _sql(
-                        "SELECT id, name, is_protected, thumbnail_path "
+                        "SELECT id, name, is_protected, is_auto_named,"
+                        "       thumbnail_path "
                         "FROM persons ORDER BY name"
                     )
                 ).fetchall()
@@ -4302,7 +4303,7 @@ class MainWindow(QMainWindow):
                         face_detail[pid] = (fid, crop, img, (bx, by, bw, bh))
 
             persons: list[SidebarPerson] = []
-            for pid, name, is_protected, thumbnail_path in person_rows:
+            for pid, name, is_protected, is_auto_named, thumbnail_path in person_rows:
                 detail = face_detail.get(pid)
                 if detail is not None:
                     fid, crop, img, bbox = detail
@@ -4323,6 +4324,7 @@ class MainWindow(QMainWindow):
                         is_protected=bool(is_protected),
                         face_count=face_counts.get(pid, 0),
                         face=fd,
+                        is_auto_named=bool(is_auto_named),
                     )
                 )
             self._sidebar.populate(persons)

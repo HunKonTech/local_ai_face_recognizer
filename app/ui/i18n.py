@@ -1664,6 +1664,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "face_tooltip":      {"en": "<b>{person}</b><br>Face #{id} · confidence {confidence:.2f}<br>Backend: {backend}<br>File: {file}",
                           "hu": "<b>{person}</b><br>Arc #{id} · konfidencia {confidence:.2f}<br>Backend: {backend}<br>Fájl: {file}"},
     "all_faces":         {"en": "All Faces", "hu": "Összes arc"},
+    "sidebar_only_unknown": {"en": "Only unknown", "hu": "Csak ismeretlenek"},
+    "sidebar_unknown_badge_tip": {
+        "en": "Unknown person, not named yet",
+        "hu": "Ismeretlen személy, még nincs elnevezve",
+    },
     "preview_empty":     {"en": "Click a face thumbnail to preview",
                           "hu": "Kattints egy arc bélyegképre az előnézethez"},
     "preview_tip":       {"en": "Click a face to select it\nRight-click for options\nClick empty area to zoom",

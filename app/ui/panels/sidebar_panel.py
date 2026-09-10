@@ -9,9 +9,19 @@ from typing import Optional, Tuple
 
 import cv2
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QImageReader, QPixmap, QPixmapCache
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QImage,
+    QImageReader,
+    QPainter,
+    QPixmap,
+    QPixmapCache,
+)
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QGridLayout,
     QGroupBox,
     QLabel,
@@ -20,14 +30,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.app_settings import app_qsettings
 from app.ui.i18n import t
 from app.ui.widgets.person_search_select import PersonSearchSelect
-from app.utils.person_search import PersonEntry
+from app.utils.person_search import PersonEntry, person_is_unknown
 
 log = logging.getLogger(__name__)
 
 _FACE_THUMB = 64
 _FACE_COLS = 3
+#: Amber "?" badge marking persons that are still unnamed auto-clusters.
+_UNKNOWN_BADGE_COLOR = "#ffb020"
+_UNKNOWN_BADGE_SIZE = 14
+_ONLY_UNKNOWN_QSETTINGS_KEY = "sidebar/only_unknown_faces"
 _POPUP_MAX = 380  # max width/height of hover popup
 
 
@@ -59,6 +74,8 @@ class SidebarPerson:
     is_protected: bool
     face_count: int
     face: _FaceData
+    #: Still an auto-generated "Unknown N" cluster the user has not named.
+    is_auto_named: bool = False
 
 
 def _crop_mtime(crop_path: Optional[str]) -> Optional[float]:
@@ -106,6 +123,35 @@ def _load_crop_pixmap(
         crop_path,
     )
     return pixmap
+
+
+def _draw_unknown_badge(pixmap: QPixmap) -> QPixmap:
+    """Return a copy of *pixmap* with an amber "?" badge in the top-right corner.
+
+    Mirrors ``ClusterPanel._draw_corner_badge`` but sized for the smaller
+    sidebar thumbnail.  A copy is returned rather than painting in place so a
+    shared/cached source pixmap can never be modified.
+    """
+    badged = QPixmap(pixmap.size())
+    badged.fill(Qt.transparent)
+    painter = QPainter(badged)
+    painter.drawPixmap(0, 0, pixmap)
+    painter.setPen(Qt.NoPen)
+    margin = 2
+    bx = badged.width() - _UNKNOWN_BADGE_SIZE - margin
+    by = margin
+    painter.setBrush(QBrush(QColor(_UNKNOWN_BADGE_COLOR)))
+    painter.drawEllipse(bx, by, _UNKNOWN_BADGE_SIZE, _UNKNOWN_BADGE_SIZE)
+    font = QFont()
+    font.setPixelSize(10)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QColor("#ffffff"))
+    painter.drawText(
+        bx, by, _UNKNOWN_BADGE_SIZE, _UNKNOWN_BADGE_SIZE, Qt.AlignCenter, "?"
+    )
+    painter.end()
+    return badged
 
 
 def _render_original_with_box(
@@ -208,6 +254,7 @@ class _PersonThumb(QLabel):
         self._person_id = person.id
         self._person_name = person.name
         self._face_data = person.face
+        self._is_unknown = person_is_unknown(person)
         self._pixmap_loaded = False
         self.setObjectName(f"person-thumb-{person.id}")
         self.setProperty("person_id", person.id)
@@ -222,6 +269,8 @@ class _PersonThumb(QLabel):
             "QLabel:hover { border: 2px solid #88aaff; }"
         )
         self.setMouseTracking(True)
+        if self._is_unknown:
+            self.setToolTip(t("sidebar_unknown_badge_tip"))
 
     def ensure_pixmap(self) -> None:
         """Load the crop image once, the first time the thumb is visible."""
@@ -243,8 +292,11 @@ class _PersonThumb(QLabel):
             self._face_data.person_id,
         )
         if pixmap is not None:
+            if self._is_unknown:
+                pixmap = _draw_unknown_badge(pixmap)
             self.setPixmap(pixmap)
         else:
+            # The text fallback already shows a "?" — no badge needed.
             self.setText("?")
             self.setStyleSheet(
                 "QLabel { background: #333; color: #888; "
@@ -306,6 +358,13 @@ class SidebarPanel(QWidget):
         face_box_layout = QVBoxLayout(face_box)
         face_box_layout.setContentsMargins(4, 4, 4, 4)
 
+        # Narrows the grid to the unnamed auto-clusters, so a review pass can
+        # work through exactly the persons that still need a name.
+        self._only_unknown_check = QCheckBox(t("sidebar_only_unknown"))
+        self._only_unknown_check.setChecked(self._load_only_unknown_pref())
+        self._only_unknown_check.toggled.connect(self._on_only_unknown_toggled)
+        face_box_layout.addWidget(self._only_unknown_check)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -365,6 +424,23 @@ class SidebarPanel(QWidget):
 
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _load_only_unknown_pref() -> bool:
+        try:
+            return bool(
+                app_qsettings().value(_ONLY_UNKNOWN_QSETTINGS_KEY, False, type=bool)
+            )
+        except Exception:  # noqa: BLE001 — settings are best-effort, never fatal
+            return False
+
+    def _on_only_unknown_toggled(self, checked: bool) -> None:
+        try:
+            app_qsettings().setValue(_ONLY_UNKNOWN_QSETTINGS_KEY, bool(checked))
+        except Exception:  # noqa: BLE001
+            pass
+        # Re-filter from the persons already in memory — no new DB query.
+        self._rebuild_thumb_grid(self._all_persons)
+
     def _rebuild_thumb_grid(self, persons: list[SidebarPerson]) -> None:
         """Refresh the thumbnail grid, reusing widgets for unchanged persons.
 
@@ -375,7 +451,15 @@ class SidebarPanel(QWidget):
         unchanged keep their existing widget; only new or changed persons build
         a fresh one, and removed persons are deleted.
         """
-        visible = [p for p in persons if not p.is_protected]
+        only_unknown = (
+            self._only_unknown_check.isChecked()
+            if hasattr(self, "_only_unknown_check")
+            else False
+        )
+        visible = [
+            p for p in persons
+            if not p.is_protected and (not only_unknown or p.is_auto_named)
+        ]
 
         # Compute the desired order and a change-signature per person.
         desired_ids: list[int] = []
@@ -386,7 +470,8 @@ class SidebarPanel(QWidget):
             desired_ids.append(p.id)
             desired_sig[p.id] = (
                 fd.face_id, fd.crop_path, fd.image_path, fd.bbox,
-                p.name, p.is_protected, _crop_mtime(fd.crop_path),
+                p.name, p.is_protected, p.is_auto_named,
+                _crop_mtime(fd.crop_path),
             )
             person_by_id[p.id] = p
 
