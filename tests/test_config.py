@@ -27,6 +27,38 @@ def test_false_positive_gate_keys_load(tmp_path: Path) -> None:
     assert cfg.ai_face_detection.verification_enabled is False
 
 
+def test_recognition_identity_guard_keys_round_trip(tmp_path: Path) -> None:
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        "\n".join(
+            [
+                "recognition_identity_guard:",
+                "  enabled: false",
+                "  dup_iou_threshold: 0.42",
+                "  dup_containment_threshold: 0.66",
+                "  dup_embedding_guard: 0.5",
+                "  dup_hard_iou_threshold: 0.7",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = config_module.load_config(str(cfg_file))
+
+    guard = cfg.recognition_identity_guard
+    assert guard.enabled is False
+    assert guard.dup_iou_threshold == 0.42
+    assert guard.dup_containment_threshold == 0.66
+    assert guard.dup_embedding_guard == 0.5
+    assert guard.dup_hard_iou_threshold == 0.7
+
+
+def test_recognition_identity_guard_defaults() -> None:
+    guard = config_module.AppConfig().recognition_identity_guard
+    assert guard.enabled is True
+    assert 0.0 < guard.dup_iou_threshold < 1.0
+
+
 def test_multistage_and_verify_all_keys_round_trip(tmp_path: Path) -> None:
     """Multi-stage + verify-all detection knobs load from YAML."""
     cfg_file = tmp_path / "config.yaml"

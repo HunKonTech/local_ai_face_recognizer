@@ -27,14 +27,16 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from sqlalchemy.orm import Session
 
-from app.config import RecognitionConfig
+from app.config import RecognitionConfig, RecognitionIdentityGuardConfig
 from app.db.models import Face, RecognitionMergeLog
 from app.db.query_utils import in_chunks
+from app.services._image_dup_geometry import is_same_physical_face
+from app.services._image_dup_geometry import unit as _unit_vec
 from app.services.identity_service import FaceAssignmentSnapshot, IdentityService
 from app.services.vector_scoring import (
     FaceVectorScorer,
@@ -68,6 +70,7 @@ class FaceData:
     prev_assignment_source: Optional[str]
     prev_assignment_confidence: Optional[float]
     prev_assigned_at: Optional[datetime]
+    bbox: Optional[Tuple[int, int, int, int]] = None
 
 
 @dataclass
@@ -143,9 +146,11 @@ class ReRecognitionService:
         suggest_threshold: Optional[float] = None,
         margin: Optional[float] = None,
         max_candidates: int = 3,
+        identity_guard: Optional[RecognitionIdentityGuardConfig] = None,
     ) -> None:
         self._session = session
         self._rec_cfg = recognition_config or RecognitionConfig()
+        self._identity_guard = identity_guard or RecognitionIdentityGuardConfig()
         self.auto_threshold = (
             auto_threshold
             if auto_threshold is not None
@@ -213,6 +218,7 @@ class ReRecognitionService:
                     prev_assignment_source=face.assignment_source,
                     prev_assignment_confidence=face.assignment_confidence,
                     prev_assigned_at=face.assigned_at,
+                    bbox=(face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h),
                 )
             )
         return out
@@ -300,6 +306,9 @@ class ReRecognitionService:
         now = _utcnow_naive()
 
         for target_id, items in by_target.items():
+            items = self._drop_same_image_duplicates(target_id, items)
+            if not items:
+                continue
             item_by_face = {it.face.face_id: it for it in items}
             result = identity.reassign_faces_bulk(
                 list(item_by_face.keys()), target_id
@@ -333,6 +342,61 @@ class ReRecognitionService:
                 )
         self._session.commit()
         return batch_id
+
+    def _drop_same_image_duplicates(
+        self, target_id: int, items: List[AutoItem]
+    ) -> List[AutoItem]:
+        """Skip AUTO merges that would place *target_id* twice on one photo.
+
+        A merge is dropped when the target person already has a face on the same
+        image that geometrically overlaps (or is embedding-near-identical to)
+        the candidate — the "same person recognised twice on one photo" case.
+        A genuine second, non-overlapping appearance is kept.
+        """
+        if not self._identity_guard.enabled:
+            return items
+        image_ids = {
+            it.face.image_id for it in items if it.face.image_id is not None
+        }
+        if not image_ids:
+            return items
+
+        existing: Dict[int, List[Tuple[Tuple[int, int, int, int], Optional[np.ndarray]]]] = {}
+        for chunk in in_chunks(sorted(image_ids)):
+            rows = (
+                self._session.query(Face)
+                .filter(Face.person_id == target_id)
+                .filter(Face.image_id.in_(chunk))
+                .filter(Face.is_excluded == False)  # noqa: E712
+                .all()
+            )
+            for face in rows:
+                existing.setdefault(face.image_id, []).append(
+                    (
+                        (face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h),
+                        _unit_vec(face.get_embedding()),
+                    )
+                )
+
+        kept: List[AutoItem] = []
+        for it in items:
+            here = existing.get(it.face.image_id or -1, [])
+            cand_vec = _unit_vec(it.face.embedding)
+            cand_bbox = it.face.bbox or (0, 0, 0, 0)
+            if it.face.bbox is not None and any(
+                is_same_physical_face(
+                    cand_bbox, cand_vec, ex_bbox, ex_vec, self._identity_guard
+                )
+                for ex_bbox, ex_vec in here
+            ):
+                log.info(
+                    "Re-recognition: skipping face %d → %r — target already on "
+                    "image %s",
+                    it.face.face_id, it.target_name, it.face.image_id,
+                )
+                continue
+            kept.append(it)
+        return kept
 
     def apply_user_decision(
         self,

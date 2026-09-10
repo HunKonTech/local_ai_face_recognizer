@@ -77,11 +77,18 @@ def _add_face(
     *,
     source: str | None = "manual",
     confidence: float = 0.95,
+    bbox: tuple[int, int, int, int] | None = None,
 ) -> int:
+    if bbox is None:
+        # Spread faces across the image so distinct faces do not overlap — the
+        # per-image identity guard reasons geometrically.
+        n = session.query(Face).filter(Face.image_id == image_id).count()
+        bbox = ((n % 8) * 60, (n // 8) * 60, 40, 40)
+    bx, by, bw, bh = bbox
     face = Face(
         image_id=image_id,
         person_id=person_id,
-        bbox_x=0, bbox_y=0, bbox_w=40, bbox_h=40,
+        bbox_x=bx, bbox_y=by, bbox_w=bw, bbox_h=bh,
         confidence=confidence,
         detector_backend="cpu",
         assignment_source=source,
@@ -353,6 +360,138 @@ class TestTrainAndRecognize:
         assert stats2.reused_existing_model
         # Same data, different architecture — the saved model must not be reused.
         assert not stats3.reused_existing_model
+
+
+class TestPerImageIdentityGuard:
+    """The AI must never label one physical face with a person already placed
+    on that photo (the "same person recognised twice" bug)."""
+
+    def _set_assignment(self, session, face_id, *, source, confidence):
+        face = session.get(Face, face_id)
+        face.assignment_source = source
+        face.assignment_confidence = confidence
+
+    def test_overlapping_second_box_same_person_is_skipped(self, tmp_db, tmp_path):
+        cfg = _fast_config(tmp_path)
+        with session_scope() as s:
+            train_img = _add_image(s, "/train.jpg")
+            anna, _ = _seed_two_persons(s, train_img)
+            photo = _add_image(s, "/photo.jpg")
+            _add_face(s, photo, anna, _vec(0, seed=1), source="deep_confirmed",
+                      bbox=(100, 100, 50, 50))
+            dup = _add_face(s, photo, None, _vec(0, seed=999), source=None,
+                            bbox=(108, 104, 50, 50))
+
+        with session_scope() as s:
+            result = DeepRecognitionService(s, cfg).train_and_recognize()
+
+        assert result.recognition.n_skipped_duplicate_identity == 1
+        assert result.recognition.n_assigned == 0
+        with session_scope() as s:
+            assert s.get(Face, dup).person_id is None
+            assert s.query(AutoAssignment).count() == 0
+
+    def test_weaker_auto_incumbent_is_replaced(self, tmp_db, tmp_path):
+        cfg = _fast_config(tmp_path)
+        with session_scope() as s:
+            train_img = _add_image(s, "/train.jpg")
+            anna, _ = _seed_two_persons(s, train_img)
+            photo = _add_image(s, "/photo.jpg")
+            weak = _add_face(s, photo, anna, _vec(0, seed=2),
+                             source=DEEP_ASSIGNMENT_SOURCE, bbox=(100, 100, 50, 50))
+            self._set_assignment(s, weak, source=DEEP_ASSIGNMENT_SOURCE,
+                                 confidence=0.10)
+            strong = _add_face(s, photo, None, _vec(0, seed=999), source=None,
+                               bbox=(104, 102, 50, 50))
+
+        with session_scope() as s:
+            result = DeepRecognitionService(s, cfg).train_and_recognize()
+
+        assert result.recognition.n_replaced_duplicate_identity == 1
+        with session_scope() as s:
+            assert s.get(Face, weak) is None
+            kept = s.get(Face, strong)
+            assert kept.person_id == anna
+            rows = s.query(AutoAssignment).all()
+            assert [r.face_id for r in rows] == [strong]
+
+    def test_human_incumbent_always_wins(self, tmp_db, tmp_path):
+        cfg = _fast_config(tmp_path)
+        with session_scope() as s:
+            train_img = _add_image(s, "/train.jpg")
+            anna, _ = _seed_two_persons(s, train_img)
+            photo = _add_image(s, "/photo.jpg")
+            human = _add_face(s, photo, anna, _vec(0, seed=3), source="manual",
+                              bbox=(100, 100, 50, 50))
+            dup = _add_face(s, photo, None, _vec(0, seed=999), source=None,
+                            bbox=(103, 101, 50, 50))
+
+        with session_scope() as s:
+            result = DeepRecognitionService(s, cfg).train_and_recognize()
+
+        assert result.recognition.n_skipped_duplicate_identity == 1
+        assert result.recognition.n_replaced_duplicate_identity == 0
+        with session_scope() as s:
+            assert s.get(Face, human) is not None
+            assert s.get(Face, dup).person_id is None
+
+    def test_non_overlapping_second_appearance_is_kept(self, tmp_db, tmp_path):
+        cfg = _fast_config(tmp_path)
+        with session_scope() as s:
+            train_img = _add_image(s, "/train.jpg")
+            anna, _ = _seed_two_persons(s, train_img)
+            photo = _add_image(s, "/photo.jpg")
+            _add_face(s, photo, anna, _vec(0, seed=4), source="manual",
+                      bbox=(0, 0, 50, 50))
+            mirror = _add_face(s, photo, None, _vec(0, seed=999), source=None,
+                               bbox=(400, 400, 50, 50))
+
+        with session_scope() as s:
+            result = DeepRecognitionService(s, cfg).train_and_recognize()
+
+        assert result.recognition.n_skipped_duplicate_identity == 0
+        assert result.recognition.n_assigned == 1
+        with session_scope() as s:
+            assert s.get(Face, mirror).person_id == anna
+
+    def test_two_fresh_dups_in_one_run_collapse_to_one(self, tmp_db, tmp_path):
+        cfg = _fast_config(tmp_path)
+        with session_scope() as s:
+            train_img = _add_image(s, "/train.jpg")
+            anna, _ = _seed_two_persons(s, train_img)
+            photo = _add_image(s, "/photo.jpg")
+            a = _add_face(s, photo, None, _vec(0, seed=999), source=None,
+                          bbox=(100, 100, 50, 50))
+            b = _add_face(s, photo, None, _vec(0, seed=998), source=None,
+                          bbox=(106, 103, 50, 50))
+
+        with session_scope() as s:
+            result = DeepRecognitionService(s, cfg).train_and_recognize()
+
+        assert result.recognition.n_assigned == 1
+        assert result.recognition.n_skipped_duplicate_identity == 1
+        with session_scope() as s:
+            owners = [s.get(Face, a).person_id, s.get(Face, b).person_id]
+            assert sorted(o for o in owners if o is not None) == [anna]
+
+    def test_guard_is_scoped_per_image(self, tmp_db, tmp_path):
+        cfg = _fast_config(tmp_path)
+        with session_scope() as s:
+            train_img = _add_image(s, "/train.jpg")
+            anna, _ = _seed_two_persons(s, train_img)
+            photo_a = _add_image(s, "/a.jpg")
+            _add_face(s, photo_a, anna, _vec(0, seed=5), source="manual",
+                      bbox=(100, 100, 50, 50))
+            photo_b = _add_image(s, "/b.jpg")
+            cand = _add_face(s, photo_b, None, _vec(0, seed=999), source=None,
+                             bbox=(100, 100, 50, 50))
+
+        with session_scope() as s:
+            result = DeepRecognitionService(s, cfg).train_and_recognize()
+
+        assert result.recognition.n_assigned == 1
+        with session_scope() as s:
+            assert s.get(Face, cand).person_id == anna
 
 
 class TestReviewActions:

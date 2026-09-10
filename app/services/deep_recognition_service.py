@@ -32,10 +32,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+import numpy as np
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.config import DeepRecognitionConfig
+from app.config import DeepRecognitionConfig, RecognitionIdentityGuardConfig
 from app.db.models import (
     AUTO_ASSIGN_STATUS_AUTO,
     AUTO_ASSIGN_STATUS_CONFIRMED,
@@ -49,6 +50,8 @@ from app.db.models import (
 )
 from app.deep.classifier import DeepFaceClassifier
 from app.deep.dataset import build_training_dataset
+from app.services._image_dup_geometry import is_same_physical_face
+from app.services._image_dup_geometry import unit as _unit_vec
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +61,15 @@ _MODEL_FILENAME = "deep_face_model.pkl"
 DEEP_ASSIGNMENT_SOURCE = "deep_recognition"
 # Source after the user confirmed an automatic assignment (trusted training).
 DEEP_CONFIRMED_SOURCE = "deep_confirmed"
+
+# Assignment sources marking a human decision — these incumbents are never
+# displaced by the per-image identity guard (legacy rows carry NULL).
+_HUMAN_ASSIGNMENT_SOURCES = {
+    "manual",
+    "manual_merge",
+    "suggestion_approved",
+    "deep_confirmed",
+}
 
 
 def _utcnow_naive() -> datetime:
@@ -92,6 +104,24 @@ class DeepRecognitionStats:
     # Predicted a person that no longer exists in the DB — a stale model trained
     # on a previous database. Skipped instead of creating a ghost assignment.
     n_skipped_unknown_person: int = 0
+    # Per-image identity guard: the predicted person already has an overlapping
+    # face on this image, and the incumbent was kept (human / higher score).
+    n_skipped_duplicate_identity: int = 0
+    # Per-image identity guard: a weaker auto-recognition incumbent box was
+    # deleted in favour of this stronger prediction.
+    n_replaced_duplicate_identity: int = 0
+
+
+@dataclass(eq=False)
+class _Incumbent:
+    """A face already attached to a real named person on some image."""
+
+    face_id: int
+    person_id: int
+    bbox: Tuple[int, int, int, int]
+    vec: Optional[np.ndarray]
+    is_human: bool
+    confidence: Optional[float]
 
 
 @dataclass
@@ -144,9 +174,11 @@ class DeepRecognitionService:
         session: Session,
         config: Optional[DeepRecognitionConfig] = None,
         model_dir: Optional[Path | str] = None,
+        identity_guard: Optional[RecognitionIdentityGuardConfig] = None,
     ) -> None:
         self._session = session
         self._config = config or DeepRecognitionConfig()
+        self._identity_guard = identity_guard or RecognitionIdentityGuardConfig()
         self._model_dir = Path(model_dir) if model_dir else Path(self._config.model_dir)
 
     # ------------------------------------------------------------------
@@ -435,6 +467,15 @@ class DeepRecognitionService:
         vetoes = self._load_correction_vetoes(candidates)
         now = _utcnow_naive()
 
+        # Per-image identity guard: index the faces already attached to a real
+        # named person, keyed by image, so we never label one physical face with
+        # a person who is already placed on that photo.
+        incumbents = (
+            self._load_incumbents_by_image()
+            if self._identity_guard.enabled
+            else {}
+        )
+
         for idx, face in enumerate(candidates):
             if progress_cb is not None:
                 progress_cb(idx + 1, len(candidates), f"face #{face.id}")
@@ -478,6 +519,27 @@ class DeepRecognitionService:
                 stats.n_skipped_unknown_person += 1
                 continue
 
+            # Per-image identity guard: does this person already own an
+            # overlapping face on this image?
+            if self._identity_guard.enabled:
+                dup = self._find_identity_dup(face, prediction.person_id, incumbents)
+                if dup is not None:
+                    incumbent_conf = (
+                        dup.confidence if dup.confidence is not None else -1.0
+                    )
+                    if dup.is_human or incumbent_conf >= prediction.score:
+                        stats.n_skipped_duplicate_identity += 1
+                        continue
+                    # Weaker auto-recognition incumbent — drop its box (its
+                    # AutoAssignment row cascades) so the clusterer cannot
+                    # re-pick it within this run, then let the stronger
+                    # prediction take over below.
+                    self._session.query(Face).filter(Face.id == dup.face_id).delete(
+                        synchronize_session="fetch"
+                    )
+                    incumbents[face.image_id].remove(dup)
+                    stats.n_replaced_duplicate_identity += 1
+
             previous_person_id = face.person_id
             previous_person_name = (
                 face.person.name if face.person is not None else None
@@ -514,19 +576,103 @@ class DeepRecognitionService:
             )
             stats.n_assigned += 1
 
+            if self._identity_guard.enabled:
+                incumbents.setdefault(face.image_id, []).append(
+                    _Incumbent(
+                        face_id=face.id,
+                        person_id=prediction.person_id,
+                        bbox=(face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h),
+                        vec=_unit_vec(face.get_embedding()),
+                        is_human=False,
+                        confidence=prediction.score,
+                    )
+                )
+
         self._delete_orphan_auto_persons()
         self._session.commit()
         log.info(
             "Deep recognition: %d/%d assigned (outlier=%d, threshold=%d, margin=%d, "
             "prototype=%d, correction-veto=%d, low-conf=%d, no-emb=%d, "
-            "unknown-person=%d)",
+            "unknown-person=%d, dup-identity-skip=%d, dup-identity-replace=%d)",
             stats.n_assigned, stats.n_candidates,
             stats.n_rejected_outlier, stats.n_rejected_threshold,
             stats.n_rejected_margin, stats.n_rejected_prototype,
             stats.n_rejected_correction, stats.n_skipped_low_confidence,
             stats.n_no_embedding, stats.n_skipped_unknown_person,
+            stats.n_skipped_duplicate_identity, stats.n_replaced_duplicate_identity,
         )
         return stats
+
+    # ------------------------------------------------------------------
+    # Per-image identity guard
+    # ------------------------------------------------------------------
+
+    def _load_incumbents_by_image(self) -> Dict[int, List["_Incumbent"]]:
+        """Index faces already attached to a real named person, by image id."""
+        rows: List[Face] = (
+            self._session.query(Face)
+            .join(Person, Face.person_id == Person.id)
+            .filter(Face.is_excluded == False)  # noqa: E712
+            .filter(Person.is_auto_named == False)  # noqa: E712
+            .filter(Person.is_protected == False)  # noqa: E712
+            .all()
+        )
+        by_image: Dict[int, List[_Incumbent]] = {}
+        for face in rows:
+            is_human = (
+                face.detector_backend == "manual"
+                or face.assignment_source is None
+                or face.assignment_source in _HUMAN_ASSIGNMENT_SOURCES
+            )
+            by_image.setdefault(face.image_id, []).append(
+                _Incumbent(
+                    face_id=face.id,
+                    person_id=face.person_id,
+                    bbox=(face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h),
+                    vec=_unit_vec(face.get_embedding()),
+                    is_human=is_human,
+                    confidence=face.assignment_confidence,
+                )
+            )
+        return by_image
+
+    def _find_identity_dup(
+        self,
+        face: Face,
+        predicted_person_id: int,
+        incumbents: Dict[int, List["_Incumbent"]],
+    ) -> Optional["_Incumbent"]:
+        """Return the incumbent on *face*'s image that this prediction duplicates.
+
+        A duplicate = same predicted person + geometric/embedding overlap.  When
+        several match, the highest-confidence one is returned (human incumbents
+        rank above any score).
+        """
+        same_person = [
+            inc
+            for inc in incumbents.get(face.image_id, [])
+            if inc.person_id == predicted_person_id
+        ]
+        if not same_person:
+            return None
+        face_bbox = (face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h)
+        face_vec = _unit_vec(face.get_embedding())
+        dups = [
+            inc
+            for inc in same_person
+            if is_same_physical_face(
+                face_bbox, face_vec, inc.bbox, inc.vec, self._identity_guard
+            )
+        ]
+        if not dups:
+            return None
+        return max(
+            dups,
+            key=lambda inc: (
+                1 if inc.is_human else 0,
+                inc.confidence if inc.confidence is not None else -1.0,
+            ),
+        )
 
     @staticmethod
     def _serialize_decision(

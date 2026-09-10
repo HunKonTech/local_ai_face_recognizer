@@ -66,6 +66,64 @@ def _add_face(session, image_id, person_id, *, source=None, backend="cpu") -> in
     return face.id
 
 
+class _Zero:
+    """Stand-in stage result: every attribute is a falsy zero."""
+
+    def __getattr__(self, name):
+        return self
+
+    def __add__(self, other):
+        return other
+
+    __radd__ = __add__
+
+    def __mul__(self, other):
+        return 0
+
+    __rmul__ = __mul__
+
+    def __bool__(self):
+        return False
+
+    def __format__(self, spec):
+        return format(0, spec) if spec else "0"
+
+
+def test_overlap_resolution_runs_again_after_recognition(tmp_db, monkeypatch):
+    """The pipeline resolves overlapping boxes a second time, *after* the AI has
+    assigned names, so two boxes of one face labelled as different people get
+    collapsed."""
+    worker = DeepPipelineWorker(
+        root_folders=["/x"], config=AppConfig(), mode=MODE_RESCAN
+    )
+    calls: list[str] = []
+
+    def rec(name, ret=None):
+        def _fn(*_a, **_k):
+            calls.append(name)
+            return _Zero() if ret is None else ret
+        return _fn
+
+    for name in (
+        "_run_detection", "_run_ai_face_detection", "_run_embedding",
+        "_run_overlap_resolution", "_run_multistage_cleanup",
+        "_run_ignored_filter", "_run_deep_train_and_recognize",
+        "_run_clustering", "_run_intra_image_consistency", "_run_suggestions",
+    ):
+        monkeypatch.setattr(worker, name, rec(name))
+    monkeypatch.setattr(worker, "_run_scan", rec("_run_scan", []))
+    monkeypatch.setattr(worker, "_get_pending_detection_ids", lambda: [])
+    monkeypatch.setattr(worker, "_checkpoint", lambda: None)
+
+    worker._run_pipeline()
+
+    overlap_calls = [i for i, n in enumerate(calls) if n == "_run_overlap_resolution"]
+    rec_call = calls.index("_run_deep_train_and_recognize")
+    cluster_call = calls.index("_run_clustering")
+    assert len(overlap_calls) == 2
+    assert overlap_calls[0] < rec_call < overlap_calls[1] < cluster_call
+
+
 def test_invalid_mode_raises():
     with pytest.raises(ValueError):
         DeepPipelineWorker(root_folders=["/x"], config=AppConfig(), mode="bogus")

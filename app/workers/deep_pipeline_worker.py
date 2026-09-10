@@ -358,6 +358,19 @@ class DeepPipelineWorker(QThread):
         result = self._run_deep_train_and_recognize()
         self._checkpoint()
 
+        # --- Overlapping-box resolution (again, now name-aware) ---
+        # Recognition just stamped names onto boxes; a second pass collapses two
+        # boxes of one physical face that the AI labelled as different people,
+        # and repairs archives recognised before the per-image identity guard.
+        announce("Resolving overlapping face boxes (post-recognition) …")
+        post_overlap_stats = self._run_overlap_resolution()
+        if post_overlap_stats.faces_removed:
+            self._emit_log(
+                f"  Removed {post_overlap_stats.faces_removed} duplicate box(es) "
+                f"after recognition."
+            )
+        self._checkpoint()
+
         # --- Cluster the remaining unknown faces into groups ---
         announce("Grouping remaining unknown faces …")
         cluster_stats = self._run_clustering()
@@ -516,6 +529,9 @@ class DeepPipelineWorker(QThread):
                 config=self._config.deep_recognition,
                 model_dir=self._config.resolve(
                     self._config.deep_recognition.model_dir
+                ),
+                identity_guard=getattr(
+                    self._config, "recognition_identity_guard", None
                 ),
             )
             result = svc.train_and_recognize(
@@ -920,6 +936,9 @@ class DeepPipelineWorker(QThread):
                 model_dir=self._config.resolve(
                     self._config.deep_recognition.model_dir
                 ),
+                identity_guard=getattr(
+                    self._config, "recognition_identity_guard", None
+                ),
             )
             result = svc.train_and_recognize(
                 mode=self._mode,
@@ -947,6 +966,17 @@ class DeepPipelineWorker(QThread):
             f"  AI placed {result.recognition.n_assigned} unknown face(s) "
             f"with known people."
         )
+        rec = result.recognition
+        dup_guarded = (
+            rec.n_skipped_duplicate_identity + rec.n_replaced_duplicate_identity
+        )
+        if dup_guarded:
+            self._emit_log(
+                f"  Prevented {dup_guarded} duplicate same-person label(s) on "
+                f"already-recognised photos "
+                f"(skipped {rec.n_skipped_duplicate_identity}, "
+                f"replaced {rec.n_replaced_duplicate_identity})."
+            )
         return result
 
     def _run_cluster_only_pipeline(self) -> PipelineResult:

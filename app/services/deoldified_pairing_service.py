@@ -13,10 +13,13 @@ is re-appended.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -252,9 +255,15 @@ class DeoldifiedPairingService:
         if not variants:
             return []
 
-        def _member(img: "Image", *, is_bw: bool) -> ComparisonMember:
+        def _member(img: "Image", *, is_bw: bool) -> Optional[ComparisonMember]:
             resolved = resolve_image_path(img)
             path = str(resolved) if resolved else img.file_path
+            if not path or not Path(path).exists():
+                log.debug(
+                    "Skipping deoldified comparison member with missing file: %s",
+                    path or img.file_path,
+                )
+                return None
             label = (
                 "" if is_bw
                 else extract_variant_label(Path(_basename(img.file_path)).stem)
@@ -263,9 +272,15 @@ class DeoldifiedPairingService:
                 image_id=img.id, file_path=path, label=label, is_bw=is_bw
             )
 
-        members = [_member(original, is_bw=True)]
-        members.extend(_member(v, is_bw=False) for v in variants)
-        return members
+        bw_member = _member(original, is_bw=True)
+        if bw_member is None:
+            return []
+        variant_members = [
+            m for m in (_member(v, is_bw=False) for v in variants) if m is not None
+        ]
+        if not variant_members:
+            return []
+        return [bw_member, *variant_members]
 
     def _find_by_basenames(
         self, candidates: list[str], *, exclude_id: Optional[int] = None

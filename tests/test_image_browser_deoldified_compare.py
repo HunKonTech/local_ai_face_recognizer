@@ -178,6 +178,27 @@ def test_drag_while_not_in_compare_only_records_split(db, qtbot):
     assert panel._deol_split == 72
 
 
+def test_single_colorized_view_falls_back_to_bw_when_variant_missing(db, qtbot, tmp_path):
+    """A dead colorized path must not freeze the panel — show B&W instead."""
+    bw_path = tmp_path / "bw.jpg"
+    save_image_bgr(bw_path, np.zeros((10, 20, 3), dtype=np.uint8))
+
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._current_path = str(bw_path)
+    panel._deol_pair_orig_id = None  # current tree image IS the B&W original
+    panel._deol_pair_color_path = str(tmp_path / "gone-deoldified (artistic).jpg")
+    panel._deol_viewing_color = True
+
+    panel._apply_single_view(True, reset_zoom=False)
+
+    assert panel._deol_viewing_color is False
+    assert panel._deol_mode == "bw"
+    assert panel._btn_view_bw.isChecked() is True
+    assert panel._btn_view_color.isChecked() is False
+    assert panel._orig_img_bgr is not None
+
+
 def test_label_compare_divider_x_requires_pixmap(db, qtbot):
     panel = ImageBrowserPanel(config=None)
     qtbot.addWidget(panel)

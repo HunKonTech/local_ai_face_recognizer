@@ -57,14 +57,20 @@ def _add_person(session, name: str, *, auto: bool = False, protected: bool = Fal
     return person.id
 
 
-def _add_face(session, image_id, person_id, embedding) -> int:
+def _add_face(session, image_id, person_id, embedding, bbox=None) -> int:
+    if bbox is None:
+        # Non-overlapping boxes by default — the same-image identity guard
+        # reasons geometrically about whether two boxes are one physical face.
+        n = session.query(Face).filter(Face.image_id == image_id).count()
+        bbox = ((n % 8) * 40, (n // 8) * 40, 20, 20)
+    bx, by, bw, bh = bbox
     face = Face(
         image_id=image_id,
         person_id=person_id,
-        bbox_x=0,
-        bbox_y=0,
-        bbox_w=20,
-        bbox_h=20,
+        bbox_x=bx,
+        bbox_y=by,
+        bbox_w=bw,
+        bbox_h=bh,
         confidence=1.0,
         detector_backend="cpu",
     )
@@ -167,6 +173,34 @@ class TestApplyAndUndo:
             assert rows[0].matched_person_id == alice
             assert rows[0].prev_person_was_auto is True
             assert rows[0].undone_at is None
+
+    def test_skips_merge_when_target_already_overlaps_on_image(self, tmp_db):
+        """The target person already has an overlapping face here — merging would
+        label one physical face with the same person twice."""
+        with session_scope() as s:
+            img = _add_image(s)
+            alice = _add_person(s, "Alice")
+            _add_face(s, img, alice, _axis(0, noise=0.01, seed=1),
+                      bbox=(100, 100, 40, 40))
+            unknown = _add_person(s, "Unknown 1", auto=True)
+            cand = _add_face(s, img, unknown, _axis(0, noise=0.01, seed=2),
+                             bbox=(108, 104, 40, 40))
+
+            svc = ReRecognitionService(s, _cfg())
+            profiles = svc.load_profiles()
+            faces = svc.extract_candidates([img])
+            _, item = svc.classify(faces[0], profiles)
+            assert item is not None and item.target_person_id == alice
+            batch_id = svc.apply_auto_merges([item])
+
+        with session_scope() as s:
+            assert s.get(Face, cand).person_id != alice
+            assert (
+                s.query(RecognitionMergeLog)
+                .filter(RecognitionMergeLog.batch_id == batch_id)
+                .count()
+                == 0
+            )
 
     def test_undo_restores_face_and_recreates_unknown(self, tmp_db):
         with session_scope() as s:

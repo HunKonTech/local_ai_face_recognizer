@@ -339,6 +339,32 @@ class IntraImageDuplicateConfig:
 
 
 @dataclass
+class RecognitionIdentityGuardConfig:
+    """Per-image identity uniqueness guard for the recognition passes.
+
+    Stops the AI from attaching the *same* named person to two overlapping
+    boxes on one photo (the "same person recognised twice" bug).  Deliberately
+    conservative: only boxes that geometrically overlap or are embedding-near-
+    identical are treated as the same face, so a person genuinely appearing
+    twice in one frame (mirror, wall portrait) is untouched.
+    """
+
+    # When False the recognition passes skip the guard entirely.
+    enabled: bool = True
+    # Bounding-box IoU at/above which two boxes may be the same physical face.
+    dup_iou_threshold: float = 0.30
+    # Containment (intersection / smaller-box area) catching a nested box.
+    dup_containment_threshold: float = 0.75
+    # At moderate overlap, require at least this cosine between the two
+    # embeddings before treating the boxes as one face (guards two different
+    # people photographed close together).
+    dup_embedding_guard: float = 0.60
+    # Above this IoU the boxes are the same spot — collapse regardless of
+    # embedding agreement (one crop may be corrupt).
+    dup_hard_iou_threshold: float = 0.60
+
+
+@dataclass
 class IdentityRepairConfig:
     """Parameters for the global Identity Repair Scan.
 
@@ -685,6 +711,9 @@ class AppConfig:
     intra_image_duplicate: IntraImageDuplicateConfig = field(
         default_factory=IntraImageDuplicateConfig
     )
+    recognition_identity_guard: RecognitionIdentityGuardConfig = field(
+        default_factory=RecognitionIdentityGuardConfig
+    )
     identity_repair: IdentityRepairConfig = field(default_factory=IdentityRepairConfig)
     recognition: RecognitionConfig = field(default_factory=RecognitionConfig)
     deep_recognition: DeepRecognitionConfig = field(
@@ -926,6 +955,29 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             max_faces_per_image=iid.get(
                 "max_faces_per_image",
                 cfg.intra_image_duplicate.max_faces_per_image,
+            ),
+        )
+
+        rig = raw.get("recognition_identity_guard", {})
+        cfg.recognition_identity_guard = RecognitionIdentityGuardConfig(
+            enabled=rig.get(
+                "enabled", cfg.recognition_identity_guard.enabled
+            ),
+            dup_iou_threshold=rig.get(
+                "dup_iou_threshold",
+                cfg.recognition_identity_guard.dup_iou_threshold,
+            ),
+            dup_containment_threshold=rig.get(
+                "dup_containment_threshold",
+                cfg.recognition_identity_guard.dup_containment_threshold,
+            ),
+            dup_embedding_guard=rig.get(
+                "dup_embedding_guard",
+                cfg.recognition_identity_guard.dup_embedding_guard,
+            ),
+            dup_hard_iou_threshold=rig.get(
+                "dup_hard_iou_threshold",
+                cfg.recognition_identity_guard.dup_hard_iou_threshold,
             ),
         )
 

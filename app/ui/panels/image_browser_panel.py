@@ -2700,7 +2700,29 @@ class ImageBrowserPanel(QWidget):
         img_bgr = load_image_bgr(path)
         if img_bgr is None:
             log.warning("Cannot load image for deoldified view: %s", path)
-            return
+            if show_colorized:
+                # Colorized variant file is gone — degrade to the B&W side
+                # instead of leaving the panel frozen on the previous view.
+                if self._deol_pair_orig_id is not None:
+                    with session_scope() as session:
+                        orig = session.get(Image, self._deol_pair_orig_id)
+                        resolved = resolve_image_path(orig) if orig else None
+                        bw_path = (
+                            str(resolved) if resolved
+                            else (orig.file_path if orig else None)
+                        )
+                else:
+                    bw_path = self._current_path
+                bw_bgr = load_image_bgr(bw_path) if bw_path else None
+                if bw_bgr is not None:
+                    self._deol_mode = "bw"
+                    img_bgr = bw_bgr
+                    show_colorized = False
+                    self._deol_lbl.setText(t("ibp_deol_variant_missing"))
+                else:
+                    return
+            else:
+                return
 
         self._deol_compare = False
         self._image_label.set_compare_mode(False)
