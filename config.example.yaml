@@ -13,6 +13,14 @@ detection:
   # Minimum face size in pixels (width and height must both exceed this)
   min_face_size: 50
 
+  # Duplicate-box suppression during detection. Boxes at or above this IoU, or
+  # at or above this containment (intersection / smaller-box area), are treated
+  # as one face — the containment rule catches a tight box nested inside a
+  # bigger one, which otherwise surfaced as an extra "Unknown" on a face that
+  # was already recognised.
+  iou_merge_threshold: 0.35
+  containment_merge_threshold: 0.80
+
   # Path to the Edge TPU compiled TFLite face detection model.
   # Comment out or remove to force CPU-only mode.
   #
@@ -305,6 +313,9 @@ overlap_resolution:
   embedding_guard_similarity: 0.80
   # Above this IoU the pair is resolved even when embeddings disagree.
   hard_iou_threshold: 0.65
+  # Above this containment one box sits inside the other. Two real faces never
+  # nest, so the pair is resolved without the embedding check.
+  hard_containment_threshold: 0.85
   max_faces_per_image: 120
 
 ignored_faces:

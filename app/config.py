@@ -61,6 +61,13 @@ class DetectionConfig:
     # preprocessing variants in high-accuracy mode.
     iou_merge_threshold: float = 0.35
 
+    # Containment threshold (intersection / smaller-box area) for the same
+    # merge, and for the dedup of new detections against already retained
+    # (named / manually drawn) boxes.  A tight box nested inside a generous
+    # one has a low IoU but a near-1.0 containment; without this the nested
+    # box survived and showed up as an extra "Unknown" on a recognised face.
+    containment_merge_threshold: float = 0.80
+
     # IoU threshold for the manual cleanup action that finds unassigned
     # question-mark boxes overlapping already named faces.
     duplicate_unknown_iou_threshold: float = 0.35
@@ -362,6 +369,9 @@ class RecognitionIdentityGuardConfig:
     # Above this IoU the boxes are the same spot — collapse regardless of
     # embedding agreement (one crop may be corrupt).
     dup_hard_iou_threshold: float = 0.60
+    # Above this containment one box is nested inside the other; two real
+    # faces never nest, so collapse regardless of embedding agreement.
+    dup_hard_containment_threshold: float = 0.85
 
 
 @dataclass
@@ -638,6 +648,11 @@ class OverlapResolutionConfig:
     # Above this IoU the boxes are geometrically the same spot, so the pair is
     # resolved even when embeddings disagree (e.g. one crop is corrupt).
     hard_iou_threshold: float = 0.65
+    # Above this containment one box sits *inside* the other.  Two real faces
+    # never nest, so such a pair is resolved regardless of the embeddings — a
+    # tight sub-box of a face (eye / mouth region) embeds nothing like the full
+    # face, which is exactly how those duplicates used to survive the guard.
+    hard_containment_threshold: float = 0.85
     # Skip pathological images with more boxes than this.
     max_faces_per_image: int = 120
 
@@ -897,6 +912,10 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             iou_merge_threshold=det.get(
                 "iou_merge_threshold", cfg.detection.iou_merge_threshold
             ),
+            containment_merge_threshold=det.get(
+                "containment_merge_threshold",
+                cfg.detection.containment_merge_threshold,
+            ),
             duplicate_unknown_iou_threshold=det.get(
                 "duplicate_unknown_iou_threshold",
                 cfg.detection.duplicate_unknown_iou_threshold,
@@ -1050,6 +1069,10 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             dup_hard_iou_threshold=rig.get(
                 "dup_hard_iou_threshold",
                 cfg.recognition_identity_guard.dup_hard_iou_threshold,
+            ),
+            dup_hard_containment_threshold=rig.get(
+                "dup_hard_containment_threshold",
+                cfg.recognition_identity_guard.dup_hard_containment_threshold,
             ),
         )
 
@@ -1252,6 +1275,10 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             ),
             hard_iou_threshold=ovr.get(
                 "hard_iou_threshold", cfg.overlap_resolution.hard_iou_threshold
+            ),
+            hard_containment_threshold=ovr.get(
+                "hard_containment_threshold",
+                cfg.overlap_resolution.hard_containment_threshold,
             ),
             max_faces_per_image=ovr.get(
                 "max_faces_per_image", cfg.overlap_resolution.max_faces_per_image

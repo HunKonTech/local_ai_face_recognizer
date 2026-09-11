@@ -9,7 +9,7 @@ import numpy as np
 
 from app.config import AppConfig
 from app.db.database import init_db, session_scope
-from app.db.models import Face, Image
+from app.db.models import Face, Image, Person
 from app.detectors.base import Detection, FaceDetector
 from app.services.detection_service import DetectionService
 
@@ -245,6 +245,102 @@ def test_redetection_does_not_duplicate_manual_face(monkeypatch, tmp_path):
     auto = [f for f in faces if f.detector_backend == "dummy"]
     assert len(auto) == 1, "overlapping detection must be deduped against the manual face"
     assert len(faces) == 2
+
+
+class _NestedBoxDetector(FaceDetector):
+    """Returns a face box plus a tight sub-box nested inside it.
+
+    Mirrors the real failure of issue #161: a detector variant marks an
+    eye/mouth region of an already recognised face as its own face.  The
+    nested box has a low IoU against the full-face box, so plain IoU dedup
+    let it through and it surfaced as an extra "Unknown".
+    """
+
+    @property
+    def backend_name(self) -> str:
+        return "dummy"
+
+    def detect(
+        self,
+        image_bgr: np.ndarray,
+        confidence_threshold: float = 0.5,
+        min_face_size: int = 50,
+    ):
+        return [
+            Detection(x=10, y=10, w=100, h=100, confidence=0.95),
+            Detection(x=40, y=40, w=30, h=30, confidence=0.80),
+        ]
+
+
+def test_nested_detections_are_merged_into_one():
+    """Greedy NMS must suppress a box nested inside a stronger one."""
+    from app.services.detection_service import _merge_detections
+
+    big = Detection(x=10, y=10, w=100, h=100, confidence=0.95)
+    nested = Detection(x=40, y=40, w=30, h=30, confidence=0.80)
+    merged = _merge_detections([big, nested], iou_threshold=0.35)
+
+    assert [(d.x, d.y, d.w, d.h) for d in merged] == [(10, 10, 100, 100)]
+
+
+def test_redetection_does_not_nest_unknown_inside_named_face(monkeypatch, tmp_path):
+    """A named face box must swallow a nested re-detection (issue #161).
+
+    The nested box overlaps the named face at only ~0.09 IoU but lies fully
+    inside it, so only the containment rule catches it.
+    """
+    db_path = tmp_path / "faces.db"
+    init_db(db_path)
+
+    image_path = tmp_path / "p.jpg"
+    assert cv2.imwrite(str(image_path), np.full((240, 320, 3), 255, np.uint8))
+
+    with session_scope() as session:
+        image = Image(
+            file_path=str(image_path),
+            file_hash="hash",
+            file_mtime=image_path.stat().st_mtime,
+        )
+        session.add(image)
+        session.flush()
+        image_id = image.id
+
+        person = Person(name="Anna")
+        session.add(person)
+        session.flush()
+
+        named = Face(
+            image_id=image_id,
+            person_id=person.id,
+            bbox_x=10, bbox_y=10, bbox_w=100, bbox_h=100,
+            confidence=0.95,
+            detector_backend="dummy",
+        )
+        session.add(named)
+        session.flush()
+        named_id = named.id
+
+    monkeypatch.setattr(
+        "app.services.detection_service.save_face_crop",
+        lambda *a, **k: Path(tmp_path) / "crop.jpg",
+    )
+
+    cfg = AppConfig(base_dir=str(tmp_path))
+    cfg.storage.db_path = str(db_path)
+    cfg.storage.crops_dir = "crops"
+
+    with session_scope() as session:
+        service = DetectionService(
+            session=session, detector=_NestedBoxDetector(), config=cfg
+        )
+        service.process([image_id])
+
+    with session_scope() as session:
+        faces = session.query(Face).order_by(Face.id).all()
+
+    assert [f.id for f in faces] == [named_id], (
+        "no new unknown box may be created inside an already named face"
+    )
 
 
 class _ThresholdSensitiveDetector(FaceDetector):

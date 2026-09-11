@@ -172,6 +172,41 @@ class TestOverlapResolution:
             assert s.get(Face, big) is not None
             assert s.get(Face, nested) is None
 
+    def test_nested_box_removed_despite_mismatched_embedding(self, tmp_db):
+        """Issue #161: a sub-region box embeds unlike the face it sits in.
+
+        The embedding guard used to keep such boxes alive (low IoU + low
+        similarity), so a recognised face collected extra "Unknown" boxes.
+        Nesting alone now settles the pair.
+        """
+        with session_scope() as s:
+            img = _add_image(s)
+            anna = _add_person(s, "Anna")
+            big = _add_face(
+                s, img, anna, (10, 10, 100, 100), _vec(0), source="manual"
+            )
+            nested = _add_face(s, img, None, (40, 40, 30, 30), _vec(15))
+
+        stats = _resolve()
+        assert stats.faces_removed == 1
+        with session_scope() as s:
+            assert s.get(Face, big) is not None
+            assert s.get(Face, nested) is None
+
+    def test_two_nested_unknowns_collapse_to_one(self, tmp_db):
+        """Several unknown boxes stacked on one face leave a single box."""
+        with session_scope() as s:
+            img = _add_image(s)
+            big = _add_face(s, img, None, (10, 10, 100, 100), _vec(0))
+            inner_a = _add_face(s, img, None, (30, 30, 30, 30), _vec(7))
+            inner_b = _add_face(s, img, None, (60, 55, 25, 25), _vec(11))
+
+        _resolve()
+        with session_scope() as s:
+            assert s.get(Face, big) is not None
+            assert s.get(Face, inner_a) is None
+            assert s.get(Face, inner_b) is None
+
     def test_unknown_group_box_loses_to_named(self, tmp_db):
         """A box in an 'Unknown N' group is replaced by the named duplicate."""
         with session_scope() as s:

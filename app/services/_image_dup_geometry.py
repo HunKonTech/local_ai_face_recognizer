@@ -31,6 +31,7 @@ class DupThresholds(Protocol):
     dup_containment_threshold: float
     dup_embedding_guard: float
     dup_hard_iou_threshold: float
+    dup_hard_containment_threshold: float
 
 
 def bbox_iou_containment(a: BBox, b: BBox) -> Tuple[float, float]:
@@ -85,6 +86,12 @@ def is_same_physical_face(
     iou, containment = bbox_iou_containment(a_bbox, b_bbox)
     if iou < cfg.dup_iou_threshold and containment < cfg.dup_containment_threshold:
         return False
+    # One box nested inside the other is always the same physical face: two
+    # real faces never nest.  Skip the embedding guard there — a sub-region
+    # crop of a face embeds nothing like the full face.
+    hard_containment = getattr(cfg, "dup_hard_containment_threshold", 1.01)
+    if containment >= hard_containment:
+        return True
     if a_vec is not None and b_vec is not None:
         if (
             float(np.dot(a_vec, b_vec)) < cfg.dup_embedding_guard

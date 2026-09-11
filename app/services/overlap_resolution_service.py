@@ -168,6 +168,13 @@ class OverlapResolutionService:
         if not overlapping:
             return False
 
+        # Nested boxes need no embedding agreement: two real faces never sit
+        # one inside the other, while a sub-region of a face (an eye/mouth
+        # crop the detector mistook for a face) embeds nothing like the full
+        # face — the guard below would have kept exactly those duplicates.
+        if containment >= self._config.hard_containment_threshold:
+            return True
+
         # Embedding guard: two genuinely different faces photographed close
         # together can overlap a little — require embedding agreement unless
         # the boxes sit on essentially the same spot.

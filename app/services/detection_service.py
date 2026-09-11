@@ -49,26 +49,62 @@ log = logging.getLogger(__name__)
 diag_log = logging.getLogger(__name__ + ".diag")
 
 
-def _iou(a: Detection, b: Detection) -> float:
-    """Compute Intersection-over-Union for two detections."""
+# Fallback containment threshold used when no configured value is passed in.
+DEFAULT_CONTAINMENT_MERGE_THRESHOLD = 0.80
+
+
+def _iou_containment(a: Detection, b: Detection) -> tuple[float, float]:
+    """Return ``(iou, containment)`` for two detections.
+
+    ``containment`` is ``intersection / area(smaller box)``.  A tight box
+    nested inside a generous one — the classic "eye/mouth region detected as
+    its own face" duplicate — has a low IoU (the large box dominates the
+    union) but a containment close to 1.0.
+    """
     ax1, ay1, ax2, ay2 = a.x, a.y, a.x2, a.y2
     bx1, by1, bx2, by2 = b.x, b.y, b.x2, b.y2
     inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
     inter_h = max(0, min(ay2, by2) - max(ay1, by1))
     inter = inter_w * inter_h
     if inter == 0:
-        return 0.0
-    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
-    return inter / union if union > 0 else 0.0
+        return 0.0, 0.0
+    area_a = (ax2 - ax1) * (ay2 - ay1)
+    area_b = (bx2 - bx1) * (by2 - by1)
+    union = area_a + area_b - inter
+    iou = inter / union if union > 0 else 0.0
+    smaller = min(area_a, area_b)
+    containment = inter / smaller if smaller > 0 else 0.0
+    return iou, containment
+
+
+def _iou(a: Detection, b: Detection) -> float:
+    """Compute Intersection-over-Union for two detections."""
+    return _iou_containment(a, b)[0]
+
+
+def _is_duplicate_box(
+    a: Detection,
+    b: Detection,
+    iou_threshold: float,
+    containment_threshold: float,
+) -> bool:
+    """True when the two boxes mark the same physical face on one image."""
+    iou, containment = _iou_containment(a, b)
+    return iou >= iou_threshold or containment >= containment_threshold
 
 
 def _merge_detections(
-    detections: List[Detection], iou_threshold: float = 0.35
+    detections: List[Detection],
+    iou_threshold: float = 0.35,
+    containment_threshold: float = DEFAULT_CONTAINMENT_MERGE_THRESHOLD,
 ) -> List[Detection]:
     """Greedy NMS: keep the highest-confidence box; suppress overlapping boxes.
 
     Unlike ``cv2.dnn.NMSBoxes`` this works on plain :class:`Detection` objects
-    and does not require OpenCV DNN to be present.
+    and does not require OpenCV DNN to be present.  Suppression uses IoU *and*
+    containment, so a small box nested inside a bigger one is dropped too —
+    plain IoU let those through and they surfaced as extra "Unknown" boxes
+    sitting on top of an already recognised face.
     """
     if len(detections) <= 1:
         return list(detections)
@@ -76,7 +112,10 @@ def _merge_detections(
     sorted_dets = sorted(detections, key=lambda d: d.confidence, reverse=True)
     kept: List[Detection] = []
     for det in sorted_dets:
-        if all(_iou(det, k) < iou_threshold for k in kept):
+        if all(
+            not _is_duplicate_box(det, k, iou_threshold, containment_threshold)
+            for k in kept
+        ):
             kept.append(det)
     return kept
 
@@ -285,13 +324,19 @@ class DetectionService:
         # (prevents duplicate face records for the same person).
         if kept_existing:
             iou_thresh = self._config.detection.iou_merge_threshold
+            cont_thresh = self._config.detection.containment_merge_threshold
+            before_dedup = len(detections)
             detections = [
                 det for det in detections
-                if all(_iou(det, nd) < iou_thresh for nd in kept_existing)
+                if all(
+                    not _is_duplicate_box(det, nd, iou_thresh, cont_thresh)
+                    for nd in kept_existing
+                )
             ]
             diag_log.debug(
-                "Retained-face dedup: %d retained face(s); %d new detection(s) after dedup",
-                len(kept_existing), len(detections),
+                "Retained-face dedup: %d retained face(s); %d new detection(s) "
+                "after dedup (%d dropped)",
+                len(kept_existing), len(detections), before_dedup - len(detections),
             )
 
         for det in detections:
@@ -539,6 +584,7 @@ class DetectionService:
         if min_size is None:
             min_size = self._config.detection.min_face_size
         iou_merge = self._config.detection.iou_merge_threshold
+        containment_merge = self._config.detection.containment_merge_threshold
 
         all_dets: List[Detection] = []
 
@@ -565,9 +611,13 @@ class DetectionService:
             except Exception as exc:  # noqa: BLE001
                 log.warning("HA variant=%s failed: %s", name, exc)
 
-        merged = _merge_detections(all_dets, iou_threshold=iou_merge)
+        merged = _merge_detections(
+            all_dets,
+            iou_threshold=iou_merge,
+            containment_threshold=containment_merge,
+        )
         diag_log.debug(
-            "HA merge: %d raw → %d unique (iou_threshold=%.2f)",
-            len(all_dets), len(merged), iou_merge,
+            "HA merge: %d raw → %d unique (iou_threshold=%.2f, containment=%.2f)",
+            len(all_dets), len(merged), iou_merge, containment_merge,
         )
         return merged
