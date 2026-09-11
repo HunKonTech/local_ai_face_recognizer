@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +35,9 @@ from PySide6.QtWidgets import (
 from app import __version__
 from app.services.image_library_service import get_image_library_optional
 from app.ui.i18n import SUPPORTED, current_language, set_language, t
+
+
+log = logging.getLogger(__name__)
 
 
 def _qsettings() -> QSettings:
@@ -112,6 +117,83 @@ class _AudioDevicesThread(QThread):
             self.result_ready.emit(list(list_audio_devices(ffmpeg)))
         except Exception:  # noqa: BLE001 — empty list leaves "Automatic"
             self.result_ready.emit([])
+
+
+class _CaptureProbeThread(QThread):
+    """Runs a ~1 s black-frame capture probe off the UI thread.
+
+    Answers the one question a user with a black recording actually has: does
+    this machine's grabber produce a picture at all?
+    """
+
+    result_ready = Signal(object)   # BlackProbe
+
+    def __init__(self, ffmpeg_setting: str, backend: str, parent=None) -> None:
+        super().__init__(parent)
+        self._ffmpeg_setting = ffmpeg_setting
+        self._backend = backend
+
+    def run(self) -> None:
+        import subprocess
+
+        from app.services.screen_recorder_service import (
+            BlackProbe,
+            RecordingDisplayMode,
+            RecordingOptions,
+            build_preflight_args,
+            evaluate_black_probe,
+            resolve_capture_region,
+            resolve_ffmpeg,
+        )
+
+        probe_seconds = 1.0
+        try:
+            ffmpeg = resolve_ffmpeg(self._ffmpeg_setting or None)
+            if not ffmpeg:
+                self.result_ready.emit(
+                    BlackProbe(
+                        ok=False, is_black=False, backend=self._backend,
+                        error="ffmpeg not found",
+                    )
+                )
+                return
+            from app.ui.display_utils import enumerate_displays
+
+            displays = enumerate_displays()
+            qs = _qsettings()
+            mode = RecordingDisplayMode.from_value(
+                qs.value("recording/display_mode", "all", type=str)
+            )
+            saved = qs.value("recording/selected_display_ids", None)
+            if isinstance(saved, str):
+                saved = [saved] if saved else []
+            region = resolve_capture_region(mode, displays, list(saved or []), None)
+            options = RecordingOptions(
+                fps=qs.value("recording/fps", 18, type=int),
+                windows_backend=self._backend,
+            )
+            args = build_preflight_args(
+                sys.platform, options, region,
+                backend=self._backend, probe_seconds=probe_seconds,
+            )
+            proc = subprocess.run(
+                [ffmpeg, *args], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+            self.result_ready.emit(
+                evaluate_black_probe(
+                    proc.stderr or "", backend=self._backend,
+                    probe_seconds=probe_seconds, exit_code=proc.returncode,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — the dialog must survive this
+            from app.services.screen_recorder_service import BlackProbe
+
+            self.result_ready.emit(
+                BlackProbe(
+                    ok=False, is_black=False, backend=self._backend, error=str(exc)
+                )
+            )
 
 
 class _PackageInstallThread(QThread):
@@ -698,6 +780,44 @@ class SettingsDialog(QDialog):
         )
         vbox.addWidget(self._rec_auto_fps_check)
 
+        # Windows grabber choice + a one-second self-test.  Kept inline in this
+        # group so the whole "why is my recording black" answer is in one place.
+        self._rec_backend_combo = None
+        self._rec_preflight_check = None
+        self._rec_test_btn = None
+        self._rec_test_label = None
+        if sys.platform.startswith("win"):
+            backend_row = QHBoxLayout()
+            backend_row.addWidget(QLabel(t("rec_set_backend")))
+            self._rec_backend_combo = QComboBox()
+            for value, key in (
+                ("auto", "rec_set_backend_auto"),
+                ("ddagrab", "rec_set_backend_ddagrab"),
+                ("gdigrab", "rec_set_backend_gdigrab"),
+            ):
+                self._rec_backend_combo.addItem(t(key), userData=value)
+            cur_backend = qs.value("recording/windows_capture_backend", "auto", type=str)
+            idx = self._rec_backend_combo.findData(cur_backend)
+            self._rec_backend_combo.setCurrentIndex(max(0, idx))
+            self._rec_backend_combo.setToolTip(t("rec_set_backend_tip"))
+            backend_row.addWidget(self._rec_backend_combo, 1)
+            vbox.addLayout(backend_row)
+
+            self._rec_preflight_check = QCheckBox(t("rec_set_preflight"))
+            self._rec_preflight_check.setChecked(
+                qs.value("recording/preflight_black_check", True, type=bool)
+            )
+            vbox.addWidget(self._rec_preflight_check)
+
+            test_row = QHBoxLayout()
+            self._rec_test_btn = QPushButton(t("rec_set_test_capture"))
+            self._rec_test_btn.clicked.connect(self._on_test_capture)
+            test_row.addWidget(self._rec_test_btn)
+            self._rec_test_label = QLabel("")
+            self._rec_test_label.setWordWrap(True)
+            test_row.addWidget(self._rec_test_label, 1)
+            vbox.addLayout(test_row)
+
         # Only enable the monitor checklist in "selected" mode.
         def _sync_checklist_enabled() -> None:
             enabled = self._rec_mode_selected.isChecked()
@@ -709,6 +829,37 @@ class SettingsDialog(QDialog):
         )
         _sync_checklist_enabled()
         return group
+
+    def _on_test_capture(self) -> None:
+        """Run the black-frame probe for the selected backend."""
+        if self._rec_test_btn is None or self._rec_backend_combo is None:
+            return
+        backend = self._rec_backend_combo.currentData() or "auto"
+        self._rec_test_btn.setEnabled(False)
+        self._rec_test_label.setText(t("rec_test_running"))
+        self._rec_probe_thread = _track_thread(
+            _CaptureProbeThread(
+                self._rec_ffmpeg_edit.text().strip(), str(backend)
+            )
+        )
+        self._rec_probe_thread.result_ready.connect(self._on_capture_probe_ready)
+        self._rec_probe_thread.start()
+
+    def _on_capture_probe_ready(self, probe) -> None:
+        """Show the probe verdict next to the test button."""
+        if self._rec_test_btn is not None:
+            self._rec_test_btn.setEnabled(True)
+        if self._rec_test_label is None:
+            return
+        if not probe.ok:
+            self._rec_test_label.setText(
+                t("rec_test_failed", error=probe.error or "?")
+            )
+        elif probe.is_black:
+            self._rec_test_label.setText(t("rec_test_black", backend=probe.backend))
+        else:
+            self._rec_test_label.setText(t("rec_test_ok", backend=probe.backend))
+        log.info("settings: %s", probe.summary())
 
     def _on_audio_devices_ready(self, devices: list) -> None:
         """Merge discovered device names into the combos, keeping selection."""
@@ -1827,6 +1978,16 @@ class SettingsDialog(QDialog):
             qs.setValue(
                 "recording/auto_reduce_fps", self._rec_auto_fps_check.isChecked()
             )
+            if self._rec_backend_combo is not None:
+                qs.setValue(
+                    "recording/windows_capture_backend",
+                    self._rec_backend_combo.currentData() or "auto",
+                )
+            if self._rec_preflight_check is not None:
+                qs.setValue(
+                    "recording/preflight_black_check",
+                    self._rec_preflight_check.isChecked(),
+                )
         qs.setValue("debug/ai_visualization", self._debug_viz_check.isChecked())
         qs.setValue("debug/ai_log_enabled", self._debug_log_check.isChecked())
         qs.setValue(

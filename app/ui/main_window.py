@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self._recording_log = None  # RecordingTimelineLog while recording
         self._recording_metadata = None  # RecordingMetadataWriter while recording
         self._last_audio_validation = None  # AudioValidation of the last stop
+        self._last_video_validation = None  # VideoValidation of the last stop
         # Active image/person context shown in the image-browser tab (for the
         # recording timeline log).
         self._browser_image_name: Optional[str] = None
@@ -2056,7 +2057,7 @@ class MainWindow(QMainWindow):
         # multi-monitor captures.
         from app.ui.display_utils import active_window_bounds, enumerate_displays
         mode = RecordingDisplayMode.from_value(rec_cfg.display_mode)
-        displays = enumerate_displays()
+        displays = enumerate_displays(rec_cfg.windows_dxgi_output_overrides or None)
         # On macOS the avfoundation "Capture screen N" device index is not the
         # monitor ordinal (capture devices come after the cameras), so map each
         # monitor to its real avfoundation index before resolving the region.
@@ -2075,6 +2076,27 @@ class MainWindow(QMainWindow):
             rec_cfg.selected_display_ids,
             active_window_bounds(self),
         )
+        if sys.platform.startswith("win"):
+            # ffmpeg.exe ships without a per-monitor DPI manifest, so gdigrab
+            # addresses a *virtualized* desktop.  Ask it what it sees once and
+            # convert our physical crop into its coordinate space; without this
+            # a scaled multi-monitor layout crops off-screen (i.e. black).
+            from app.services.screen_recorder_service import (
+                gdigrab_coordinate_scale,
+                probe_gdigrab_rect,
+                scale_region_for_gdigrab,
+            )
+            from app.services.windows_display_probe import (
+                enumerate_physical_monitors,
+                virtual_desktop_rect,
+            )
+            scale = gdigrab_coordinate_scale(
+                probe_gdigrab_rect(ffmpeg),
+                virtual_desktop_rect(enumerate_physical_monitors()),
+            )
+            if scale != 1.0:
+                log.info("gdigrab coordinate scale calibrated to %.4f", scale)
+                region = scale_region_for_gdigrab(region, scale)
         fps = effective_fps(
             rec_cfg.fps,
             mode,
@@ -2101,6 +2123,8 @@ class MainWindow(QMainWindow):
             mute_microphone=rec_cfg.mute_microphone,
             mute_system_audio=rec_cfg.mute_system_audio,
             meter_audio=True,  # drive the live VU meter
+            windows_backend=rec_cfg.windows_capture_backend,
+            windows_dxgi_adapter=rec_cfg.windows_dxgi_adapter,
         )
 
         self._recorder = ScreenRecorderService(ffmpeg, parent=self)
@@ -2109,6 +2133,9 @@ class MainWindow(QMainWindow):
         self._recorder.error.connect(self._on_recorder_error)
         self._recorder.audio_level.connect(self._on_recorder_audio_level)
         self._recorder.audio_validated.connect(self._on_recorder_audio_validated)
+        self._recorder.video_validated.connect(self._on_recorder_video_validated)
+        self._recorder.preflight_result.connect(self._on_recorder_preflight)
+        self._recorder.backend_changed.connect(self._on_recorder_backend_changed)
 
         from app.services.recording_timeline_log import RecordingTimelineLog
         from app.services.subtitle_service import subtitle_path_for_video
@@ -2130,9 +2157,10 @@ class MainWindow(QMainWindow):
             options,
             concat_on_stop=rec_cfg.concat_on_stop,
             region=region,
+            preflight=rec_cfg.preflight_black_check,
         )
-        if self._recorder.state is RecorderState.RECORDING:
-            self._notify_recording_context()
+        # With a pre-flight probe the recorder is still in PREFLIGHT here, so
+        # the initial timeline entry is written from the state handler instead.
 
     def _confirm_recording_privacy(self) -> bool:
         """Show the privacy notice; return ``False`` if the user cancels."""
@@ -2210,6 +2238,7 @@ class MainWindow(QMainWindow):
         if self._recorder is None:
             return
         self._last_audio_validation = None
+        self._last_video_validation = None
         elapsed = self._recorder.elapsed_seconds
         # stop() validates the final file and emits ``audio_validated``
         # synchronously, so ``_last_audio_validation`` is populated below.
@@ -2223,6 +2252,16 @@ class MainWindow(QMainWindow):
         target = final or out_dir
         if target is not None:
             body = t("rec_saved_body", path=str(target))
+            video = self._last_video_validation
+            if video is not None and video.is_black:
+                # A black picture makes the whole recording useless, so it wins
+                # over the audio warning and names the remedy directly.
+                QMessageBox.warning(
+                    self,
+                    t("rec_black_video_title"),
+                    t("rec_black_video_body", path=str(target)),
+                )
+                return
             validation = self._last_audio_validation
             if validation is not None and not validation.has_audio:
                 # Make a silent recording impossible to miss.  The remedy is
@@ -2242,7 +2281,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, t("rec_saved_title"), body)
 
     def _on_recorder_state(self, state) -> None:
+        from app.services.screen_recorder_service import RecorderState
+
         self._recording_controls.set_state(state)
+        # Capture may begin after an asynchronous pre-flight probe, so the first
+        # timeline entry is written on the edge into RECORDING rather than at
+        # the end of _on_record_start.
+        if state is RecorderState.RECORDING and self._recording_log is not None:
+            self._notify_recording_context()
 
     def _on_recorder_elapsed(self, seconds: int) -> None:
         self._recording_controls.set_elapsed(seconds)
@@ -2258,6 +2304,27 @@ class MainWindow(QMainWindow):
             # Persist into the (still-open) crash-safe metadata for post-mortem.
             if self._recording_metadata is not None:
                 self._recording_metadata.add_error(validation.summary())
+
+    def _on_recorder_video_validated(self, validation) -> None:
+        """Remember the final-mux picture check so stop() can warn if black."""
+        self._last_video_validation = validation
+        if validation.is_black:
+            log.error("recording finished with an all-black video track")
+            if self._recording_metadata is not None:
+                self._recording_metadata.add_error(validation.summary())
+
+    def _on_recorder_preflight(self, probe) -> None:
+        """Log the pre-flight verdict; a black result is recorded for later."""
+        log.info("recorder pre-flight: %s", probe.summary())
+        if (not probe.ok or probe.is_black) and self._recording_metadata is not None:
+            self._recording_metadata.add_error(probe.summary())
+
+    def _on_recorder_backend_changed(self, backend: str) -> None:
+        """A black grabber forced a switch — say so in the status bar."""
+        log.warning("recording capture backend switched to %s", backend)
+        self.statusBar().showMessage(
+            t("rec_backend_switched", backend=backend), 8000
+        )
 
     def _on_recorder_error(self, message: str) -> None:
         QMessageBox.critical(self, t("rec_error_title"), message)
@@ -2451,6 +2518,16 @@ class MainWindow(QMainWindow):
             )
             rec.auto_reduce_fps = qs.value(
                 "recording/auto_reduce_fps", rec.auto_reduce_fps, type=bool
+            )
+            rec.windows_capture_backend = qs.value(
+                "recording/windows_capture_backend",
+                rec.windows_capture_backend,
+                type=str,
+            )
+            rec.preflight_black_check = qs.value(
+                "recording/preflight_black_check",
+                rec.preflight_black_check,
+                type=bool,
             )
             saved_ids = qs.value("recording/selected_display_ids", None)
             if saved_ids is not None:

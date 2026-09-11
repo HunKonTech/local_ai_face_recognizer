@@ -33,6 +33,15 @@ virtual loopback device is present — macOS needs
 [BlackHole](https://github.com/ExistentialAudio/BlackHole) or Loopback,
 Windows a WASAPI `virtual-audio-capturer`; otherwise it is silently skipped.
 
+On **Windows** the desktop is grabbed either through the DXGI Desktop
+Duplication API (`ddagrab`) or through the legacy GDI grabber (`gdigrab`). GDI
+records an all-black picture on many hybrid-GPU, HDR or hardware-accelerated
+desktops, so the default `auto` mode runs a one-second black-frame probe before
+each recording and keeps whichever grabber actually produces an image. The mode
+can be pinned, and tested on demand, under **Settings → Recording**. The final
+file is checked for a black video track as well, so a failed capture is reported
+instead of discovered later.
+
 ---
 
 ## Architecture

@@ -115,6 +115,8 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "rec_stop_tip":       {"en": "Stop & save recording",
                            "hu": "Rögzítés leállítása és mentése"},
     "rec_state_idle":         {"en": "Not recording", "hu": "Nincs felvétel"},
+    "rec_state_preflight":    {"en": "Checking capture…",
+                               "hu": "Rögzítés ellenőrzése…"},
     "rec_state_recording":    {"en": "Recording ●", "hu": "Rögzítés ●"},
     "rec_state_paused":       {"en": "Paused", "hu": "Szüneteltetve"},
     "rec_state_finalizing":   {"en": "Saving…", "hu": "Mentés…"},
@@ -3484,6 +3486,50 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                "hu": "(nem észlelhető monitor)"},
     "rec_set_auto_fps":       {"en": "Reduce frame rate for multi-monitor capture",
                                "hu": "Képkockaszám csökkentése többmonitoros rögzítésnél"},
+    "rec_set_backend":        {"en": "Windows capture mode:",
+                               "hu": "Windows rögzítési mód:"},
+    "rec_set_backend_auto":   {"en": "Automatic (recommended)",
+                               "hu": "Automatikus (ajánlott)"},
+    "rec_set_backend_ddagrab": {"en": "Desktop Duplication (ddagrab)",
+                                "hu": "Asztalmásolás (ddagrab)"},
+    "rec_set_backend_gdigrab": {"en": "Legacy GDI (gdigrab)",
+                                "hu": "Régi GDI (gdigrab)"},
+    "rec_set_backend_tip": {
+        "en": "GDI capture can record an all-black video on hybrid-GPU, HDR or "
+              "hardware-accelerated displays. Desktop Duplication records the "
+              "composited desktop instead. Automatic tests both and keeps the "
+              "one that produces a picture.",
+        "hu": "A GDI rögzítés teljesen fekete videót adhat hibrid GPU-s, HDR "
+              "vagy hardveresen gyorsított kijelzőkön. Az asztalmásolás a "
+              "kompozitált asztalt rögzíti. Az automatikus mód mindkettőt "
+              "leteszteli, és azt tartja meg, amelyik képet ad.",
+    },
+    "rec_set_preflight":      {"en": "Check for a black screen before recording",
+                               "hu": "Fekete képernyő ellenőrzése rögzítés előtt"},
+    "rec_set_test_capture":   {"en": "Test capture", "hu": "Rögzítés tesztelése"},
+    "rec_test_running":       {"en": "Testing…", "hu": "Tesztelés…"},
+    "rec_test_ok":            {"en": "Capture OK ({backend})",
+                               "hu": "A rögzítés rendben ({backend})"},
+    "rec_test_black":         {"en": "The captured image is BLACK ({backend})",
+                               "hu": "A rögzített kép FEKETE ({backend})"},
+    "rec_test_failed":        {"en": "Test failed: {error}",
+                               "hu": "A teszt sikertelen: {error}"},
+    "rec_backend_switched": {
+        "en": "Switched to {backend} — the other capture mode produced a black "
+              "image.",
+        "hu": "Átváltás erre: {backend} — a másik rögzítési mód fekete képet "
+              "adott.",
+    },
+    "rec_black_video_title":  {"en": "Black recording", "hu": "Fekete felvétel"},
+    "rec_black_video_body": {
+        "en": "The recording was saved to {path}, but its video track is "
+              "completely black. Open Settings → Recording, switch the Windows "
+              "capture mode, and use \"Test capture\" before recording again.",
+        "hu": "A felvétel elmentve ide: {path}, de a videósáv teljesen fekete. "
+              "Nyisd meg a Beállítások → Rögzítés lapot, válts Windows "
+              "rögzítési módot, és használd a „Rögzítés tesztelése” gombot, "
+              "mielőtt újra felveszel.",
+    },
 
     "gdrive_account_group":   {"en": "Google account", "hu": "Google fiók"},
     "gdrive_account_none":    {"en": "(no account signed in)",

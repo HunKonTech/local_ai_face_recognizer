@@ -753,6 +753,18 @@ class RecordingConfig:
     auto_reduce_fps: bool = True
     # Frame-rate ceiling applied to multi-monitor captures.
     multi_monitor_fps_cap: int = 15
+    # Windows desktop grabber: ``"auto"`` | ``"ddagrab"`` | ``"gdigrab"``.
+    # The legacy GDI grabber records an all-black picture on many
+    # hardware-accelerated, hybrid-GPU or HDR desktops; ``ddagrab`` uses the
+    # DXGI Desktop Duplication API instead (ffmpeg >= 6.0 with d3d11va).
+    # ``auto`` probes both and keeps whichever produces a picture.
+    windows_capture_backend: str = "auto"
+    # Pin ``ddagrab`` to a DXGI adapter (``None`` → derive it from the monitor).
+    windows_dxgi_adapter: Optional[int] = None
+    # Manual monitor → DXGI output overrides, e.g. ``{"\\.\DISPLAY1": "0:1"}``.
+    windows_dxgi_output_overrides: dict[str, str] = field(default_factory=dict)
+    # Run a ~1 s black-frame probe before the real capture starts.
+    preflight_black_check: bool = True
 
 
 @dataclass
@@ -1319,6 +1331,19 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             ffmpeg_path=rec.get("ffmpeg_path", cfg.recording.ffmpeg_path),
             concat_on_stop=rec.get(
                 "concat_on_stop", cfg.recording.concat_on_stop
+            ),
+            windows_capture_backend=rec.get(
+                "windows_capture_backend", cfg.recording.windows_capture_backend
+            ),
+            windows_dxgi_adapter=rec.get(
+                "windows_dxgi_adapter", cfg.recording.windows_dxgi_adapter
+            ),
+            windows_dxgi_output_overrides=rec.get(
+                "windows_dxgi_output_overrides",
+                cfg.recording.windows_dxgi_output_overrides,
+            ),
+            preflight_black_check=rec.get(
+                "preflight_black_check", cfg.recording.preflight_black_check
             ),
         )
 
