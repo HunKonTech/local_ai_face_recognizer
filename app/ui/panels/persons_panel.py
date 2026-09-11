@@ -47,6 +47,7 @@ from app.services.person_service import (
 from app.ui.dialogs.move_faces_dialog import MoveFacesDialog
 from app.ui.dialogs.person_info_dialog import PersonInfoDialog
 from app.ui.i18n import t
+from app.ui.widgets.flow_layout import FlowContainer
 from app.ui.widgets.place_gallery_widget import PlaceGalleryWidget
 from app.ui.widgets.selectable_face_grid import SelectableFaceGrid
 from app.workers.thumbnail_worker import ThumbnailRunnable
@@ -210,28 +211,31 @@ class PersonsPanel(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        # Filter row
-        filters = QHBoxLayout()
+        # Filter row — a flow layout so it wraps on a narrow window instead
+        # of holding the whole window wide.
+        filter_bar = FlowContainer(h_spacing=6, v_spacing=4)
+        filters = filter_bar.layout()
         self._name_filter = QLineEdit()
+        self._name_filter.setMinimumWidth(200)
         self._name_filter.returnPressed.connect(self.refresh)
-        filters.addWidget(self._name_filter, 2)
+        filters.addWidget(self._name_filter)
         self._code_filter = QLineEdit()
+        self._code_filter.setMinimumWidth(140)
         self._code_filter.returnPressed.connect(self.refresh)
-        filters.addWidget(self._code_filter, 1)
+        filters.addWidget(self._code_filter)
         self._filter_btn = QPushButton()
         self._filter_btn.clicked.connect(self.refresh)
         filters.addWidget(self._filter_btn)
         self._count_lbl = QLabel()
         self._count_lbl.setStyleSheet("color: #888;")
         filters.addWidget(self._count_lbl)
-        filters.addStretch()
         self._schemes_btn = QPushButton()
         self._schemes_btn.clicked.connect(self._on_edit_schemes)
         filters.addWidget(self._schemes_btn)
         self._add_person_btn = QPushButton()
         self._add_person_btn.clicked.connect(self._on_add_person)
         filters.addWidget(self._add_person_btn)
-        root.addLayout(filters)
+        root.addWidget(filter_bar)
 
         splitter = QSplitter(Qt.Horizontal)
 

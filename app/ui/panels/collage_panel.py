@@ -40,6 +40,7 @@ from app.db.database import session_scope
 from app.db.models import Collage, CollageNode
 from app.services.collage_service import CollageService
 from app.ui.i18n import t
+from app.ui.widgets.flow_layout import FlowContainer
 
 log = logging.getLogger(__name__)
 
@@ -179,7 +180,9 @@ class CollagePanel(QWidget):
         layout.setSpacing(4)
 
         # --- toolbar ---
-        toolbar = QHBoxLayout()
+        # Flow layout so the buttons wrap instead of holding the window wide.
+        toolbar_widget = FlowContainer(h_spacing=6, v_spacing=4)
+        toolbar = toolbar_widget.layout()
 
         self._collage_combo = QComboBox()
         self._collage_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -215,7 +218,7 @@ class CollagePanel(QWidget):
         self._export_btn.setFixedWidth(90)
         toolbar.addWidget(self._export_btn)
 
-        layout.addLayout(toolbar)
+        layout.addWidget(toolbar_widget)
         layout.addWidget(self._view, 1)
 
         # --- info bar ---

@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -43,6 +42,7 @@ from app.ui.dialogs.family_tree_editor_dialog import (
 from app.ui.dialogs.person_picker_dialog import PersonPickerDialog
 from app.ui.i18n import t
 from app.ui.widgets.family_tree_view import FamilyTreeView
+from app.ui.widgets.flow_layout import FlowContainer
 
 
 def _vline() -> QFrame:
@@ -50,6 +50,9 @@ def _vline() -> QFrame:
     f.setFrameShape(QFrame.VLine)
     f.setFrameShadow(QFrame.Sunken)
     f.setFixedWidth(2)
+    # The flow layout sizes items by their size hint, so a stretchy separator
+    # would collapse to nothing: give it the height of a toolbar button.
+    f.setMinimumHeight(22)
     return f
 
 
@@ -80,14 +83,11 @@ class FamilyTreePanel(QWidget):
 
         # Controls are exposed as toolbar_widget so the main window can embed
         # them in its own toolbar row when this tab is active.
-        self.toolbar_widget = QWidget()
-        self.toolbar_widget.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Preferred
-        )
-        controls = QHBoxLayout(self.toolbar_widget)
-        controls.setContentsMargins(4, 0, 4, 0)
-        controls.setSpacing(6)
-        controls.addStretch()
+        # A flow layout: on a narrow window the controls wrap onto a second
+        # row instead of forcing a wide minimum width on the whole window.
+        self.toolbar_widget = FlowContainer(h_spacing=6, v_spacing=4)
+        self.toolbar_widget.layout().setContentsMargins(4, 0, 4, 0)
+        controls = self.toolbar_widget.layout()
         self._root_label = QLabel()
         controls.addWidget(self._root_label)
         self._root_name = QLabel()

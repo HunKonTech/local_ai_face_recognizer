@@ -44,6 +44,7 @@ from app.services.place_service import (
 from app.ui.dialogs.place_edit_dialog import PlaceEditDialog
 from app.ui.dialogs.place_merge_dialog import PlaceMergeDialog
 from app.ui.i18n import t
+from app.ui.widgets.flow_layout import FlowContainer
 from app.ui.widgets.place_gallery_widget import PlaceGalleryWidget
 from app.ui.widgets.place_map_widget import PlaceMapWidget
 
@@ -112,19 +113,26 @@ class LocationsPanel(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        filters = QHBoxLayout()
+        # Flow layout: the filter fields wrap onto further rows on a narrow
+        # window instead of forcing a wide minimum width on the whole window.
+        filter_bar = FlowContainer(h_spacing=6, v_spacing=4)
+        filters = filter_bar.layout()
         self._name_filter = QLineEdit()
+        self._name_filter.setMinimumWidth(180)
         self._name_filter.returnPressed.connect(self.refresh)
-        filters.addWidget(self._name_filter, 2)
+        filters.addWidget(self._name_filter)
         self._person_filter = QLineEdit()
+        self._person_filter.setMinimumWidth(180)
         self._person_filter.returnPressed.connect(self.refresh)
-        filters.addWidget(self._person_filter, 2)
+        filters.addWidget(self._person_filter)
         self._date_from = QLineEdit()
+        self._date_from.setMinimumWidth(110)
         self._date_from.returnPressed.connect(self.refresh)
-        filters.addWidget(self._date_from, 1)
+        filters.addWidget(self._date_from)
         self._date_to = QLineEdit()
+        self._date_to.setMinimumWidth(110)
         self._date_to.returnPressed.connect(self.refresh)
-        filters.addWidget(self._date_to, 1)
+        filters.addWidget(self._date_to)
         self._min_images = QSpinBox()
         self._min_images.setRange(0, 1_000_000)
         filters.addWidget(self._min_images)
@@ -137,7 +145,7 @@ class LocationsPanel(QWidget):
         self._filter_btn = QPushButton()
         self._filter_btn.clicked.connect(self.refresh)
         filters.addWidget(self._filter_btn)
-        root.addLayout(filters)
+        root.addWidget(filter_bar)
 
         splitter = QSplitter(Qt.Horizontal)
 

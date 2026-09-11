@@ -66,6 +66,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSplitter,
+    QStyle,
     QTabWidget,
     QTextEdit,
     QToolBar,
@@ -87,6 +88,7 @@ from app.services.place_service import ANONYMOUS_GPS_PLACE_NAME, PlaceService
 from app.services.unknown_merge_service import UnknownMergeService
 from app.ui.dialogs.person_info_dialog import PersonInfoDialog
 from app.ui.i18n import t
+from app.ui.widgets.flow_layout import FlowContainer
 from app.ui.widgets.person_search_select import PersonSearchSelect
 from app.ui.widgets.place_search_select import PlaceSearchSelect
 from app.ui.widgets.universal_search_bar import UniversalSearchBar
@@ -429,6 +431,19 @@ def _hline() -> QFrame:
     line.setFrameShape(QFrame.HLine)
     line.setStyleSheet("color: #3a3a3a;")
     return line
+
+
+def _overlay_group() -> QWidget:
+    """One overlay control trio (checkbox + slider + percentage).
+
+    Grouping them keeps the three parts together when the toolbar above the
+    image wraps onto a second row on a narrow window.
+    """
+    box = QWidget()
+    row = QHBoxLayout(box)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(4)
+    return box
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1827,13 +1842,17 @@ class ImageBrowserPanel(QWidget):
 
         # Image area
         image_widget = QWidget()
-        image_widget.setMinimumWidth(400)
+        image_widget.setMinimumWidth(320)
         im_layout = QVBoxLayout(image_widget)
         im_layout.setContentsMargins(4, 4, 4, 4)
         im_layout.setSpacing(4)
 
         # Draw mode toggle + nav buttons + fullscreen row
-        top_bar = QHBoxLayout()
+        # Flow layout: the controls wrap onto further rows when the image
+        # column is narrow, so the whole window stays resizable down to the
+        # size of the picture itself.
+        top_bar_widget = FlowContainer(h_spacing=6, v_spacing=4)
+        top_bar = top_bar_widget.layout()
 
         _nav_style = (
             "QPushButton {"
@@ -1865,8 +1884,6 @@ class ImageBrowserPanel(QWidget):
         self._object_mode_btn.toggled.connect(self._on_object_mode_toggled)
         top_bar.addWidget(self._object_mode_btn)
 
-        top_bar.addStretch()
-
         # ── Overlay controls ─────────────────────────────────────────────
         _ov_lbl_style = "QLabel { color: #aaa; font-size: 11px; }"
         _ov_pct_style = "QLabel { color: #888; font-size: 11px; min-width: 30px; }"
@@ -1886,7 +1903,8 @@ class ImageBrowserPanel(QWidget):
         self._bbox_check.setChecked(True)
         self._bbox_check.setToolTip(t("overlay_bbox_tip"))
         self._bbox_check.setStyleSheet(_ov_chk_style)
-        top_bar.addWidget(self._bbox_check)
+        _bbox_group = _overlay_group()
+        _bbox_group.layout().addWidget(self._bbox_check)
 
         self._bbox_slider = QSlider(Qt.Horizontal)
         self._bbox_slider.setRange(0, 100)
@@ -1895,20 +1913,20 @@ class ImageBrowserPanel(QWidget):
         self._bbox_slider.setMinimumWidth(60)
         self._bbox_slider.setMaximumWidth(110)
         self._bbox_slider.setStyleSheet(_ov_sld_style)
-        top_bar.addWidget(self._bbox_slider)
+        _bbox_group.layout().addWidget(self._bbox_slider)
 
         self._bbox_pct_label = QLabel("70%")
         self._bbox_pct_label.setStyleSheet(_ov_pct_style)
         self._bbox_pct_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top_bar.addWidget(self._bbox_pct_label)
-
-        top_bar.addSpacing(12)
+        _bbox_group.layout().addWidget(self._bbox_pct_label)
+        top_bar.addWidget(_bbox_group)
 
         self._label_check = QCheckBox(t("overlay_labels"))
         self._label_check.setChecked(True)
         self._label_check.setToolTip(t("overlay_label_tip"))
         self._label_check.setStyleSheet(_ov_chk_style)
-        top_bar.addWidget(self._label_check)
+        _label_group = _overlay_group()
+        _label_group.layout().addWidget(self._label_check)
 
         self._label_slider = QSlider(Qt.Horizontal)
         self._label_slider.setRange(0, 100)
@@ -1917,21 +1935,21 @@ class ImageBrowserPanel(QWidget):
         self._label_slider.setMinimumWidth(60)
         self._label_slider.setMaximumWidth(110)
         self._label_slider.setStyleSheet(_ov_sld_style)
-        top_bar.addWidget(self._label_slider)
+        _label_group.layout().addWidget(self._label_slider)
 
         self._label_pct_label = QLabel("40%")
         self._label_pct_label.setStyleSheet(_ov_pct_style)
         self._label_pct_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top_bar.addWidget(self._label_pct_label)
-
-        top_bar.addSpacing(12)
+        _label_group.layout().addWidget(self._label_pct_label)
+        top_bar.addWidget(_label_group)
 
         # Object overlay controls (independent show/opacity, cyan colour)
         self._object_check = QCheckBox(t("overlay_objects"))
         self._object_check.setChecked(True)
         self._object_check.setToolTip(t("overlay_objects_tip"))
         self._object_check.setStyleSheet(_ov_chk_style)
-        top_bar.addWidget(self._object_check)
+        _object_group = _overlay_group()
+        _object_group.layout().addWidget(self._object_check)
 
         self._object_slider = QSlider(Qt.Horizontal)
         self._object_slider.setRange(0, 100)
@@ -1940,14 +1958,13 @@ class ImageBrowserPanel(QWidget):
         self._object_slider.setMinimumWidth(60)
         self._object_slider.setMaximumWidth(110)
         self._object_slider.setStyleSheet(_ov_sld_style)
-        top_bar.addWidget(self._object_slider)
+        _object_group.layout().addWidget(self._object_slider)
 
         self._object_pct_label = QLabel("80%")
         self._object_pct_label.setStyleSheet(_ov_pct_style)
         self._object_pct_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top_bar.addWidget(self._object_pct_label)
-
-        top_bar.addSpacing(12)
+        _object_group.layout().addWidget(self._object_pct_label)
+        top_bar.addWidget(_object_group)
 
         # Wire overlay signals
         self._bbox_check.toggled.connect(self._on_ov_bbox_check)
@@ -1990,7 +2007,7 @@ class ImageBrowserPanel(QWidget):
         self._toggle_right_btn.toggled.connect(self._on_toggle_right_panel)
         top_bar.addWidget(self._toggle_right_btn)
 
-        im_layout.addLayout(top_bar)
+        im_layout.addWidget(top_bar_widget)
 
         self._draw_hint = QLabel()
         self._draw_hint.setAlignment(Qt.AlignCenter)
@@ -2361,7 +2378,13 @@ class ImageBrowserPanel(QWidget):
         self._info_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._info_scroll.setFrameShape(QFrame.NoFrame)
         self._info_scroll.setMinimumWidth(160)
-        self._info_scroll.setMaximumWidth(340)
+        # Room to drag the splitter well past the old 340 px ceiling: the
+        # place/person rows need it on a wide screen.
+        self._info_scroll.setMaximumWidth(560)
+        # Reserve the scrollbar's width on the right so the vertical scrollbar
+        # never covers the frames of the widgets underneath it.
+        _sb = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+        info_layout.setContentsMargins(8, 8, 8 + _sb, 8)
         preview_splitter.addWidget(self._info_scroll)
 
         preview_splitter.setStretchFactor(0, 3)

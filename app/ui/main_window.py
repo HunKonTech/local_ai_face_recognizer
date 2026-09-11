@@ -70,6 +70,7 @@ from app.ui.panels.persons_panel import PersonsPanel
 from app.ui.panels.preview_panel import PreviewPanel
 from app.ui.panels.sidebar_panel import SidebarPanel
 from app.ui.widgets.flow_layout import FlowContainer
+from app.ui.widgets.eliding_label import ElidingLabel
 from app.workers.deep_pipeline_worker import (
     MODE_CLUSTER,
     MODE_DETECT_FACES,
@@ -599,8 +600,10 @@ class MainWindow(QMainWindow):
         self._tasks_status_btn.clicked.connect(self._on_open_task_manager)
         status.addWidget(self._tasks_status_btn)
 
-        self._status_label = QLabel()
-        status.addWidget(self._status_label)
+        # Eliding: a long status line must not stop the window from being
+        # resized smaller (#166).
+        self._status_label = ElidingLabel()
+        status.addWidget(self._status_label, 1)
 
 
     # ------------------------------------------------------------------
