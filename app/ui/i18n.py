@@ -1923,6 +1923,8 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "amerge_create_title":    {"en": "Create new person", "hu": "Új személy létrehozása"},
     "amerge_create_prompt":   {"en": "Name for the new person:", "hu": "Az új személy neve:"},
     "amerge_delete":          {"en": "Delete face", "hu": "Arc törlése"},
+    "amerge_to_unknown":      {"en": "Move back to Unknown",
+                               "hu": "Ismeretlenné tétel"},
     "amerge_pending_badge":   {"en": "Auto-merged — needs review",
                                "hu": "Automatikus összevonás — ellenőrizendő"},
     "amerge_notice_title":    {"en": "Faces moved for review",
@@ -1950,6 +1952,8 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "amerge_close":           {"en": "Close", "hu": "Bezárás"},
     "amerge_ctx_accept":      {"en": "Accept auto-merge", "hu": "Összevonás elfogadása"},
     "amerge_ctx_move":        {"en": "Move auto-merged face…", "hu": "Összevont arc áthelyezése…"},
+    "amerge_ctx_unknown":     {"en": "Move back to Unknown",
+                               "hu": "Ismeretlenné tétel"},
     # Review-dialog detail modal + decision graph
     "amerge_open_full":       {"en": "Click to view the full image and details",
                                "hu": "Kattints a teljes kép és a részletek megtekintéséhez"},

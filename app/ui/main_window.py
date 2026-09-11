@@ -395,6 +395,9 @@ class MainWindow(QMainWindow):
         self._preview_panel.face_move_auto_merge.connect(
             self._on_face_move_auto_merge
         )
+        self._preview_panel.face_reject_auto_merge.connect(
+            self._on_face_reject_auto_merge
+        )
         self._preview_panel.face_uncertainty_change_requested.connect(
             self._on_face_uncertainty_change
         )
@@ -2864,6 +2867,16 @@ class MainWindow(QMainWindow):
         """Confirm a pending auto-merged face from the face-view context menu."""
         with session_scope() as session:
             UnknownMergeService(session).confirm_auto_merge(face_id)
+        if self._current_person_id:
+            self._on_person_selected(self._current_person_id)
+        self._show_face_in_preview(face_id)
+        self._image_browser._reload_current_face_data()
+
+    @Slot(int)
+    def _on_face_reject_auto_merge(self, face_id: int) -> None:
+        """Send a pending auto-merged face back to an Unknown cluster."""
+        with session_scope() as session:
+            UnknownMergeService(session).reject_to_unknown(face_id)
         if self._current_person_id:
             self._on_person_selected(self._current_person_id)
         self._show_face_in_preview(face_id)

@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.config import RecognitionConfig
 from app.db.models import Face, Person
+from app.services.clustering_service import next_auto_person_name
 from app.services.identity_service import (
     BulkReassignResult,
     IdentityService,
@@ -448,6 +449,69 @@ class UnknownMergeService:
         """Re-assign a pending face to another person (clears the pending flag)."""
         # reassign_face stamps "manual" and clears the auto-merge markers.
         return self._identity.reassign_face(face_id, new_person_id)
+
+    def reject_to_unknown(self, face_id: int) -> Face:
+        """Reject a pending face: send it back to an Unknown cluster.
+
+        This is the "no, this is somebody else" answer in the review list.  The
+        face returns to the ``Unknown N`` cluster it was dragged out of when
+        that cluster still exists; otherwise (the usual case — an emptied
+        cluster is deleted right after the scatter) it is re-created under its
+        original name, so several rejected siblings regroup together instead of
+        scattering into one singleton each.
+
+        The move itself goes through
+        :meth:`app.services.identity_service.IdentityService.reassign_face`, so
+        the pending markers are cleared exactly like any manual override.
+        """
+        face = self._session.get(Face, face_id)
+        if face is None:
+            raise ValueError(f"Face id={face_id} not found")
+        target = self._resolve_unknown_target(face)
+        log.info(
+            "Unknown-merge: face %d rejected back to %r (person %d)",
+            face_id, target.name, target.id,
+        )
+        return self._identity.reassign_face(face_id, target.id)
+
+    def _resolve_unknown_target(self, face: Face) -> Person:
+        """Find (or re-create) the Unknown person a rejected face belongs to."""
+        sid = face.auto_merge_source_person_id
+        if sid is not None:
+            source = self._session.get(Person, sid)
+            if (
+                source is not None
+                and source.is_auto_named
+                and not source.is_protected
+                and source.id != face.person_id
+            ):
+                return source
+
+        # The original cluster is gone: reuse its name so siblings rejected one
+        # after the other end up in the same re-created cluster.
+        decision = self._parse_decision(face.auto_merge_decision_json) or {}
+        name = decision.get("source_person_name")
+        if isinstance(name, str) and name.strip():
+            name = name.strip()
+            existing = (
+                self._session.query(Person).filter(Person.name == name).first()
+            )
+            if existing is not None:
+                # Reuse an Unknown cluster restored by an earlier rejection; a
+                # real person wearing that name means the name is taken.
+                if existing.is_auto_named and not existing.is_protected:
+                    return existing
+                name = None
+        else:
+            name = None
+
+        person = Person(
+            name=name or next_auto_person_name(self._session),
+            is_auto_named=True,
+        )
+        self._session.add(person)
+        self._session.flush()
+        return person
 
     def delete_face(self, face_id: int) -> bool:
         """Hard-delete a face row together with its bbox (matches the existing

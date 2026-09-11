@@ -3,7 +3,8 @@
 Lists every face currently flagged ``pending`` by
 :class:`app.services.unknown_merge_service.UnknownMergeService` as a card:
 the face crop, its current person, the original Unknown it came from, the source
-image path and date, plus per-row **Accept**, **Move…** and **Delete** actions.
+image path and date, plus per-row **Accept**, **Move…**, **Back to Unknown** and
+**Delete** actions.
 An **Accept all** button clears the whole queue at once.  Each action goes
 through the same service the in-canvas review uses, so behaviour is identical
 everywhere.
@@ -189,11 +190,13 @@ class AutoMergeReviewDialog(QDialog):
         move_btn.clicked.connect(lambda: self._on_move(row.face_id))
         create_btn = QPushButton("✨ " + t("amerge_create_new"))
         create_btn.clicked.connect(lambda: self._on_create_new(row.face_id))
+        unknown_btn = QPushButton("❔ " + t("amerge_to_unknown"))
+        unknown_btn.clicked.connect(lambda: self._on_to_unknown(row.face_id))
         del_btn = QPushButton("🗑 " + t("amerge_delete"))
         del_btn.clicked.connect(lambda: self._on_delete(row.face_id))
         graph_btn = QPushButton("📊 " + t("amerge_graph_btn"))
         graph_btn.clicked.connect(lambda: self._open_graph(row))
-        for b in (accept_btn, move_btn, create_btn, del_btn, graph_btn):
+        for b in (accept_btn, move_btn, create_btn, unknown_btn, del_btn, graph_btn):
             b.setFixedWidth(190)
             actions.addWidget(b)
         actions.addStretch()
@@ -275,6 +278,12 @@ class AutoMergeReviewDialog(QDialog):
             new_person_id = person.id
         with session_scope() as session:
             UnknownMergeService(session).move_auto_merge(face_id, new_person_id)
+        self._after_change()
+
+    def _on_to_unknown(self, face_id: int) -> None:
+        """Reject the suggestion: the face goes back to an Unknown cluster."""
+        with session_scope() as session:
+            UnknownMergeService(session).reject_to_unknown(face_id)
         self._after_change()
 
     def _on_delete(self, face_id: int) -> None:
