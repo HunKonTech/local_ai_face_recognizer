@@ -461,3 +461,96 @@ def test_delete_face_removes_row(db):
 
     with session_scope() as session:
         assert session.get(Face, sib_id) is None
+
+
+# ---------------------------------------------------------------------------
+# 11. Reject back to Unknown
+# ---------------------------------------------------------------------------
+
+def test_reject_to_unknown_recreates_source_cluster(db):
+    """A rejected face returns to its original Unknown, re-created by name."""
+    with session_scope() as session:
+        img = _img(session, "/tmp/a.jpg")
+        unknown = _person(session, "Unknown 12", is_auto_named=True)
+        target = _person(session, "Anikó")
+        faces = [_face(session, img, unknown) for _ in range(3)]
+        sel_id, target_id, src_id = faces[0].id, target.id, unknown.id
+
+    with session_scope() as session:
+        svc = UnknownMergeService(session)
+        svc.assign_unknown_face(sel_id, target_id)
+        pending = svc.pending_face_ids()
+
+    # The emptied source cluster is gone after the scatter.
+    with session_scope() as session:
+        assert session.get(Person, src_id) is None
+
+    with session_scope() as session:
+        UnknownMergeService(session).reject_to_unknown(pending[0])
+    with session_scope() as session:
+        UnknownMergeService(session).reject_to_unknown(pending[1])
+
+    with session_scope() as session:
+        a = session.get(Face, pending[0])
+        b = session.get(Face, pending[1])
+        # Both rejected siblings regrouped in one re-created Unknown cluster.
+        assert a.person_id == b.person_id
+        assert a.person_id != target_id
+        restored = session.get(Person, a.person_id)
+        assert restored.is_auto_named
+        assert restored.name == "Unknown 12"
+        # The pending markers are cleared, so the face leaves the review list.
+        assert a.auto_merge_review_status is None
+        assert not a.auto_merged_from_unknown
+        assert UnknownMergeService(session).count_pending() == 0
+
+
+def test_reject_to_unknown_reuses_surviving_source(db):
+    """When the source Unknown still exists, the face goes straight back."""
+    with session_scope() as session:
+        img = _img(session, "/tmp/a.jpg")
+        unknown = _person(session, "Unknown 13", is_auto_named=True)
+        target = _person(session, "Anikó")
+        faces = [_face(session, img, unknown) for _ in range(3)]
+        # A merge-excluded face keeps the cluster alive after the scatter.
+        faces[2].is_merge_excluded = True
+        sel_id, target_id, src_id = faces[0].id, target.id, unknown.id
+
+    with session_scope() as session:
+        svc = UnknownMergeService(session)
+        svc.assign_unknown_face(sel_id, target_id)
+        sib_id = svc.pending_face_ids()[0]
+
+    with session_scope() as session:
+        UnknownMergeService(session).reject_to_unknown(sib_id)
+
+    with session_scope() as session:
+        assert session.get(Face, sib_id).person_id == src_id
+
+
+def test_reject_to_unknown_falls_back_to_new_name(db):
+    """A taken source name yields a fresh ``Unknown N`` instead of a clash."""
+    with session_scope() as session:
+        img = _img(session, "/tmp/a.jpg")
+        unknown = _person(session, "Unknown 3", is_auto_named=True)
+        target = _person(session, "Anikó")
+        faces = [_face(session, img, unknown) for _ in range(2)]
+        sel_id, target_id = faces[0].id, target.id
+
+    with session_scope() as session:
+        svc = UnknownMergeService(session)
+        svc.assign_unknown_face(sel_id, target_id)
+        sib_id = svc.pending_face_ids()[0]
+
+    # Someone re-used the old name for a real, named person meanwhile.
+    with session_scope() as session:
+        _person(session, "Unknown 3")
+
+    with session_scope() as session:
+        UnknownMergeService(session).reject_to_unknown(sib_id)
+
+    with session_scope() as session:
+        person = session.get(Person, session.get(Face, sib_id).person_id)
+        assert person.is_auto_named
+        # Fresh sequence: the only "Unknown 3" left is the named person above.
+        assert person.name == "Unknown 1"

@@ -24,10 +24,10 @@ import logging
 import re
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +94,11 @@ class RecordingOptions:
     audio_channels: int = 2
     # Emit live peak-level metering on ffmpeg's stdout (drives the VU meter).
     meter_audio: bool = False
+    # Windows desktop grabber: ``"auto"`` | ``"ddagrab"`` | ``"gdigrab"``.
+    # Ignored on every other platform.
+    windows_backend: str = "auto"
+    # Force a DXGI adapter for ``ddagrab`` (``None`` → derive from the region).
+    windows_dxgi_adapter: Optional[int] = None
 
 
 class RecordingDisplayMode(Enum):
@@ -128,6 +133,86 @@ class RecordingDisplayInfo:
     x: int = 0
     y: int = 0
     av_index: Optional[int] = None
+    # Windows only: the monitor rectangle in *physical* pixels.  Qt reports
+    # logical (DPI-scaled) coordinates, while ffmpeg's grabbers address the
+    # desktop in physical pixels — on a scaled multi-monitor layout the two
+    # disagree and a crop computed from the logical values lands off-screen
+    # (which gdigrab fills with black).  ``None`` → the logical values above
+    # are the best we have (non-Windows, or the native query failed).
+    physical_x: Optional[int] = None
+    physical_y: Optional[int] = None
+    physical_width: Optional[int] = None
+    physical_height: Optional[int] = None
+    # Windows only: the DXGI adapter/output pair addressed by ``ddagrab``.
+    # ``output_idx`` is an index *within an adapter*, so both halves matter on a
+    # hybrid-GPU machine.  ``None`` → ddagrab cannot address this monitor.
+    dxgi_adapter_index: Optional[int] = None
+    dxgi_output_index: Optional[int] = None
+
+
+def physical_rect(info: RecordingDisplayInfo) -> tuple:
+    """Return *info*'s ``(x, y, width, height)`` in physical pixels.
+
+    Falls back to the logical geometry when the native query was unavailable,
+    which keeps every non-Windows caller on its previous behaviour.
+    """
+    if (
+        info.physical_width is not None
+        and info.physical_height is not None
+        and info.physical_x is not None
+        and info.physical_y is not None
+    ):
+        return (
+            int(info.physical_x),
+            int(info.physical_y),
+            int(info.physical_width),
+            int(info.physical_height),
+        )
+    return (int(info.x), int(info.y), int(info.width), int(info.height))
+
+
+class WindowsCaptureBackend(Enum):
+    """Which Windows desktop grabber ffmpeg should use.
+
+    ``gdigrab`` is the legacy GDI/BitBlt grabber: it works everywhere but
+    returns all-black frames on many hardware-accelerated, hybrid-GPU or HDR
+    setups.  ``ddagrab`` drives the DXGI Desktop Duplication API and therefore
+    sees exactly what the compositor puts on the monitor, at true physical
+    resolution.  ``auto`` prefers ddagrab and falls back to gdigrab.
+    """
+
+    AUTO = "auto"
+    DDAGRAB = "ddagrab"
+    GDIGRAB = "gdigrab"
+
+    @classmethod
+    def from_value(cls, value: object) -> "WindowsCaptureBackend":
+        """Coerce a stored string into a backend, defaulting to AUTO."""
+        for backend in cls:
+            if backend.value == value:
+                return backend
+        return cls.AUTO
+
+
+@dataclass
+class DdaTarget:
+    """One ``ddagrab`` source: a DXGI output and the slice of it to capture.
+
+    ``offset_x/offset_y`` and ``width/height`` are relative to the monitor's own
+    top-left corner (ddagrab addresses each output separately).  ``canvas_x`` /
+    ``canvas_y`` place the grabbed rectangle on the combined canvas; both are 0
+    for a single-monitor capture.  Zero ``width``/``height`` means "the whole
+    output".
+    """
+
+    output_idx: int
+    adapter_idx: int = 0
+    width: int = 0
+    height: int = 0
+    offset_x: int = 0
+    offset_y: int = 0
+    canvas_x: int = 0
+    canvas_y: int = 0
 
 
 @dataclass
@@ -137,8 +222,13 @@ class CaptureRegion:
     Exactly one capture strategy is expressed:
 
     * ``screen_index`` — a macOS avfoundation video device index.
-    * ``offset_x/offset_y/width/height`` — a Windows ``gdigrab`` crop rectangle.
+    * ``offset_x/offset_y/width/height`` — a Windows ``gdigrab`` crop rectangle,
+      in physical pixels.
     * ``window_title`` — a Windows ``gdigrab`` single-window capture.
+
+    ``dda_targets`` carries the same target expressed for ``ddagrab``; it is
+    empty when the region cannot be captured that way (a window-title grab, or
+    an unknown DXGI output index), which forces the gdigrab path.
 
     All ``None`` means "platform default" (macOS: probed screen device;
     Windows: the whole virtual desktop).
@@ -150,6 +240,9 @@ class CaptureRegion:
     width: Optional[int] = None
     height: Optional[int] = None
     window_title: Optional[str] = None
+    dda_targets: List[DdaTarget] = field(default_factory=list)
+    canvas_width: Optional[int] = None
+    canvas_height: Optional[int] = None
 
 
 def is_macos(platform: str) -> bool:
@@ -199,7 +292,9 @@ def selected_displays(
         return list(displays)
     if mode is RecordingDisplayMode.SELECTED_DISPLAYS:
         wanted = set(selected_ids or [])
-        chosen = [d for d in displays if d.id in wanted]
+        # Ids were once the Qt screen name and are now the GDI device name on
+        # Windows, so a stored selection is matched against either.
+        chosen = [d for d in displays if d.id in wanted or (d.name and d.name in wanted)]
         if chosen:
             return chosen
         primary = _primary_display(displays)
@@ -210,15 +305,145 @@ def selected_displays(
 
 def displays_bounding_box(
     displays: List[RecordingDisplayInfo],
+    physical: bool = True,
 ) -> Optional[tuple]:
-    """Return ``(x, y, width, height)`` spanning *displays*, or ``None``."""
+    """Return ``(x, y, width, height)`` spanning *displays*, or ``None``.
+
+    ``physical`` (the default) measures in physical pixels — the coordinate
+    space every ffmpeg grabber works in.  Pass ``False`` for logical/Qt units.
+    """
     if not displays:
         return None
-    x0 = min(d.x for d in displays)
-    y0 = min(d.y for d in displays)
-    x1 = max(d.x + d.width for d in displays)
-    y1 = max(d.y + d.height for d in displays)
+    rects = [
+        physical_rect(d) if physical else (d.x, d.y, d.width, d.height)
+        for d in displays
+    ]
+    x0 = min(r[0] for r in rects)
+    y0 = min(r[1] for r in rects)
+    x1 = max(r[0] + r[2] for r in rects)
+    y1 = max(r[1] + r[3] for r in rects)
     return (x0, y0, x1 - x0, y1 - y0)
+
+
+# gdigrab's banner, e.g.
+#   [gdigrab @ 0000...] Capturing whole desktop as 1680x1050x32 at (0,0)
+_GDIGRAB_RECT_RE = re.compile(
+    r"Capturing whole desktop as (\d+)x(\d+)x\d+ at \((-?\d+)\s*,\s*(-?\d+)\)"
+)
+
+
+def parse_gdigrab_desktop_rect(stderr_text: str) -> Optional[Tuple[int, int, int, int]]:
+    """Return the desktop rectangle gdigrab reports, or ``None``.
+
+    ffmpeg.exe ships without a per-monitor DPI manifest, so Windows hands it a
+    *virtualized* desktop: on a scaled machine gdigrab's coordinates are neither
+    Qt's logical pixels nor the true physical ones.  Rather than guess the
+    conversion we ask gdigrab what it sees and calibrate against it.
+    """
+    match = _GDIGRAB_RECT_RE.search(stderr_text or "")
+    if not match:
+        return None
+    w, h, x, y = (int(g) for g in match.groups())
+    if w <= 0 or h <= 0:
+        return None
+    return (x, y, w, h)
+
+
+def gdigrab_coordinate_scale(
+    gdigrab_rect: Optional[Tuple[int, int, int, int]],
+    physical: Optional[Tuple[int, int, int, int]],
+) -> float:
+    """Factor converting physical desktop pixels into gdigrab's coordinates.
+
+    Returns ``1.0`` whenever either rectangle is unknown or the ratio looks
+    implausible, which keeps the unscaled machines on their previous behaviour.
+    """
+    if not gdigrab_rect or not physical:
+        return 1.0
+    gw, gh = gdigrab_rect[2], gdigrab_rect[3]
+    pw, ph = physical[2], physical[3]
+    if pw <= 0 or ph <= 0 or gw <= 0 or gh <= 0:
+        return 1.0
+    scale = gw / pw
+    # Windows scaling only ever shrinks the virtualized desktop, and the two
+    # axes must agree; anything else means we misread one of the rectangles.
+    if not 0.2 <= scale <= 1.0:
+        return 1.0
+    if abs(scale - (gh / ph)) > 0.02:
+        return 1.0
+    return scale
+
+
+def scale_region_for_gdigrab(region: CaptureRegion, scale: float) -> CaptureRegion:
+    """Return *region* with its gdigrab crop expressed in gdigrab coordinates.
+
+    The ddagrab targets are left untouched — they always address true physical
+    pixels, per DXGI output.
+    """
+    if scale == 1.0 or region.width is None or region.height is None:
+        return region
+    scaled = CaptureRegion(**vars(region))
+    scaled.offset_x = int(round((region.offset_x or 0) * scale))
+    scaled.offset_y = int(round((region.offset_y or 0) * scale))
+    scaled.width = _even(round(region.width * scale))
+    scaled.height = _even(round(region.height * scale))
+    return scaled
+
+
+def _display_containing(
+    displays: List[RecordingDisplayInfo], rect: tuple
+) -> Optional[RecordingDisplayInfo]:
+    """Return the monitor holding most of *rect* (physical px), or ``None``."""
+    x, y, w, h = rect
+    best = None
+    best_area = 0
+    for disp in displays:
+        dx, dy, dw, dh = physical_rect(disp)
+        ow = max(0, min(x + w, dx + dw) - max(x, dx))
+        oh = max(0, min(y + h, dy + dh) - max(y, dy))
+        area = ow * oh
+        if area > best_area:
+            best, best_area = disp, area
+    return best
+
+
+def _dda_targets_for(
+    displays: List[RecordingDisplayInfo], box: tuple
+) -> tuple:
+    """Build the ``ddagrab`` targets covering *box* (physical px).
+
+    Returns ``(targets, canvas_width, canvas_height)``.  The targets are empty
+    when any needed monitor has no known DXGI output index — ddagrab cannot
+    address it, so the caller must stay on gdigrab.
+    """
+    bx, by, bw, bh = box
+    targets: List[DdaTarget] = []
+    for disp in displays:
+        if disp.dxgi_output_index is None:
+            return ([], None, None)
+        dx, dy, dw, dh = physical_rect(disp)
+        # Intersect the monitor with the requested box, then express the slice
+        # both in monitor-local and canvas coordinates.
+        ix0, iy0 = max(bx, dx), max(by, dy)
+        ix1, iy1 = min(bx + bw, dx + dw), min(by + bh, dy + dh)
+        if ix1 <= ix0 or iy1 <= iy0:
+            continue
+        full = (ix0, iy0, ix1 - ix0, iy1 - iy0) == (dx, dy, dw, dh)
+        targets.append(
+            DdaTarget(
+                output_idx=int(disp.dxgi_output_index),
+                adapter_idx=int(disp.dxgi_adapter_index or 0),
+                width=0 if full else _even(ix1 - ix0),
+                height=0 if full else _even(iy1 - iy0),
+                offset_x=ix0 - dx,
+                offset_y=iy0 - dy,
+                canvas_x=ix0 - bx,
+                canvas_y=iy0 - by,
+            )
+        )
+    if not targets:
+        return ([], None, None)
+    return (targets, _even(bw), _even(bh))
 
 
 def resolve_capture_region(
@@ -230,9 +455,14 @@ def resolve_capture_region(
 ) -> CaptureRegion:
     """Resolve the capture rectangle/device for *mode* on *platform*.
 
-    ``active_window_bounds`` is ``(x, y, w, h)`` of the app window (used only by
-    Windows ACTIVE_WINDOW; macOS avfoundation cannot crop to a window, so it
-    falls back to the primary screen device — the caller logs that limitation).
+    ``active_window_bounds`` is ``(x, y, w, h)`` of the app window in *physical*
+    pixels (used only by Windows ACTIVE_WINDOW; macOS avfoundation cannot crop
+    to a window, so it falls back to the primary screen device — the caller logs
+    that limitation).
+
+    On Windows the returned region carries both strategies: a gdigrab crop
+    rectangle *and* the equivalent ``ddagrab`` targets, so the caller can switch
+    grabbers without re-resolving anything.
     """
     if not isinstance(mode, RecordingDisplayMode):
         mode = RecordingDisplayMode.from_value(mode)
@@ -243,9 +473,15 @@ def resolve_capture_region(
         if win:
             if active_window_bounds:
                 x, y, w, h = active_window_bounds
+                box = (int(x), int(y), _even(w), _even(h))
+                host = _display_containing(displays, box)
+                targets, cw, ch = (
+                    _dda_targets_for([host], box) if host is not None else ([], None, None)
+                )
                 return CaptureRegion(
-                    offset_x=int(x), offset_y=int(y),
-                    width=_even(w), height=_even(h),
+                    offset_x=box[0], offset_y=box[1],
+                    width=box[2], height=box[3],
+                    dda_targets=targets, canvas_width=cw, canvas_height=ch,
                 )
             return CaptureRegion()  # no bounds → whole desktop fallback
         if mac:
@@ -264,8 +500,11 @@ def resolve_capture_region(
         if box is None:
             return CaptureRegion()  # whole desktop
         x, y, w, h = box
+        box = (int(x), int(y), _even(w), _even(h))
+        targets, cw, ch = _dda_targets_for(chosen, box)
         return CaptureRegion(
-            offset_x=int(x), offset_y=int(y), width=_even(w), height=_even(h)
+            offset_x=box[0], offset_y=box[1], width=box[2], height=box[3],
+            dda_targets=targets, canvas_width=cw, canvas_height=ch,
         )
     if mac:
         # avfoundation records a single screen device.  For ALL_DISPLAYS there
@@ -399,6 +638,133 @@ def parse_meter_peak_db(text: str) -> Optional[float]:
     return last
 
 
+def probe_gdigrab_rect(
+    ffmpeg_path: Optional[str], timeout: int = 10
+) -> Optional[Tuple[int, int, int, int]]:
+    """Ask gdigrab what desktop rectangle it sees, or ``None``.
+
+    A 0.2 s capture to ``-f null -`` is enough: the banner we need is printed
+    while the input is being opened.  Never raises.
+    """
+    if not ffmpeg_path:
+        return None
+    import subprocess  # local import: only needed when a recording starts
+
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_path,
+                "-hide_banner", "-loglevel", "info",
+                "-f", "gdigrab", "-framerate", "5", "-i", "desktop",
+                "-t", "0.2", "-f", "null", "-",
+            ],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("gdigrab desktop probe failed", exc_info=True)
+        return None
+    return parse_gdigrab_desktop_rect(proc.stderr or "")
+
+
+def resolve_windows_backend(
+    value: object, region: Optional[CaptureRegion]
+) -> WindowsCaptureBackend:
+    """Decide which Windows grabber to use for *region*.
+
+    ``auto`` prefers ddagrab, but only when the region was resolved into DXGI
+    targets — a window-title grab or an unknown output index leaves gdigrab as
+    the only option.
+    """
+    backend = WindowsCaptureBackend.from_value(value)
+    has_targets = region is not None and bool(region.dda_targets)
+    if backend is WindowsCaptureBackend.DDAGRAB and not has_targets:
+        return WindowsCaptureBackend.GDIGRAB
+    if backend is WindowsCaptureBackend.AUTO:
+        return (
+            WindowsCaptureBackend.DDAGRAB
+            if has_targets
+            else WindowsCaptureBackend.GDIGRAB
+        )
+    return backend
+
+
+def ddagrab_adapter_index(
+    region: Optional[CaptureRegion], override: Optional[int] = None
+) -> int:
+    """Return the DXGI adapter index to bind the d3d11 device to.
+
+    ``ddagrab``'s ``output_idx`` is relative to the adapter the hardware device
+    was created on, so a hybrid-GPU machine needs the right adapter or the
+    indices address the wrong monitors (or nothing at all).
+    """
+    if override is not None:
+        return int(override)
+    if region is not None and region.dda_targets:
+        return int(region.dda_targets[0].adapter_idx)
+    return 0
+
+
+def build_ddagrab_graph(
+    options: RecordingOptions,
+    region: Optional[CaptureRegion],
+    scale_height: int,
+    out_label: str = "[vout]",
+) -> str:
+    """Build the ``ddagrab`` video filter chain ending in *out_label*.
+
+    One target is a straight grab.  Several targets (a multi-monitor canvas) are
+    composited by padding the first monitor out to the canvas size and
+    overlaying the rest at their canvas offsets — padding a live stream rather
+    than overlaying onto a synthetic ``color`` source keeps the whole graph
+    driven by real capture timing.
+    """
+    draw_mouse = "1" if options.capture_cursor else "0"
+    targets = list(region.dda_targets) if region is not None else []
+    if not targets:
+        targets = [DdaTarget(output_idx=0)]
+
+    def source(target: DdaTarget) -> str:
+        # ``allow_fallback=1`` keeps an HDR / 10-bit desktop from erroring the
+        # filter outright, and the ``bgra|x2bgr10`` download list accepts either
+        # surface format before the final conversion to plain BGRA.
+        src = (
+            f"ddagrab=output_idx={target.output_idx}"
+            f":framerate={options.fps}"
+            f":draw_mouse={draw_mouse}"
+            ":allow_fallback=1"
+        )
+        if target.width and target.height:
+            src += (
+                f":offset_x={target.offset_x}:offset_y={target.offset_y}"
+                f":video_size={target.width}x{target.height}"
+            )
+        return f"{src},hwdownload,format=bgra|x2bgr10,format=bgra"
+
+    if len(targets) == 1:
+        return f"{source(targets[0])},scale=-2:{scale_height}{out_label}"
+
+    canvas_w = region.canvas_width if region is not None else 0
+    canvas_h = region.canvas_height if region is not None else 0
+    base, rest = targets[0], targets[1:]
+    parts = [
+        f"{source(base)},"
+        f"pad={canvas_w}:{canvas_h}:{base.canvas_x}:{base.canvas_y}:color=black"
+        "[dda_base]"
+    ]
+    for i, target in enumerate(rest):
+        parts.append(f"{source(target)}[dda{i}]")
+    prev = "[dda_base]"
+    for i, target in enumerate(rest):
+        step = f"{prev}[dda{i}]overlay=x={target.canvas_x}:y={target.canvas_y}"
+        if i == len(rest) - 1:
+            parts.append(f"{step},scale=-2:{scale_height}{out_label}")
+        else:
+            prev = f"[dda_mix{i}]"
+            parts.append(f"{step}{prev}")
+    return ";".join(parts)
+
+
 def build_ffmpeg_args(
     platform: str,
     devices: CaptureDevices,
@@ -428,6 +794,11 @@ def build_ffmpeg_args(
     # Audio legs feeding the mixer, with the ffmpeg input pad each maps to.
     audio_sources: List[AudioSource] = []
     input_index = 0  # advances for every ``-i`` we append
+    # ddagrab is a *source filter*, not an input: its video arrives through the
+    # filtergraph, so the encoder maps a graph label instead of an input stream
+    # and the scaling happens inside the graph rather than in ``-vf``.
+    video_graph: Optional[str] = None
+    video_map = "0:v"
 
     if is_macos(platform):
         cursor = "1" if options.capture_cursor else "0"
@@ -455,25 +826,33 @@ def build_ffmpeg_args(
             )
             input_index += 1
     elif is_windows(platform):
-        draw_mouse = "1" if options.capture_cursor else "0"
-        # gdigrab input options (crop offset / size) must precede ``-i``.
-        grab: List[str] = [
-            "-f", "gdigrab",
-            "-draw_mouse", draw_mouse,
-            "-framerate", str(options.fps),
-        ]
-        if region is not None and region.window_title:
-            args += grab + ["-i", f"title={region.window_title}"]
-        elif region is not None and region.width and region.height:
-            args += grab + [
-                "-offset_x", str(region.offset_x or 0),
-                "-offset_y", str(region.offset_y or 0),
-                "-video_size", f"{region.width}x{region.height}",
-                "-i", "desktop",
-            ]
+        backend = resolve_windows_backend(options.windows_backend, region)
+        if backend is WindowsCaptureBackend.DDAGRAB:
+            adapter = ddagrab_adapter_index(region, options.windows_dxgi_adapter)
+            args += ["-init_hw_device", f"d3d11va:{adapter}"]
+            video_graph = build_ddagrab_graph(options, region, int(height))
+            video_map = "[vout]"
+            # No video ``-i`` — the audio inputs start at index 0.
         else:
-            args += grab + ["-i", "desktop"]
-        input_index += 1  # gdigrab desktop is input 0 (video only)
+            draw_mouse = "1" if options.capture_cursor else "0"
+            # gdigrab input options (crop offset / size) must precede ``-i``.
+            grab: List[str] = [
+                "-f", "gdigrab",
+                "-draw_mouse", draw_mouse,
+                "-framerate", str(options.fps),
+            ]
+            if region is not None and region.window_title:
+                args += grab + ["-i", f"title={region.window_title}"]
+            elif region is not None and region.width and region.height:
+                args += grab + [
+                    "-offset_x", str(region.offset_x or 0),
+                    "-offset_y", str(region.offset_y or 0),
+                    "-video_size", f"{region.width}x{region.height}",
+                    "-i", "desktop",
+                ]
+            else:
+                args += grab + ["-i", "desktop"]
+            input_index += 1  # gdigrab desktop is input 0 (video only)
         if use_mic:
             args += ["-f", "dshow", "-i", f"audio={devices.microphone}"]
             audio_sources.append(
@@ -497,7 +876,10 @@ def build_ffmpeg_args(
         "-preset", "veryfast",
         "-crf", str(crf),
         "-pix_fmt", "yuv420p",
-        "-vf", f"scale=-2:{height}",
+    ]
+    if video_graph is None:
+        args += ["-vf", f"scale=-2:{height}"]
+    args += [
         "-r", str(options.fps),
         "-g", str(max(1, options.fps * options.segment_seconds)),
         "-force_key_frames",
@@ -514,10 +896,13 @@ def build_ffmpeg_args(
         channels=options.audio_channels,
         meter=options.meter_audio,
     )
+    # The video and audio chains share a single ``-filter_complex``.
+    combined = ";".join(part for part in (video_graph, graph) if part)
+    if combined:
+        args += ["-filter_complex", combined]
+    args += ["-map", video_map]
     if graph is not None:
         args += [
-            "-filter_complex", graph,
-            "-map", "0:v",
             "-map", out_label,
             "-c:a", "aac",
             "-b:a", str(audio_bitrate),
@@ -525,7 +910,7 @@ def build_ffmpeg_args(
             "-ac", str(options.audio_channels),
         ]
     else:
-        args += ["-map", "0:v", "-an"]
+        args += ["-an"]
 
     # Segment muxer — each closed segment is an independently playable file.
     args += [
@@ -889,12 +1274,298 @@ def validate_recording_audio(
     return parse_ffprobe_audio(proc.stdout or "")
 
 
+# blackdetect only reports a run once it closes (EOF counts), and it logs at
+# INFO — a probe therefore has to raise ffmpeg's log level above the recorder's
+# usual ``warning`` or it would never see a single line.
+_BLACKDETECT_RE = re.compile(
+    r"black_start:([\d.]+)\s+black_end:([\d.]+)\s+black_duration:([\d.]+)"
+)
+# Fraction of the observed footage that must be black before we call it black.
+_BLACK_RATIO_THRESHOLD = 0.9
+_BLACKDETECT_FILTER = "blackdetect=d=0.1:pic_th=0.98:pix_th=0.10"
+
+
+def parse_blackdetect(stderr_text: str) -> Tuple[float, int]:
+    """Return ``(total black seconds, interval count)`` from ffmpeg's stderr."""
+    total = 0.0
+    count = 0
+    for match in _BLACKDETECT_RE.finditer(stderr_text or ""):
+        try:
+            total += float(match.group(3))
+        except ValueError:
+            continue
+        count += 1
+    return (total, count)
+
+
+@dataclass
+class BlackProbe:
+    """Result of a short pre-flight capture used to detect a black grabber."""
+
+    ok: bool                      # ffmpeg ran and produced frames
+    is_black: bool
+    backend: str = "gdigrab"
+    black_seconds: float = 0.0
+    observed_seconds: float = 0.0
+    error: Optional[str] = None
+
+    def summary(self) -> str:
+        if not self.ok:
+            return (
+                f"[Video] Pre-flight {self.backend} capture failed: "
+                f"{self.error or 'no frames produced'}"
+            )
+        if self.is_black:
+            return (
+                f"[Video] Pre-flight {self.backend} capture is BLACK "
+                f"({self.black_seconds:.1f}s of {self.observed_seconds:.1f}s)"
+            )
+        return (
+            f"[Video] Pre-flight {self.backend} capture OK "
+            f"({self.observed_seconds:.1f}s, {self.black_seconds:.1f}s black)"
+        )
+
+
+def evaluate_black_probe(
+    stderr_text: str,
+    *,
+    backend: str,
+    probe_seconds: float,
+    exit_code: int,
+) -> BlackProbe:
+    """Turn a probe's stderr + exit code into a :class:`BlackProbe`."""
+    black_seconds, _ = parse_blackdetect(stderr_text)
+    produced_frames = "frame=" in (stderr_text or "")
+    if exit_code != 0 or not produced_frames:
+        tail = (stderr_text or "").strip().splitlines()
+        return BlackProbe(
+            ok=False,
+            is_black=False,
+            backend=backend,
+            error=tail[-1][:200] if tail else None,
+        )
+    observed = max(probe_seconds, 0.001)
+    return BlackProbe(
+        ok=True,
+        is_black=(black_seconds / observed) >= _BLACK_RATIO_THRESHOLD,
+        backend=backend,
+        black_seconds=black_seconds,
+        observed_seconds=observed,
+    )
+
+
+def build_preflight_args(
+    platform: str,
+    options: RecordingOptions,
+    region: Optional[CaptureRegion],
+    *,
+    backend: str,
+    probe_seconds: float = 1.0,
+    probe_height: int = 240,
+) -> List[str]:
+    """Build a short capture that only reports whether the picture is black.
+
+    Uses the same grabber configuration as the real recording but decodes to
+    ``-f null -`` at a tiny resolution, so it costs about a second and writes
+    nothing to disk.
+    """
+    probe_options = RecordingOptions(**vars(options))
+    probe_options.capture_cursor = False
+    probe_options.meter_audio = False
+    probe_options.windows_backend = backend
+
+    args = ["-hide_banner", "-loglevel", "info", "-y"]
+    if is_windows(platform) and (
+        resolve_windows_backend(backend, region) is WindowsCaptureBackend.DDAGRAB
+    ):
+        adapter = ddagrab_adapter_index(region, options.windows_dxgi_adapter)
+        graph = build_ddagrab_graph(probe_options, region, probe_height, "[probe]")
+        args += [
+            "-init_hw_device", f"d3d11va:{adapter}",
+            "-filter_complex", f"{graph};[probe]{_BLACKDETECT_FILTER}[vout]",
+            "-map", "[vout]",
+        ]
+    elif is_windows(platform):
+        draw = ["-f", "gdigrab", "-draw_mouse", "0", "-framerate", str(options.fps)]
+        if region is not None and region.window_title:
+            args += draw + ["-i", f"title={region.window_title}"]
+        elif region is not None and region.width and region.height:
+            args += draw + [
+                "-offset_x", str(region.offset_x or 0),
+                "-offset_y", str(region.offset_y or 0),
+                "-video_size", f"{region.width}x{region.height}",
+                "-i", "desktop",
+            ]
+        else:
+            args += draw + ["-i", "desktop"]
+        args += ["-vf", f"scale=-2:{probe_height},{_BLACKDETECT_FILTER}"]
+    else:
+        screen = (
+            region.screen_index
+            if region is not None and region.screen_index
+            else "0"
+        )
+        args += [
+            "-f", "avfoundation",
+            "-capture_cursor", "0",
+            "-framerate", str(options.fps),
+            "-i", str(screen),
+            "-vf", f"scale=-2:{probe_height},{_BLACKDETECT_FILTER}",
+        ]
+    args += ["-an", "-t", str(probe_seconds), "-f", "null", "-"]
+    return args
+
+
+def build_black_scan_args(
+    mp4_path: Path, sample_seconds: Optional[int] = 30
+) -> List[str]:
+    """Build an ffmpeg pass that reports the black intervals of *mp4_path*.
+
+    Only the head of the file is scanned by default: a grabber that produces no
+    picture does so from the first frame, and an unbounded decode would stall
+    the (synchronous) stop path on a long recording.
+    """
+    args = ["-hide_banner", "-loglevel", "info", "-y"]
+    if sample_seconds:
+        args += ["-t", str(sample_seconds)]
+    args += [
+        "-i", str(mp4_path),
+        "-vf", "blackdetect=d=0.5:pic_th=0.98:pix_th=0.10",
+        "-an", "-f", "null", "-",
+    ]
+    return args
+
+
+@dataclass
+class VideoValidation:
+    """Result of inspecting the final recording for an actual picture."""
+
+    is_black: bool
+    black_seconds: float = 0.0
+    duration: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    codec: Optional[str] = None
+    error: Optional[str] = None
+
+    def summary(self) -> str:
+        if self.error:
+            return f"[Video] Final mux validation failed: {self.error}"
+        size = (
+            f"{self.width}x{self.height}"
+            if self.width and self.height
+            else "unknown size"
+        )
+        if self.is_black:
+            return (
+                f"[Video] Final mux is ALL BLACK ({self.black_seconds:.1f}s black, "
+                f"{size}) — the capture produced no picture"
+            )
+        return (
+            f"[Video] Final mux picture OK ({self.codec or '?'} {size}, "
+            f"{(self.duration or 0.0):.1f}s, {self.black_seconds:.1f}s black)"
+        )
+
+
+def parse_ffprobe_video(stdout_text: str) -> VideoValidation:
+    """Parse ``ffprobe -show_streams`` flat output for the video track."""
+    current: Optional[Dict[str, str]] = None
+    streams: List[Dict[str, str]] = []
+    for raw in (stdout_text or "").splitlines():
+        line = raw.strip()
+        if line == "[STREAM]":
+            current = {}
+        elif line == "[/STREAM]":
+            if current is not None:
+                streams.append(current)
+            current = None
+        elif current is not None and "=" in line:
+            key, _, value = line.partition("=")
+            current[key.strip()] = value.strip()
+
+    def _num(value, cast):
+        try:
+            return cast(value) if value not in (None, "", "N/A") else None
+        except (TypeError, ValueError):
+            return None
+
+    for stream in streams:
+        if stream.get("codec_type") != "video":
+            continue
+        return VideoValidation(
+            is_black=False,
+            codec=stream.get("codec_name"),
+            duration=_num(stream.get("duration"), float),
+            width=_num(stream.get("width"), int),
+            height=_num(stream.get("height"), int),
+        )
+    return VideoValidation(is_black=False, error="no video stream")
+
+
+def validate_recording_video(
+    ffmpeg_path: Optional[str],
+    ffprobe_path: Optional[str],
+    mp4_path: Path,
+    sample_seconds: Optional[int] = 30,
+    timeout: int = 60,
+) -> VideoValidation:
+    """Report whether *mp4_path* carries an actual picture rather than black.
+
+    Never raises — a missing binary or a failed pass comes back with ``error``
+    set so the caller can log it without a recording ever being lost to it.
+    """
+    if not Path(mp4_path).exists():
+        return VideoValidation(is_black=False, error=f"file missing: {mp4_path}")
+    import subprocess  # local import: only needed at validation time
+
+    result = VideoValidation(is_black=False)
+    if ffprobe_path:
+        try:
+            probe = subprocess.run(
+                [
+                    ffprobe_path,
+                    "-hide_banner", "-loglevel", "error",
+                    "-show_streams",
+                    "-show_entries",
+                    "stream=codec_type,codec_name,duration,width,height",
+                    str(mp4_path),
+                ],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=15,
+            )
+            if probe.returncode == 0:
+                result = parse_ffprobe_video(probe.stdout or "")
+        except Exception as exc:  # noqa: BLE001
+            result = VideoValidation(is_black=False, error=str(exc))
+
+    if not ffmpeg_path:
+        result.error = result.error or "ffmpeg not available"
+        return result
+    try:
+        scan = subprocess.run(
+            [ffmpeg_path, *build_black_scan_args(Path(mp4_path), sample_seconds)],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result.error = str(exc)
+        return result
+    result.black_seconds, _ = parse_blackdetect(scan.stderr or "")
+    span = result.duration or 0.0
+    if sample_seconds:
+        span = min(span, float(sample_seconds)) if span else float(sample_seconds)
+    if span > 0:
+        result.is_black = (result.black_seconds / span) >= _BLACK_RATIO_THRESHOLD
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Qt-backed recorder service
 # ---------------------------------------------------------------------------
 
 class RecorderState(Enum):
     IDLE = "idle"
+    PREFLIGHT = "preflight"   # short black-frame probe before the real capture
     RECORDING = "recording"
     PAUSED = "paused"
     FINALIZING = "finalizing"
@@ -1126,6 +1797,9 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
         error = Signal(str)
         audio_level = Signal(float)      # live mix peak level in dBFS
         audio_validated = Signal(object) # AudioValidation for the final mp4
+        video_validated = Signal(object) # VideoValidation for the final mp4
+        preflight_result = Signal(object)  # BlackProbe for the chosen backend
+        backend_changed = Signal(str)    # a black grabber forced a switch
 
         def __init__(self, ffmpeg_path: Optional[str], parent=None) -> None:
             super().__init__(parent)
@@ -1133,6 +1807,16 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
             self._ffprobe = resolve_ffprobe(ffmpeg_path)
             self._meter_buf = ""             # partial metering stdout line
             self._last_validation: Optional[AudioValidation] = None
+            self._last_video_validation: Optional[VideoValidation] = None
+            # Pre-flight bookkeeping: which grabber we are trying, which ones we
+            # already ruled out, and the probe's own process/stderr.
+            self._active_backend: Optional[str] = None
+            self._tried_backends: List[str] = []
+            self._probe_proc: Optional[QProcess] = None
+            self._probe_stderr = ""
+            self._probe_seconds = 1.0
+            self._preflight = True
+            self._gdigrab_scale_probed = False
             self._state = RecorderState.IDLE
             self._proc: Optional[QProcess] = None
             self._output_dir: Optional[Path] = None
@@ -1149,6 +1833,7 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
             # Tail of the current ffmpeg's stderr, kept so a failure can report
             # the real reason instead of a generic "exited unexpectedly".
             self._stderr_tail = ""
+            self._requested_backend = "auto"
 
         # -- public API -------------------------------------------------
 
@@ -1168,6 +1853,15 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
         def last_validation(self) -> Optional["AudioValidation"]:
             return self._last_validation
 
+        @property
+        def last_video_validation(self) -> Optional["VideoValidation"]:
+            return self._last_video_validation
+
+        @property
+        def active_backend(self) -> Optional[str]:
+            """The Windows grabber actually in use, once resolved."""
+            return self._active_backend
+
         def start(
             self,
             output_dir: Path,
@@ -1175,13 +1869,19 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
             options: RecordingOptions,
             concat_on_stop: bool = True,
             region: Optional[CaptureRegion] = None,
+            preflight: bool = True,
         ) -> None:
-            if self._state in (RecorderState.RECORDING, RecorderState.PAUSED):
+            if self._state in (
+                RecorderState.PREFLIGHT,
+                RecorderState.RECORDING,
+                RecorderState.PAUSED,
+            ):
                 return
             self._output_dir = Path(output_dir)
             self._output_dir.mkdir(parents=True, exist_ok=True)
             self._devices = devices
             self._options = options
+            self._requested_backend = options.windows_backend
             self._region = region
             self._concat_on_stop = concat_on_stop
             self._segment_index = 0
@@ -1189,13 +1889,135 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
             self._stopping = False
             self._meter_buf = ""
             self._last_validation = None
+            self._last_video_validation = None
+            self._tried_backends = []
+            self._preflight = preflight
+            self._active_backend = (
+                resolve_windows_backend(options.windows_backend, region).value
+                if is_windows(sys.platform)
+                else None
+            )
             # Surface exactly which audio sources were resolved (and why any are
             # missing) so a silent recording is never a mystery.
             for line in audio_diagnostics(devices, options, sys.platform):
                 log.info(line)
+            # On Windows, prove the grabber actually produces a picture before
+            # committing to it — a black gdigrab/ddagrab is the #177 failure and
+            # is invisible until the recording is over.
+            if preflight and is_windows(sys.platform) and self._active_backend:
+                self._set_state(RecorderState.PREFLIGHT)
+                self._run_preflight(self._active_backend)
+                return
+            self._begin_capture()
+
+        def _begin_capture(self) -> None:
+            """Spawn the real capture and start the elapsed clock."""
             self._spawn_ffmpeg()
             if self._state is RecorderState.RECORDING:
                 self._timer.start()
+
+        # -- pre-flight black-frame probe -------------------------------
+
+        def _run_preflight(self, backend: str) -> None:
+            """Capture ~1 s through ``blackdetect`` with *backend*."""
+            if not self._ffmpeg:
+                self._begin_capture()
+                return
+            self._tried_backends.append(backend)
+            self._probe_stderr = ""
+            options = RecordingOptions(**vars(self._options))
+            options.windows_backend = backend
+            args = build_preflight_args(
+                sys.platform,
+                options,
+                self._region,
+                backend=backend,
+                probe_seconds=self._probe_seconds,
+            )
+            proc = QProcess(self)
+            proc.setProgram(self._ffmpeg)
+            proc.setArguments(args)
+            proc.setProcessChannelMode(QProcess.SeparateChannels)
+            proc.readyReadStandardError.connect(self._on_probe_stderr)
+            proc.finished.connect(self._on_preflight_done)
+            log.info("recorder: pre-flight %s probe: %s", backend, " ".join(args))
+            proc.start()
+            if not proc.waitForStarted(3000):
+                log.warning("recorder: pre-flight probe failed to start")
+                self._probe_proc = None
+                self._begin_capture()
+                return
+            self._probe_proc = proc
+            # Watchdog: a wedged grabber must not hang the start button.
+            QTimer.singleShot(10000, self._kill_stale_probe)
+
+        def _kill_stale_probe(self) -> None:
+            proc = self._probe_proc
+            if proc is None or self._state is not RecorderState.PREFLIGHT:
+                return
+            log.warning("recorder: pre-flight probe timed out; killing it")
+            proc.kill()
+
+        def _on_probe_stderr(self) -> None:
+            proc = self.sender()
+            if proc is None:
+                return
+            try:
+                self._probe_stderr += bytes(proc.readAllStandardError()).decode(
+                    "utf-8", errors="replace"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _on_preflight_done(self, code, _status) -> None:
+            if self._state is not RecorderState.PREFLIGHT:
+                return  # stopped while probing
+            self._probe_proc = None
+            backend = self._tried_backends[-1]
+            result = evaluate_black_probe(
+                self._probe_stderr,
+                backend=backend,
+                probe_seconds=self._probe_seconds,
+                exit_code=code,
+            )
+            if result.ok and not result.is_black:
+                log.info("recorder: %s", result.summary())
+                self._active_backend = backend
+                self._options.windows_backend = backend
+                self.preflight_result.emit(result)
+                self._begin_capture()
+                return
+
+            log.warning("recorder: %s", result.summary())
+            other = self._other_backend(backend)
+            auto = (
+                WindowsCaptureBackend.from_value(self._config_backend())
+                is WindowsCaptureBackend.AUTO
+            )
+            if auto and other is not None and other not in self._tried_backends:
+                log.warning("recorder: falling back to the %s grabber", other)
+                self.backend_changed.emit(other)
+                self._run_preflight(other)
+                return
+            # Both grabbers look bad (or the user pinned one).  Record anyway —
+            # a false positive here must never block the user — but say so.
+            self._active_backend = backend
+            self._options.windows_backend = backend
+            self.preflight_result.emit(result)
+            self._begin_capture()
+
+        def _config_backend(self) -> str:
+            """The backend the user configured, before any fallback."""
+            return self._requested_backend or "auto"
+
+        def _other_backend(self, backend: str) -> Optional[str]:
+            if not self._region or not self._region.dda_targets:
+                return None  # ddagrab cannot address this region at all
+            if backend == WindowsCaptureBackend.DDAGRAB.value:
+                return WindowsCaptureBackend.GDIGRAB.value
+            if backend == WindowsCaptureBackend.GDIGRAB.value:
+                return WindowsCaptureBackend.DDAGRAB.value
+            return None
 
         def pause(self) -> None:
             if self._state is not RecorderState.RECORDING:
@@ -1215,6 +2037,13 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
             """Stop recording, optionally concatenate, return final mp4 path."""
             if self._state in (RecorderState.IDLE, RecorderState.FINALIZING):
                 return None
+            if self._state is RecorderState.PREFLIGHT:
+                # Nothing was captured yet — abandon the probe and go quiet.
+                self._set_state(RecorderState.IDLE)
+                if self._probe_proc is not None:
+                    self._probe_proc.kill()
+                    self._probe_proc = None
+                return None
             self._timer.stop()
             self._stopping = True
             self._set_state(RecorderState.FINALIZING)
@@ -1225,6 +2054,7 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
             # Validate that the produced file actually carries audio; if not,
             # log at ERROR so a silent recording is loud in the logs/UI.
             self._validate_audio(final)
+            self._validate_video(final)
             self._set_state(RecorderState.IDLE)
             self._stopping = False
             return final
@@ -1253,6 +2083,24 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
             else:
                 log.info("recorder: %s", result.summary())
             self.audio_validated.emit(result)
+
+        def _validate_video(self, final: Optional[Path]) -> None:
+            """Probe the final mp4 (or first segment) for an all-black picture."""
+            target = final
+            if target is None:
+                segs = self.segment_paths()
+                target = segs[0] if segs else None
+            if target is None:
+                return
+            result = validate_recording_video(self._ffmpeg, self._ffprobe, target)
+            self._last_video_validation = result
+            if result.error:
+                log.warning("recorder: %s", result.summary())
+            elif result.is_black:
+                log.error("recorder: %s", result.summary())
+            else:
+                log.info("recorder: %s", result.summary())
+            self.video_validated.emit(result)
 
         def segment_paths(self) -> List[Path]:
             if self._output_dir is None:
@@ -1316,7 +2164,13 @@ try:  # Qt is optional for importing the pure helpers (e.g. in unit tests).
                 return
             # Keep only the last ~4 KB so a long-running capture stays bounded.
             self._stderr_tail = (self._stderr_tail + chunk)[-4096:]
-            log.debug("ffmpeg: %s", chunk.rstrip())
+            text = chunk.rstrip()
+            # Grabber complaints are the difference between "black video" and a
+            # diagnosable failure, so they must not hide at DEBUG level.
+            if any(word in text for word in ("gdigrab", "ddagrab", "d3d11")):
+                log.warning("ffmpeg: %s", text)
+            else:
+                log.debug("ffmpeg: %s", text)
 
         def _on_proc_stdout(self) -> None:
             """Parse the metering tap on ffmpeg's stdout → ``audio_level``."""

@@ -870,6 +870,7 @@ class PreviewPanel(QWidget):
     face_clear_thumbnail_requested     = Signal(int)   # person_id
     face_accept_auto_merge             = Signal(int)   # face_id (confirm pending)
     face_move_auto_merge               = Signal(int)   # face_id (re-assign pending)
+    face_reject_auto_merge             = Signal(int)   # face_id (back to Unknown)
     # face_id, is_uncertain (new value), note (new value or "" to leave unchanged)
     face_uncertainty_change_requested  = Signal(int, bool, str)
     object_create_requested            = Signal(int, int, int)  # image_id, x, y
@@ -1329,9 +1330,11 @@ class PreviewPanel(QWidget):
 
         accept_action = None
         move_action = None
+        unknown_action = None
         if is_pending:
             accept_action = menu.addAction(f"✓  {t('amerge_ctx_accept')}")
             move_action   = menu.addAction(f"⤴  {t('amerge_ctx_move')}")
+            unknown_action = menu.addAction(f"❔  {t('amerge_ctx_unknown')}")
             menu.addSeparator()
 
         assign_action = menu.addAction(f"👤  {t('assign_to_person')}")
@@ -1363,6 +1366,8 @@ class PreviewPanel(QWidget):
             self.face_accept_auto_merge.emit(face_id)
         elif move_action is not None and chosen == move_action:
             self.face_move_auto_merge.emit(face_id)
+        elif unknown_action is not None and chosen == unknown_action:
+            self.face_reject_auto_merge.emit(face_id)
         elif chosen == assign_action:
             self.face_assign_requested.emit(face_id)
         elif chosen == edit_action:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 
 def pytest_configure(config) -> None:  # noqa: ANN001
     """Prepare Qt before pytest-qt creates the QApplication."""
@@ -38,3 +40,18 @@ def _disable_blocking_message_boxes() -> None:
     ok = QMessageBox.StandardButton.Ok
     for _name in ("warning", "information", "critical", "question", "about"):
         setattr(QMessageBox, _name, staticmethod(lambda *a, _r=ok, **k: _r))
+
+
+@pytest.fixture(autouse=True)
+def _reset_deoldified_index():
+    """Keep the process-wide pairing index from leaking between tests.
+
+    The index is a module-level singleton rebuilt lazily from whichever database
+    is active. Tests that swap databases without going through ``init_db`` would
+    otherwise see another test's rows.
+    """
+    from app.services.deoldified_pairing_service import invalidate_deoldified_index
+
+    invalidate_deoldified_index()
+    yield
+    invalidate_deoldified_index()

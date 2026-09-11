@@ -1622,6 +1622,8 @@ class ImageBrowserPanel(QWidget):
     # Emitted when the user asks to look for an object on other images:
     # (object_id, scope) where scope is "library" or "folder".
     object_search_requested = Signal(int, str)
+    # Emitted from the black-and-white / colorized bar to open the pairing settings
+    pairing_settings_requested = Signal()
 
     def __init__(self, config=None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1702,6 +1704,8 @@ class ImageBrowserPanel(QWidget):
         self._deol_pair_orig_id: Optional[int] = None  # original image ID when current is deoldified
         self._deol_pair_partner_id: Optional[int] = None  # the paired image's ID (either direction)
         self._deol_pair_color_path: str = ""           # path to colorized variant
+        self._deol_bw_path: str = ""                   # path to the B&W original (view only)
+        self._deol_pairing_enabled: bool = False       # data sharing allowed for this image
         self._deol_viewing_color: bool = False         # True = showing colorized pixels
         self._deol_compare: bool = False               # True = compare divider active now
         self._deol_mode: Optional[str] = None          # remembered choice: 'bw'|'color'|'compare'
@@ -1714,8 +1718,6 @@ class ImageBrowserPanel(QWidget):
         self._deol_right_idx: int = 1                  # group index shown on the right (1st colorized)
         self._deol_left_bgr: Optional[np.ndarray] = None   # cached left-side pixels for compare
         self._deol_right_bgr: Optional[np.ndarray] = None  # cached right-side pixels (resized to left)
-        self._deol_colorized_variants: list = []           # ColorizedVariant members from _deol_group
-        self._deol_variant_idx: int = 0                    # selected variant index in single colorized view
 
         self._build_ui()
         self._setup_shortcuts()
@@ -2032,18 +2034,15 @@ class ImageBrowserPanel(QWidget):
         self._deol_right_combo = QComboBox()
         self._deol_right_combo.currentIndexChanged.connect(self._on_deol_right_changed)
         _deol_row.addWidget(self._deol_right_combo)
-        # Variant type selector (for single colorized view)
-        self._deol_variant_lbl = QLabel()
-        self._deol_variant_lbl.setStyleSheet("color: #888; font-size: 11px;")
-        _deol_row.addWidget(self._deol_variant_lbl)
-        self._deol_variant_combo = QComboBox()
-        self._deol_variant_combo.currentIndexChanged.connect(self._on_deol_variant_changed)
-        _deol_row.addWidget(self._deol_variant_combo)
         _deol_row.addStretch()
         self._btn_deol_sync = QPushButton()
         self._btn_deol_sync.setStyleSheet(_nav_style)
         self._btn_deol_sync.clicked.connect(self._on_deol_sync_clicked)
         _deol_row.addWidget(self._btn_deol_sync)
+        self._btn_deol_settings = QPushButton("⚙")
+        self._btn_deol_settings.setStyleSheet(_nav_style)
+        self._btn_deol_settings.clicked.connect(self.pairing_settings_requested.emit)
+        _deol_row.addWidget(self._btn_deol_settings)
         self._deoldified_bar.setVisible(False)
         im_layout.addWidget(self._deoldified_bar)
 
@@ -2435,16 +2434,25 @@ class ImageBrowserPanel(QWidget):
         self._btn_view_compare.setToolTip(t("ibp_view_compare_tip"))
         self._deol_left_lbl.setText(t("ibp_deol_left"))
         self._deol_right_lbl.setText(t("ibp_deol_right"))
-        self._deol_variant_lbl.setText(t("ibp_deol_variant_type"))
         if self._deol_group:
             self._populate_deol_combos()  # refresh translated member labels
-            self._populate_variant_combo()  # refresh variant labels
         self._btn_deol_sync.setText(t("ibp_deol_sync"))
         self._btn_deol_sync.setToolTip(t("ibp_deol_sync_tip"))
+        self._btn_deol_settings.setToolTip(t("ibp_deol_settings_tip"))
+
+    def reload_current_image(self) -> None:
+        """Re-apply settings-dependent state to the image already on screen."""
+        if self._current_image_id is not None:
+            self._load_image(self._current_image_id)
 
     def refresh(self) -> None:
         """Reload folder list from DB; keep the selected folder expanded if still present."""
         log.debug("ImageBrowserPanel.refresh() — reloading folder tree")
+        # New or re-pointed rows may have created (or broken) pairs
+        from app.services.deoldified_pairing_service import (
+            invalidate_deoldified_index,
+        )
+        invalidate_deoldified_index()
         self._reload_persons_combo()
         self._reload_places()
         prev_folder = self._current_folder
@@ -2563,11 +2571,15 @@ class ImageBrowserPanel(QWidget):
         A group is the B&W original plus every colorized variant that shares its
         filename (folder-independent).  Two members behave exactly like the old
         single pair; three or more enable the left/right pickers in compare mode.
+
+        The bar itself is shown whenever a group exists, so a colorized pair is
+        never invisible.  The 'deoldified/auto_pair' setting only decides
+        whether the two sides *share data* — annotations written here landing on
+        the B&W original, and the sync button that copies missing fields over.
         """
         from app.app_settings import app_qsettings
         settings = app_qsettings()
-        if not settings.value("deoldified/auto_pair", False, type=bool):
-            return
+        pairing_enabled = settings.value("deoldified/auto_pair", False, type=bool)
 
         from app.services.deoldified_pairing_service import (
             DeoldifiedPairingService,
@@ -2583,7 +2595,9 @@ class ImageBrowserPanel(QWidget):
             return
 
         self._deol_group = group
+        self._deol_pairing_enabled = pairing_enabled
         bw_member = group[0]  # is_bw=True by construction
+        self._deol_bw_path = bw_member.file_path
         current_is_color = is_deoldified_path(image_path)
         self._deol_opened_is_color = current_is_color
 
@@ -2597,7 +2611,9 @@ class ImageBrowserPanel(QWidget):
                 if m.image_id == image_id and not m.is_bw:
                     self._deol_right_idx = i
                     break
-            self._deol_pair_orig_id = bw_member.image_id
+            # Only redirect annotation writes onto the original when the two
+            # sides are actually meant to share data.
+            self._deol_pair_orig_id = bw_member.image_id if pairing_enabled else None
             self._deol_viewing_color = True
             self._btn_view_bw.setChecked(False)
             self._btn_view_color.setChecked(True)
@@ -2610,16 +2626,15 @@ class ImageBrowserPanel(QWidget):
         self._deol_pair_color_path = group[self._deol_right_idx].file_path
         self._update_deol_sync_partner(image_id)
         self._populate_deol_combos()
-        self._populate_variant_combo()
-        self._sync_variant_index_to_right_idx()
+        self._btn_deol_sync.setVisible(pairing_enabled)
         self._deoldified_bar.setVisible(True)
         log.debug(
-            "Comparison group of %d image(s): %s",
-            len(group), [m.label or "bw" for m in group],
+            "Comparison group of %d image(s): %s (data sharing: %s)",
+            len(group), [m.label or "bw" for m in group], pairing_enabled,
         )
 
         # Auto-sync annotations from the filled side into the empty side.
-        if settings.value("deoldified/auto_sync", True, type=bool):
+        if pairing_enabled and settings.value("deoldified/auto_sync", True, type=bool):
             self._run_deoldified_sync(image_id, announce=False)
 
     def _update_deol_sync_partner(self, image_id: int) -> None:
@@ -2628,7 +2643,7 @@ class ImageBrowserPanel(QWidget):
         When the tree image is the B&W original, the partner is the selected
         colorized variant; when it is colorized, the partner is the original.
         """
-        if not self._deol_group:
+        if not self._deol_group or not self._deol_pairing_enabled:
             self._deol_pair_partner_id = None
             return
         if self._deol_pair_orig_id is not None:
@@ -2643,61 +2658,6 @@ class ImageBrowserPanel(QWidget):
         if member.label and member.label != "deoldified":
             return f"{t('ibp_view_colorized')} {member.label}"
         return t("ibp_view_colorized")
-
-
-    def _deol_variant_text(self, member) -> str:
-        """Text representation for a colorized variant in the variant selector."""
-        if member.label and member.label != "deoldified":
-            return member.label
-        return "deoldified"
-
-    def _populate_variant_combo(self) -> None:
-        """Fill the variant selector with colorized variants from the current group."""
-        self._deol_colorized_variants = [m for m in self._deol_group if not m.is_bw]
-
-        self._deol_variant_combo.blockSignals(True)
-        self._deol_variant_combo.clear()
-        for m in self._deol_colorized_variants:
-            self._deol_variant_combo.addItem(self._deol_variant_text(m))
-
-        # Set index to the currently displayed variant
-        if 0 <= self._deol_variant_idx < len(self._deol_colorized_variants):
-            self._deol_variant_combo.setCurrentIndex(self._deol_variant_idx)
-
-        self._deol_variant_combo.blockSignals(False)
-        self._deol_update_combo_visibility()
-
-    def _sync_variant_index_to_right_idx(self) -> None:
-        """Sync the variant index to match the current _deol_right_idx selection.
-
-        When a new image is loaded, _deol_right_idx points to the active colorized variant
-        in the comparison group. This method maps that to the variant index in the
-        single-view variant selector, ensuring they stay in sync.
-        """
-
-        log.info("[DEBUG] self._deol_colorized_variants: %s self._deol_group: %s", self._deol_colorized_variants, self._deol_group)
-        if not self._deol_colorized_variants or not self._deol_group:
-            log.info("[DEBUG] 2653 self._deol_variant_idx = 0")
-            self._deol_variant_idx = 0
-            return
-
-        # Find which variant corresponds to the current _deol_right_idx
-        right_member = self._deol_group[self._deol_right_idx]
-        try:
-            # Find this member in the colorized variants list
-            log.info("[DEBUG] 2661 self._deol_colorized_variants.index(%s): %s", right_member, self._deol_colorized_variants.index(right_member))
-            self._deol_variant_idx = self._deol_colorized_variants.index(right_member)
-        except ValueError:
-            # Fallback to first variant if not found
-            log.info("[DEBUG] 2665 self._deol_variant_idx = 0")
-            self._deol_variant_idx = 0
-
-        # Update the combo box to reflect this index
-        if 0 <= self._deol_variant_idx < self._deol_variant_combo.count():
-            log.info("[DEBUG] 2670 Update the combo box to reflect this index")
-            self._deol_variant_combo.blockSignals(True)
-            self._deol_variant_combo.setCurrentIndex(self._deol_variant_idx)
-            self._deol_variant_combo.blockSignals(False)
 
     def _populate_deol_combos(self) -> None:
         """Fill the left/right pickers from the current group (signals blocked)."""
@@ -2715,22 +2675,13 @@ class ImageBrowserPanel(QWidget):
         self._deol_update_combo_visibility()
 
     def _deol_update_combo_visibility(self) -> None:
-        """Show the left/right pickers only in compare mode with 3+ members.
-        Show the variant selector in single colorized view when multiple variants exist."""
-        show_compare = self._deol_compare and len(self._deol_group) >= 3
+        """Show the left/right pickers only in compare mode with 3+ members."""
+        show = self._deol_compare and len(self._deol_group) >= 3
         for w in (
             self._deol_left_lbl, self._deol_left_combo,
             self._deol_right_lbl, self._deol_right_combo,
         ):
-            w.setVisible(show_compare)
-        
-        # Show variant selector in single colorized view with 2+ variants
-        show_variant = (
-            not self._deol_compare and self._deol_viewing_color 
-            and len(self._deol_colorized_variants) >= 2
-        )
-        self._deol_variant_lbl.setVisible(show_variant)
-        self._deol_variant_combo.setVisible(show_variant)
+            w.setVisible(show)
 
     def _on_deol_left_changed(self, idx: int) -> None:
         """Left picker changed → reload both cached sides and recompose."""
@@ -2752,20 +2703,7 @@ class ImageBrowserPanel(QWidget):
         if not member.is_bw:
             self._deol_pair_color_path = member.file_path
         self._update_deol_sync_partner(self._current_image_id)
-        # Sync the variant selector to match the selected variant
-        self._sync_variant_index_to_right_idx()
         self._deol_recompose_compare()
-
-    def _on_deol_variant_changed(self, idx: int) -> None:
-        """Variant selector changed in single colorized view → load and display the new variant."""
-        if idx < 0 or idx >= len(self._deol_colorized_variants) or idx == self._deol_variant_idx:
-            return
-        self._deol_variant_idx = idx
-        member = self._deol_colorized_variants[idx]
-        self._deol_pair_color_path = member.file_path
-        self._update_deol_sync_partner(self._current_image_id)
-        # Reload the colorized image with the new variant
-        self._apply_single_view(show_colorized=True, reset_zoom=False)
 
     def _deol_recompose_compare(self) -> None:
         """Re-render the compare composite after a picker change."""
@@ -2781,32 +2719,20 @@ class ImageBrowserPanel(QWidget):
     def _on_deol_view_toggle(self, show_colorized: bool) -> None:
         """User picked the single B&W or colorized view (remembered choice)."""
         self._deol_mode = "color" if show_colorized else "bw"
-        if show_colorized and self._deol_colorized_variants:
-            # Reset to the first variant when switching to colorized view
-            log.info("[DEBUG] 2759 Reset to the first variant when switching to colorized view")
-            self._deol_variant_idx = 0
-            self._deol_pair_color_path = self._deol_colorized_variants[0].file_path
         self._apply_single_view(show_colorized, reset_zoom=True)
 
     def _apply_single_view(
         self, show_colorized: bool, *, reset_zoom: bool
     ) -> None:
         """Display one side of the pair, with the compare divider off."""
-        from app.services.image_library_service import resolve_image_path
         from app.utils.image_utils import load_image_bgr_normalized as load_image_bgr
 
+        # The group already carries resolved, on-disk paths, so switching sides
+        # never touches the database.
         if show_colorized:
             path = self._deol_pair_color_path
-        elif self._deol_pair_orig_id is not None:
-            # Current image in the tree is the deoldified one; load original pixels
-            with session_scope() as session:
-                orig = session.get(Image, self._deol_pair_orig_id)
-                if orig is None:
-                    return
-                resolved = resolve_image_path(orig)
-                path = str(resolved) if resolved else orig.file_path
         else:
-            path = self._current_path  # current IS the original
+            path = self._deol_bw_path or self._current_path
 
         img_bgr = load_image_bgr(path)
         if img_bgr is None:
@@ -2814,16 +2740,7 @@ class ImageBrowserPanel(QWidget):
             if show_colorized:
                 # Colorized variant file is gone — degrade to the B&W side
                 # instead of leaving the panel frozen on the previous view.
-                if self._deol_pair_orig_id is not None:
-                    with session_scope() as session:
-                        orig = session.get(Image, self._deol_pair_orig_id)
-                        resolved = resolve_image_path(orig) if orig else None
-                        bw_path = (
-                            str(resolved) if resolved
-                            else (orig.file_path if orig else None)
-                        )
-                else:
-                    bw_path = self._current_path
+                bw_path = self._deol_bw_path or self._current_path
                 bw_bgr = load_image_bgr(bw_path) if bw_path else None
                 if bw_bgr is not None:
                     self._deol_mode = "bw"
@@ -2838,13 +2755,13 @@ class ImageBrowserPanel(QWidget):
         self._deol_compare = False
         self._image_label.set_compare_mode(False)
         self._btn_view_compare.setChecked(False)
+        self._deol_update_combo_visibility()
         self._deol_viewing_color = show_colorized
         self._btn_view_bw.setChecked(not show_colorized)
         self._btn_view_color.setChecked(show_colorized)
         self._orig_img_bgr = img_bgr
         if reset_zoom:
             self._reset_zoom()
-        self._deol_update_combo_visibility()  # Update variant selector visibility
         self._redraw_faces()
 
     def _deol_ensure_compare_bgr(self) -> bool:
@@ -3920,6 +3837,8 @@ class ImageBrowserPanel(QWidget):
         self._deol_pair_orig_id = None
         self._deol_pair_partner_id = None
         self._deol_pair_color_path = ""
+        self._deol_bw_path = ""
+        self._deol_pairing_enabled = False
         self._deol_viewing_color = False
         self._deol_clear_for_new_image()
         self._deoldified_bar.setVisible(False)
@@ -4183,6 +4102,8 @@ class ImageBrowserPanel(QWidget):
         self._full_pixmap = None
         self._deol_pair_orig_id = None
         self._deol_pair_color_path = ""
+        self._deol_bw_path = ""
+        self._deol_pairing_enabled = False
         self._deol_viewing_color = False
         self._deol_clear_for_new_image()
         self._deoldified_bar.setVisible(False)

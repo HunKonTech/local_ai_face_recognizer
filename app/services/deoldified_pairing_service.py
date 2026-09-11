@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
@@ -247,16 +248,36 @@ class DeoldifiedPairingService:
         group exists (no original found, or an original with no colorized
         variants), so callers can fall back to single-image behaviour.
         """
+        from app.db.models import Image
         from app.services.image_library_service import resolve_image_path
 
-        if is_deoldified_path(image.file_path):
-            original = self.find_original_for_deoldified(image)
+        index = get_deoldified_index()
+        index.ensure_built(self._session)
+
+        stem = Path(_basename(image.file_path or image.relative_path or "")).stem
+        is_colorized = is_deoldified_path(image.file_path)
+        key = (extract_original_stem(stem) or "") if is_colorized else stem
+        # Fast exit for the common case: no colorized sibling anywhere in the
+        # library.  Costs one dict lookup — no SQL, no filesystem access.
+        if not key or not index.has_group(key):
+            return []
+
+        if is_colorized:
+            original_id = index.original_id(self, image, key)
+            if original_id is None:
+                return []
+            original = self._session.get(Image, original_id)
             if original is None:
                 return []
         else:
             original = image
 
-        variants = self.find_all_deoldified_for_original(original)
+        variants = [
+            v for v in (
+                self._session.get(Image, vid) for vid in index.variant_ids(key)
+            )
+            if v is not None and v.id != original.id
+        ]
         if not variants:
             return []
 
@@ -617,3 +638,112 @@ class DeoldifiedPairingService:
                 setattr(target, field, src_val)
                 copied.append(field)
         return copied
+
+
+class DeoldifiedIndex:
+    """In-memory map: black-and-white stem → colorized variant image ids.
+
+    The view switcher above the image is offered for every opened picture, so
+    the "does this photo have a colorized sibling?" question is asked
+    constantly.  Answering it with a ``LIKE '%…%'`` scan per open would make
+    browsing a large library crawl, so the whole set of '-deoldified' rows is
+    read once per library load and kept here.  After that a lookup is a dict
+    hit: the overwhelming majority of images have no sibling and cost no SQL
+    at all.
+    """
+
+    def __init__(self) -> None:
+        self._by_stem: dict[str, List[int]] = {}
+        self._original_ids: dict[str, Optional[int]] = {}
+        self._built = False
+        self._lock = threading.Lock()
+
+    def invalidate(self) -> None:
+        """Drop the index; it is rebuilt lazily on the next lookup."""
+        with self._lock:
+            self._by_stem = {}
+            self._original_ids = {}
+            self._built = False
+
+    def ensure_built(self, session: "Session") -> None:
+        """Build the index once. The lock is only taken while it is missing."""
+        if self._built:
+            return
+        with self._lock:
+            if not self._built:
+                self._build_locked(session)
+
+    def _build_locked(self, session: "Session") -> None:
+        import sqlalchemy as sa
+
+        from app.db.models import Image
+
+        rows = (
+            session.query(Image.id, Image.file_path, Image.relative_path)
+            .filter(
+                sa.or_(
+                    sa.func.lower(Image.file_path).like("%-deoldified%"),
+                    sa.func.lower(Image.relative_path).like("%-deoldified%"),
+                )
+            )
+            .all()
+        )
+        by_stem: dict[str, List[int]] = {}
+        labels: dict[int, str] = {}
+        for row in rows:
+            stem = Path(_basename(row.file_path or row.relative_path or "")).stem
+            original_stem = extract_original_stem(stem)
+            if not original_stem:
+                continue
+            by_stem.setdefault(original_stem.lower(), []).append(row.id)
+            labels[row.id] = extract_variant_label(stem)
+        # Sort once here so opening an image never has to.
+        for ids in by_stem.values():
+            ids.sort(key=lambda i: labels.get(i, ""))
+        self._by_stem = by_stem
+        self._original_ids = {}
+        self._built = True
+        log.debug(
+            "Deoldified index built from %d row(s): %d original stem(s)",
+            len(rows), len(by_stem),
+        )
+
+    def has_group(self, stem: str) -> bool:
+        """True when *stem* (a B&W original stem) has colorized siblings."""
+        return bool(self._by_stem.get(stem.lower()))
+
+    def variant_ids(self, stem: str) -> List[int]:
+        """Colorized image ids for *stem*, in variant-label order."""
+        return list(self._by_stem.get(stem.lower(), ()))
+
+    def original_id(
+        self,
+        service: "DeoldifiedPairingService",
+        image: "Image",
+        stem: str,
+    ) -> Optional[int]:
+        """Id of the B&W original for a colorized *image*, memoised per stem.
+
+        This is the one query that can still fire on open, and only for images
+        that are themselves colorized variants of a known group.
+        """
+        key = stem.lower()
+        if key in self._original_ids:
+            return self._original_ids[key]
+        original = service.find_original_for_deoldified(image)
+        original_id = original.id if original is not None else None
+        self._original_ids[key] = original_id
+        return original_id
+
+
+_index = DeoldifiedIndex()
+
+
+def get_deoldified_index() -> DeoldifiedIndex:
+    """Return the process-wide pairing index."""
+    return _index
+
+
+def invalidate_deoldified_index() -> None:
+    """Forget the cached pairing index (database switch, scan, import)."""
+    _index.invalidate()

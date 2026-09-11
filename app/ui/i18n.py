@@ -115,6 +115,8 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "rec_stop_tip":       {"en": "Stop & save recording",
                            "hu": "Rögzítés leállítása és mentése"},
     "rec_state_idle":         {"en": "Not recording", "hu": "Nincs felvétel"},
+    "rec_state_preflight":    {"en": "Checking capture…",
+                               "hu": "Rögzítés ellenőrzése…"},
     "rec_state_recording":    {"en": "Recording ●", "hu": "Rögzítés ●"},
     "rec_state_paused":       {"en": "Paused", "hu": "Szüneteltetve"},
     "rec_state_finalizing":   {"en": "Saving…", "hu": "Mentés…"},
@@ -1921,6 +1923,8 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "amerge_create_title":    {"en": "Create new person", "hu": "Új személy létrehozása"},
     "amerge_create_prompt":   {"en": "Name for the new person:", "hu": "Az új személy neve:"},
     "amerge_delete":          {"en": "Delete face", "hu": "Arc törlése"},
+    "amerge_to_unknown":      {"en": "Move back to Unknown",
+                               "hu": "Ismeretlenné tétel"},
     "amerge_pending_badge":   {"en": "Auto-merged — needs review",
                                "hu": "Automatikus összevonás — ellenőrizendő"},
     "amerge_notice_title":    {"en": "Faces moved for review",
@@ -1948,6 +1952,8 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "amerge_close":           {"en": "Close", "hu": "Bezárás"},
     "amerge_ctx_accept":      {"en": "Accept auto-merge", "hu": "Összevonás elfogadása"},
     "amerge_ctx_move":        {"en": "Move auto-merged face…", "hu": "Összevont arc áthelyezése…"},
+    "amerge_ctx_unknown":     {"en": "Move back to Unknown",
+                               "hu": "Ismeretlenné tétel"},
     # Review-dialog detail modal + decision graph
     "amerge_open_full":       {"en": "Click to view the full image and details",
                                "hu": "Kattints a teljes kép és a részletek megtekintéséhez"},
@@ -2512,16 +2518,26 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                        "cache-elődnek; a saját beírt címek offline is működnek."},
     "deoldified_group":         {"en": "Deoldified / Colorized Pairing",
                                  "hu": "Deoldified / Színezett képpárosítás"},
-    "deoldified_toggle":        {"en": "Automatically pair deoldified (colorized) images",
-                                 "hu": "Deoldified képek automatikus párosítása"},
-    "deoldified_toggle_tip":    {"en": "When enabled, images containing '-deoldified' in their "
-                                       "filename are automatically paired with their original "
-                                       "black-and-white counterpart. Face data from the original "
-                                       "is shown on both versions.",
-                                 "hu": "Ha be van kapcsolva, a '-deoldified' szót tartalmazó "
-                                       "képek automatikusan párosítódnak az eredeti "
-                                       "fekete-fehér képpel. Az arcadatok az eredetiről "
-                                       "mindkét változaton megjelennek."},
+    "deoldified_toggle":        {"en": "Share data between paired images "
+                                       "(faces, image data, object tags)",
+                                 "hu": "Adatok megosztása a párosított képek közt "
+                                       "(arcok, képadatok, objektumjelölések)"},
+    "deoldified_toggle_tip":    {"en": "When enabled, an image containing '-deoldified' in its "
+                                       "filename shares its annotations with the original "
+                                       "black-and-white photo: face data from the original is "
+                                       "shown on both versions, and object tags are kept on the "
+                                       "original so the photo is counted once.",
+                                 "hu": "Ha be van kapcsolva, a '-deoldified' szót tartalmazó kép "
+                                       "megosztja a jelöléseit az eredeti fekete-fehér képpel: "
+                                       "az arcadatok az eredetiről mindkét változaton "
+                                       "megjelennek, az objektumjelölések pedig az eredetin "
+                                       "maradnak, így a fénykép egyszer számít."},
+    "deoldified_view_always":   {"en": "The black-and-white / colorized view switcher always "
+                                       "appears above the image when a pair exists; it does not "
+                                       "depend on this option.",
+                                 "hu": "A fekete-fehér / színezett nézetváltó mindig megjelenik "
+                                       "a kép felett, ha van párja; ez a beállítás nem "
+                                       "befolyásolja."},
     "deoldified_sync_toggle":   {"en": "Automatically copy data between paired images",
                                  "hu": "Adatok automatikus átvétele a párképek közt"},
     "deoldified_sync_toggle_tip": {"en": "When a deoldified pair is opened, copy whatever the "
@@ -2559,6 +2575,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                  "hu": "Nincs átmásolható új adat: a pár már szinkronban van."},
     "ibp_deol_sync_no_pair":    {"en": "No paired image found for the current image.",
                                  "hu": "Nincs párkép a jelenlegi képhez."},
+    "ibp_deol_settings_tip":    {"en": "Pairing settings — decide whether the two versions share "
+                                       "faces, image data and object tags.",
+                                 "hu": "Párosítási beállítások — itt döntheted el, hogy a két "
+                                       "változat megosztja-e az arcokat, a képadatokat és az "
+                                       "objektumjelöléseket."},
 
     # ── Image library ─────────────────────────────────────────────────────
     "ibp_deol_variant_type":    {"en": "Type:",                  "hu": "Típus:"},
@@ -3473,6 +3494,50 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                "hu": "(nem észlelhető monitor)"},
     "rec_set_auto_fps":       {"en": "Reduce frame rate for multi-monitor capture",
                                "hu": "Képkockaszám csökkentése többmonitoros rögzítésnél"},
+    "rec_set_backend":        {"en": "Windows capture mode:",
+                               "hu": "Windows rögzítési mód:"},
+    "rec_set_backend_auto":   {"en": "Automatic (recommended)",
+                               "hu": "Automatikus (ajánlott)"},
+    "rec_set_backend_ddagrab": {"en": "Desktop Duplication (ddagrab)",
+                                "hu": "Asztalmásolás (ddagrab)"},
+    "rec_set_backend_gdigrab": {"en": "Legacy GDI (gdigrab)",
+                                "hu": "Régi GDI (gdigrab)"},
+    "rec_set_backend_tip": {
+        "en": "GDI capture can record an all-black video on hybrid-GPU, HDR or "
+              "hardware-accelerated displays. Desktop Duplication records the "
+              "composited desktop instead. Automatic tests both and keeps the "
+              "one that produces a picture.",
+        "hu": "A GDI rögzítés teljesen fekete videót adhat hibrid GPU-s, HDR "
+              "vagy hardveresen gyorsított kijelzőkön. Az asztalmásolás a "
+              "kompozitált asztalt rögzíti. Az automatikus mód mindkettőt "
+              "leteszteli, és azt tartja meg, amelyik képet ad.",
+    },
+    "rec_set_preflight":      {"en": "Check for a black screen before recording",
+                               "hu": "Fekete képernyő ellenőrzése rögzítés előtt"},
+    "rec_set_test_capture":   {"en": "Test capture", "hu": "Rögzítés tesztelése"},
+    "rec_test_running":       {"en": "Testing…", "hu": "Tesztelés…"},
+    "rec_test_ok":            {"en": "Capture OK ({backend})",
+                               "hu": "A rögzítés rendben ({backend})"},
+    "rec_test_black":         {"en": "The captured image is BLACK ({backend})",
+                               "hu": "A rögzített kép FEKETE ({backend})"},
+    "rec_test_failed":        {"en": "Test failed: {error}",
+                               "hu": "A teszt sikertelen: {error}"},
+    "rec_backend_switched": {
+        "en": "Switched to {backend} — the other capture mode produced a black "
+              "image.",
+        "hu": "Átváltás erre: {backend} — a másik rögzítési mód fekete képet "
+              "adott.",
+    },
+    "rec_black_video_title":  {"en": "Black recording", "hu": "Fekete felvétel"},
+    "rec_black_video_body": {
+        "en": "The recording was saved to {path}, but its video track is "
+              "completely black. Open Settings → Recording, switch the Windows "
+              "capture mode, and use \"Test capture\" before recording again.",
+        "hu": "A felvétel elmentve ide: {path}, de a videósáv teljesen fekete. "
+              "Nyisd meg a Beállítások → Rögzítés lapot, válts Windows "
+              "rögzítési módot, és használd a „Rögzítés tesztelése” gombot, "
+              "mielőtt újra felveszel.",
+    },
 
     "gdrive_account_group":   {"en": "Google account", "hu": "Google fiók"},
     "gdrive_account_none":    {"en": "(no account signed in)",

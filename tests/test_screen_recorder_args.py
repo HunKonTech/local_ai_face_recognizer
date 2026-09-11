@@ -567,3 +567,194 @@ def test_format_display_label() -> None:
     assert format_display_label(displays[1], 2, "monitor", "(primary)") == (
         "2. monitor LG — 1920x1080"
     )
+
+
+# ---------------------------------------------------------------------------
+# Windows capture backends (#177 — gdigrab records a black picture on many
+# hardware-accelerated / hybrid-GPU / HDR desktops)
+# ---------------------------------------------------------------------------
+
+def _win_displays():
+    """Two monitors with known DXGI outputs, in physical pixels."""
+    return [
+        RecordingDisplayInfo(
+            id=r"\\.\DISPLAY1", name="Dell", width=2560, height=1440,
+            is_primary=True, x=0, y=0,
+            physical_x=0, physical_y=0, physical_width=2560, physical_height=1440,
+            dxgi_adapter_index=0, dxgi_output_index=0,
+        ),
+        RecordingDisplayInfo(
+            id=r"\\.\DISPLAY2", name="LG", width=1280, height=720,
+            x=2560, y=0,
+            physical_x=2560, physical_y=0, physical_width=1920, physical_height=1080,
+            dxgi_adapter_index=0, dxgi_output_index=1,
+        ),
+    ]
+
+
+def _win_region(mode, selected=(), window=None):
+    from app.services.screen_recorder_service import resolve_capture_region
+
+    return resolve_capture_region(
+        mode, _win_displays(), list(selected), window, "win32"
+    )
+
+
+def test_resolve_region_uses_physical_pixels_on_windows() -> None:
+    """A DPI-scaled monitor must contribute its physical size, not Qt's."""
+    region = _win_region(RecordingDisplayMode.ALL_DISPLAYS)
+    # The logical widths would have given 2560 + 1280 = 3840.
+    assert (region.width, region.height) == (4480, 1440)
+    assert [t.output_idx for t in region.dda_targets] == [0, 1]
+    assert region.dda_targets[1].canvas_x == 2560
+
+
+def test_windows_ddagrab_single_monitor_graph() -> None:
+    region = _win_region(
+        RecordingDisplayMode.SELECTED_DISPLAYS, [r"\\.\DISPLAY2"]
+    )
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone=None, system_audio=None),
+        RecordingOptions(fps=18, windows_backend="ddagrab"),
+        r"C:\out\seg_%05d.mp4",
+        region,
+    )
+    assert "gdigrab" not in args
+    assert args[args.index("-init_hw_device") + 1] == "d3d11va:0"
+    # ddagrab is a source filter, so scaling moves into the graph and the
+    # encoder maps a label instead of an input stream.
+    assert "-vf" not in args
+    assert args[args.index("-map") + 1] == "[vout]"
+    graph = args[args.index("-filter_complex") + 1]
+    assert graph.startswith("ddagrab=output_idx=1:framerate=18")
+    assert "allow_fallback=1" in graph      # survives an HDR desktop
+    assert "hwdownload,format=bgra|x2bgr10,format=bgra" in graph
+    assert graph.endswith("scale=-2:720[vout]")
+
+
+def test_windows_ddagrab_audio_inputs_start_at_zero() -> None:
+    region = _win_region(
+        RecordingDisplayMode.SELECTED_DISPLAYS, [r"\\.\DISPLAY1"]
+    )
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone="Mic", system_audio="Stereo Mix"),
+        RecordingOptions(windows_backend="ddagrab"),
+        r"C:\out\seg_%05d.mp4",
+        region,
+    )
+    graph = args[args.index("-filter_complex") + 1]
+    # With no video input the first dshow device is input 0.
+    assert "[0:a]" in graph and "[1:a]" in graph
+    assert "amix=inputs=2" in graph
+    assert "[aout]" in args
+
+
+def test_windows_ddagrab_active_window_crops_within_the_monitor() -> None:
+    region = _win_region(
+        RecordingDisplayMode.ACTIVE_WINDOW, window=(2660, 100, 1280, 720)
+    )
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone=None, system_audio=None),
+        RecordingOptions(windows_backend="ddagrab"),
+        r"C:\out\seg_%05d.mp4",
+        region,
+    )
+    graph = args[args.index("-filter_complex") + 1]
+    assert "output_idx=1" in graph
+    # Offsets are relative to that monitor's own top-left corner.
+    assert "offset_x=100:offset_y=100:video_size=1280x720" in graph
+
+
+def test_windows_ddagrab_composites_multiple_monitors() -> None:
+    region = _win_region(RecordingDisplayMode.ALL_DISPLAYS)
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone=None, system_audio=None),
+        RecordingOptions(fps=15, windows_backend="ddagrab"),
+        r"C:\out\seg_%05d.mp4",
+        region,
+    )
+    graph = args[args.index("-filter_complex") + 1]
+    # The first monitor is padded out to the canvas and the rest overlaid onto
+    # it, so the graph stays driven by real capture timing.
+    assert "pad=4480:1440:0:0:color=black[dda_base]" in graph
+    assert "[dda_base][dda0]overlay=x=2560:y=0" in graph
+    assert graph.count("ddagrab=") == 2
+    assert graph.endswith("scale=-2:720[vout]")
+
+
+def test_windows_gdigrab_stays_on_its_old_argument_shape() -> None:
+    """Pinning gdigrab must not drag any ddagrab machinery in."""
+    region = _win_region(RecordingDisplayMode.ALL_DISPLAYS)
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone="Mic", system_audio=None),
+        RecordingOptions(windows_backend="gdigrab"),
+        r"C:\out\seg_%05d.mp4",
+        region,
+    )
+    assert "gdigrab" in args
+    assert "-init_hw_device" not in args
+    assert args[args.index("-vf") + 1] == "scale=-2:720"
+    assert args[args.index("-map") + 1] == "0:v"
+    assert args[args.index("-video_size") + 1] == "4480x1440"
+    # The mic is still input 1, behind the desktop video input.
+    assert args[args.index("-filter_complex") + 1].startswith("[1:a]")
+
+
+def test_windows_auto_prefers_ddagrab_when_outputs_are_known() -> None:
+    region = _win_region(RecordingDisplayMode.ALL_DISPLAYS)
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone=None, system_audio=None),
+        RecordingOptions(windows_backend="auto"),
+        r"C:\out\seg_%05d.mp4",
+        region,
+    )
+    assert "-init_hw_device" in args
+
+
+def test_windows_falls_back_to_gdigrab_without_a_dxgi_index() -> None:
+    from app.services.screen_recorder_service import resolve_capture_region
+
+    displays = _win_displays()
+    displays[1].dxgi_output_index = None   # e.g. an RDP session, or no D3D
+    region = resolve_capture_region(
+        RecordingDisplayMode.ALL_DISPLAYS, displays, [], None, "win32"
+    )
+    assert region.dda_targets == []
+    for backend in ("auto", "ddagrab"):
+        args = build_ffmpeg_args(
+            "win32",
+            CaptureDevices(screen="desktop", microphone=None, system_audio=None),
+            RecordingOptions(windows_backend=backend),
+            r"C:\out\seg_%05d.mp4",
+            region,
+        )
+        assert "gdigrab" in args
+        assert "-init_hw_device" not in args
+
+
+def test_ddagrab_adapter_override() -> None:
+    region = _win_region(RecordingDisplayMode.ALL_DISPLAYS)
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone=None, system_audio=None),
+        RecordingOptions(windows_backend="ddagrab", windows_dxgi_adapter=1),
+        r"C:\out\seg_%05d.mp4",
+        region,
+    )
+    assert args[args.index("-init_hw_device") + 1] == "d3d11va:1"
+
+
+def test_selected_displays_accepts_a_legacy_qt_name() -> None:
+    """Ids used to be the Qt screen name; a stored selection must still work."""
+    from app.services.screen_recorder_service import selected_displays
+
+    chosen = selected_displays(
+        RecordingDisplayMode.SELECTED_DISPLAYS, _win_displays(), ["LG"]
+    )
+    assert [d.id for d in chosen] == [r"\\.\DISPLAY2"]

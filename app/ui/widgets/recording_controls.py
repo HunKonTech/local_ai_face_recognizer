@@ -69,12 +69,15 @@ class RecordingControls(QWidget):
         self._state = state
         recording = state is RecorderState.RECORDING
         paused = state is RecorderState.PAUSED
+        preflight = state is RecorderState.PREFLIGHT
         active = recording or paused
         finalizing = state is RecorderState.FINALIZING
 
         self._record_btn.setEnabled(state in (RecorderState.IDLE, RecorderState.ERROR))
         self._pause_btn.setEnabled(active)
-        self._stop_btn.setEnabled(active)
+        # Stop stays live during the pre-flight probe so a slow grabber can be
+        # abandoned without waiting it out.
+        self._stop_btn.setEnabled(active or preflight)
 
         # Pause button toggles to a resume glyph while paused.
         self._pause_btn.setText("▶" if paused else "⏸")  # ▶ / ⏸
@@ -82,6 +85,7 @@ class RecordingControls(QWidget):
 
         text, color = {
             RecorderState.IDLE: (t("rec_state_idle"), "#A6ADC8"),
+            RecorderState.PREFLIGHT: (t("rec_state_preflight"), "#89DCEB"),
             RecorderState.RECORDING: (t("rec_state_recording"), "#F38BA8"),
             RecorderState.PAUSED: (t("rec_state_paused"), "#F9E2AF"),
             RecorderState.FINALIZING: (t("rec_state_finalizing"), "#89DCEB"),

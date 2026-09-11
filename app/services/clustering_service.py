@@ -48,6 +48,30 @@ def _utcnow_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def next_auto_person_name(session: Session) -> str:
+    """Generate the next free ``Unknown N`` auto-cluster name.
+
+    Uses the highest existing number (not the count) to avoid duplicates when
+    some Unknown persons have been deleted, leaving gaps in the sequence.
+    Shared with the services that need to re-create an Unknown cluster (e.g.
+    rejecting an auto-merge back to Unknown).
+    """
+    rows = (
+        session.query(Person.name)
+        .filter(Person.name.like("Unknown %"))
+        .filter(Person.is_auto_named == True)  # noqa: E712
+        .all()
+    )
+    max_n = 0
+    for (name,) in rows:
+        m = re.match(r"^Unknown (\d+)$", name)
+        if m:
+            n = int(m.group(1))
+            if n > max_n:
+                max_n = n
+    return f"Unknown {max_n + 1}"
+
+
 class ClusteringService:
     """Assigns faces to Person clusters.
 
@@ -255,25 +279,8 @@ class ClusteringService:
         return person
 
     def _next_auto_name(self) -> str:
-        """Generate the next "Unknown N" name.
-
-        Uses the highest existing number (not count) to avoid duplicates when
-        some Unknown persons have been deleted, leaving gaps in the sequence.
-        """
-        rows = (
-            self._session.query(Person.name)
-            .filter(Person.name.like("Unknown %"))
-            .filter(Person.is_auto_named == True)  # noqa: E712
-            .all()
-        )
-        max_n = 0
-        for (name,) in rows:
-            m = re.match(r"^Unknown (\d+)$", name)
-            if m:
-                n = int(m.group(1))
-                if n > max_n:
-                    max_n = n
-        return f"Unknown {max_n + 1}"
+        """Generate the next "Unknown N" name."""
+        return next_auto_person_name(self._session)
 
     # ------------------------------------------------------------------
     # Incremental unknown clustering (called from the pipeline)

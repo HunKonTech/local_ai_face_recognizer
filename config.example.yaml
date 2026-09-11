@@ -404,3 +404,23 @@ recording:
 
   # Concatenate the segments into a single recording.mp4 when stopping.
   concat_on_stop: true
+
+  # Windows only — which desktop grabber ffmpeg uses.
+  #   auto     probe both and keep the one that produces a picture (default)
+  #   ddagrab  DXGI Desktop Duplication; sees the composited desktop, needs
+  #            ffmpeg >= 6.0 built with d3d11va
+  #   gdigrab  legacy GDI grabber; records an all-black picture on many
+  #            hardware-accelerated, hybrid-GPU or HDR desktops
+  windows_capture_backend: auto
+
+  # Pin ddagrab to a DXGI adapter index; null → derive it from the monitor.
+  # Only needed on hybrid-GPU machines where the automatic choice is wrong.
+  windows_dxgi_adapter: null
+
+  # Manual monitor -> DXGI "adapter:output" overrides, keyed by the Windows
+  # device name, e.g. {"\\.\DISPLAY1": "0:1"}.  Normally left empty.
+  windows_dxgi_output_overrides: {}
+
+  # Run a ~1 s black-frame probe before the real capture starts, so a black
+  # grabber is caught (and swapped) up front instead of after the recording.
+  preflight_black_check: true
