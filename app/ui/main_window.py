@@ -1392,6 +1392,7 @@ class MainWindow(QMainWindow):
                 )
                 matches = finder.find()
                 images_examined = finder.images_examined
+                same_person_ids = finder.same_person_duplicate_ids
         except Exception as exc:  # noqa: BLE001
             log.exception("Overlapping unknown face search failed")
             QMessageBox.critical(self, t("error"), t("overlap_search_error", error=exc))
@@ -1408,6 +1409,7 @@ class MainWindow(QMainWindow):
             images_examined=images_examined,
             iou_threshold=threshold,
             containment_threshold=containment,
+            same_person_duplicate_ids=same_person_ids,
         )
 
     def _overlap_sensitivity(self):
@@ -1440,6 +1442,7 @@ class MainWindow(QMainWindow):
                     min_overlap=dup_cfg.min_overlap,
                 )
                 images_examined = finder.images_examined
+                same_person_ids = finder.same_person_duplicate_ids
         except Exception as exc:  # noqa: BLE001
             log.exception("Embedding duplicate search failed")
             QMessageBox.critical(self, t("error"), t("overlap_search_error", error=exc))
@@ -1455,6 +1458,7 @@ class MainWindow(QMainWindow):
             images_examined=images_examined,
             iou_threshold=self._config.detection.duplicate_unknown_iou_threshold,
             containment_threshold=containment,
+            same_person_duplicate_ids=same_person_ids,
         )
 
     def _review_and_delete_overlap_matches(
@@ -1463,6 +1467,7 @@ class MainWindow(QMainWindow):
         images_examined: int,
         iou_threshold: float,
         containment_threshold: float,
+        same_person_duplicate_ids: frozenset[int] | set[int] | None = None,
     ) -> None:
         """Shared review-dialog + confirm + delete flow for both the geometric
         and embedding-based overlapping-face finders."""
@@ -1514,7 +1519,10 @@ class MainWindow(QMainWindow):
                     iou_threshold=iou_threshold,
                     containment_threshold=containment_threshold,
                 )
-                result = finder.delete_unknown_faces(selected_ids)
+                result = finder.delete_unknown_faces(
+                    selected_ids,
+                    extra_deletable_ids=same_person_duplicate_ids or (),
+                )
         except Exception as exc:  # noqa: BLE001
             log.exception("Overlapping unknown face cleanup failed")
             QMessageBox.critical(self, t("error"), t("overlap_delete_error", error=exc))

@@ -479,3 +479,75 @@ def test_non_touching_boxes_stay_unlisted_at_loosest_level(tmp_db):
         ).find()
 
     assert matches == []
+
+
+# ── Named same-person duplicates survive the search→delete handoff (#162) ─────
+
+
+def test_named_same_person_duplicate_deletable_with_fresh_finder(tmp_db):
+    """The UI searches in one session and deletes in another, with a *new*
+    finder. A duplicate box of a named person must still be deletable there."""
+    with session_scope() as session:
+        image = _add_image(session)
+        alice = _add_person(session, "Alice")
+        keep = _add_face(session, image, (10, 10, 100, 100), alice)
+        dup = _add_face(session, image, (14, 12, 98, 102), alice)
+        dup.confidence = 0.5
+        session.flush()
+
+    with session_scope() as session:
+        finder = DuplicateUnknownFaceFinder(session)
+        matches = finder.find()
+        assert [m.unknown_face_id for m in matches] == [dup.id]
+        flagged = finder.same_person_duplicate_ids
+        assert dup.id in flagged
+
+    # Fresh finder, fresh session — exactly what the delete step does.
+    with session_scope() as session:
+        result = DuplicateUnknownFaceFinder(session).delete_unknown_faces(
+            [dup.id], extra_deletable_ids=flagged
+        )
+    assert result.deleted == 1
+    assert result.missing_or_changed == ()
+
+    with session_scope() as session:
+        assert session.get(Face, dup.id) is None
+        assert session.get(Face, keep.id) is not None
+
+
+def test_named_same_person_duplicate_deletable_without_flag_set(tmp_db):
+    """Even with no flags carried over, a still-overlapping duplicate of a
+    named person is re-detected from the database and deleted."""
+    with session_scope() as session:
+        image = _add_image(session)
+        alice = _add_person(session, "Alice")
+        keep = _add_face(session, image, (10, 10, 100, 100), alice)
+        dup = _add_face(session, image, (14, 12, 98, 102), alice)
+
+    with session_scope() as session:
+        result = DuplicateUnknownFaceFinder(session).delete_unknown_faces([dup.id])
+    assert result.deleted == 1
+
+    with session_scope() as session:
+        assert session.get(Face, dup.id) is None
+        assert session.get(Face, keep.id) is not None
+
+
+def test_lone_named_face_is_never_deleted(tmp_db):
+    """A named face with no overlapping sibling stays protected."""
+    with session_scope() as session:
+        image = _add_image(session)
+        alice = _add_person(session, "Alice")
+        bob = _add_person(session, "Bob")
+        alice_face = _add_face(session, image, (10, 10, 100, 100), alice)
+        _add_face(session, image, (400, 400, 100, 100), bob)
+
+    with session_scope() as session:
+        result = DuplicateUnknownFaceFinder(session).delete_unknown_faces(
+            [alice_face.id]
+        )
+    assert result.deleted == 0
+    assert result.missing_or_changed == (alice_face.id,)
+
+    with session_scope() as session:
+        assert session.get(Face, alice_face.id) is not None

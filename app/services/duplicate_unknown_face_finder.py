@@ -127,6 +127,17 @@ class DuplicateUnknownFaceFinder:
         # even if _is_unknown() returns False for them.
         self._same_person_duplicate_ids: set[int] = set()
 
+    @property
+    def same_person_duplicate_ids(self) -> frozenset[int]:
+        """Same-person duplicate face IDs flagged by the last search.
+
+        The delete step usually runs on a *fresh* finder in a new session, which
+        has not run a search and therefore knows nothing about these faces. Pass
+        this set to :meth:`delete_unknown_faces` as ``extra_deletable_ids`` so
+        duplicates of a *named* person stay deletable there too.
+        """
+        return frozenset(self._same_person_duplicate_ids)
+
     def find(self) -> list[OverlappingUnknownFaceMatch]:
         """Return suspicious face boxes, one best match per unknown/duplicate."""
         self._same_person_duplicate_ids = set()
@@ -407,16 +418,28 @@ class DuplicateUnknownFaceFinder:
     def delete_unknown_faces(
         self,
         face_ids: Iterable[int],
+        extra_deletable_ids: Iterable[int] | None = None,
     ) -> DeleteUnknownFacesResult:
         """Delete selected faces that are still unknown or same-person duplicates.
 
         Named faces that are not same-person duplicates are never deleted.
         If a face was assigned to a real person after the list was shown,
         it is skipped and reported.
+
+        *extra_deletable_ids* carries the same-person duplicate IDs from the
+        search run (see :attr:`same_person_duplicate_ids`), because the delete
+        step typically uses a different finder instance and session than the
+        search. As a safety net, a named face is also accepted when it *still*
+        overlaps a sibling box of the same person in the same image, which is
+        re-checked here against the live database.
         """
         requested_ids = sorted(set(face_ids))
         if not requested_ids:
             return DeleteUnknownFacesResult(0, 0, (), ())
+
+        allowed_ids = set(self._same_person_duplicate_ids)
+        if extra_deletable_ids is not None:
+            allowed_ids.update(extra_deletable_ids)
 
         deleted_image_ids: set[int] = set()
         missing_or_changed: list[int] = []
@@ -428,7 +451,8 @@ class DuplicateUnknownFaceFinder:
                 face is not None
                 and (
                     self._is_unknown(face)
-                    or face_id in self._same_person_duplicate_ids
+                    or face_id in allowed_ids
+                    or self._is_live_same_person_duplicate(face)
                 )
             )
             if not deletable:
@@ -439,10 +463,11 @@ class DuplicateUnknownFaceFinder:
             deleted += 1
 
         log.info(
-            "Overlapping face cleanup: requested=%d deleted=%d skipped=%d",
+            "Overlapping face cleanup: requested=%d deleted=%d skipped=%d%s",
             len(requested_ids),
             deleted,
             len(missing_or_changed),
+            f" (skipped ids: {missing_or_changed[:50]})" if missing_or_changed else "",
         )
         return DeleteUnknownFacesResult(
             requested=len(requested_ids),
@@ -450,6 +475,31 @@ class DuplicateUnknownFaceFinder:
             image_ids=tuple(sorted(deleted_image_ids)),
             missing_or_changed=tuple(missing_or_changed),
         )
+
+    def _is_live_same_person_duplicate(self, face: Face) -> bool:
+        """Re-check against the database whether *face* is still a duplicate box.
+
+        True when another visible face in the same image belongs to the same
+        (non-protected) person and overlaps *face*. This keeps a named
+        duplicate deletable even when the in-memory flags from the search run
+        are unavailable, while still refusing faces that no longer duplicate
+        anything.
+        """
+        if not self._is_dedup_candidate(face):
+            return False
+        siblings = (
+            self._session.query(Face)
+            .filter(Face.image_id == face.image_id)
+            .filter(Face.person_id == face.person_id)
+            .filter(Face.id != face.id)
+            .all()
+        )
+        for other in siblings:
+            if other.is_excluded or not self._is_dedup_candidate(other):
+                continue
+            if self._overlap_score(face, other) is not None:
+                return True
+        return False
 
     def _overlap_score(self, a: Face, b: Face) -> tuple[float, float] | None:
         """Return a ``(score, iou)`` ranking key if *a* and *b* overlap, else None.
