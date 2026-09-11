@@ -878,3 +878,157 @@ class TestGetComparisonGroup:
         with session_scope() as s:
             stable = s.query(Image).filter(Image.file_hash == "stable").first()
             assert DeoldifiedPairingService(s).get_comparison_group(stable) == []
+
+
+class TestDeoldifiedIndex:
+    """The cache that keeps image opening free of per-image LIKE scans."""
+
+    def _seed(self, session, folder) -> dict:
+        from app.db.models import Image
+        paths = {
+            "orig": folder / "photo.jpg",
+            "artistic": folder / "photo-deoldified (artistic).jpg",
+            "stable": folder / "photo-deoldified (stable).jpg",
+            "solo": folder / "unrelated.jpg",
+        }
+        for p in paths.values():
+            p.write_bytes(b"x")
+        for key in paths:
+            session.add(
+                Image(file_path=str(paths[key]), file_hash=key, file_mtime=0.0)
+            )
+        return paths
+
+    def test_lookup_from_original_stem_lists_variants_in_label_order(
+        self, tmp_db, tmp_path
+    ) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Image
+        from app.services.deoldified_pairing_service import get_deoldified_index
+
+        with session_scope() as s:
+            self._seed(s, tmp_path)
+        with session_scope() as s:
+            index = get_deoldified_index()
+            index.ensure_built(s)
+            assert index.has_group("photo") is True
+            ids = index.variant_ids("photo")
+            hashes = [s.get(Image, i).file_hash for i in ids]
+            assert hashes == ["artistic", "stable"]
+
+    def test_lookup_is_case_insensitive(self, tmp_db, tmp_path) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Image
+        from app.services.deoldified_pairing_service import get_deoldified_index
+
+        upper = tmp_path / "PHOTO.JPG"
+        color = tmp_path / "photo-Deoldified (stable).jpg"
+        for p in (upper, color):
+            p.write_bytes(b"x")
+        with session_scope() as s:
+            s.add(Image(file_path=str(upper), file_hash="u", file_mtime=0.0))
+            s.add(Image(file_path=str(color), file_hash="c", file_mtime=0.0))
+        with session_scope() as s:
+            index = get_deoldified_index()
+            index.ensure_built(s)
+            assert index.has_group("PHOTO") is True
+            assert index.has_group("photo") is True
+
+    def test_unrelated_stem_has_no_group(self, tmp_db, tmp_path) -> None:
+        from app.db.database import session_scope
+        from app.services.deoldified_pairing_service import get_deoldified_index
+
+        with session_scope() as s:
+            self._seed(s, tmp_path)
+        with session_scope() as s:
+            index = get_deoldified_index()
+            index.ensure_built(s)
+            assert index.has_group("unrelated") is False
+            assert index.variant_ids("unrelated") == []
+
+    def test_new_rows_are_invisible_until_invalidated(
+        self, tmp_db, tmp_path
+    ) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Image
+        from app.services.deoldified_pairing_service import (
+            get_deoldified_index,
+            invalidate_deoldified_index,
+        )
+
+        with session_scope() as s:
+            self._seed(s, tmp_path)
+        with session_scope() as s:
+            get_deoldified_index().ensure_built(s)
+
+        later = tmp_path / "later-deoldified (stable).jpg"
+        later.write_bytes(b"x")
+        with session_scope() as s:
+            s.add(Image(file_path=str(later), file_hash="later", file_mtime=0.0))
+
+        with session_scope() as s:
+            index = get_deoldified_index()
+            index.ensure_built(s)
+            assert index.has_group("later") is False
+
+        invalidate_deoldified_index()
+        with session_scope() as s:
+            index = get_deoldified_index()
+            index.ensure_built(s)
+            assert index.has_group("later") is True
+
+    def test_unpaired_images_cost_no_queries_after_the_build(
+        self, tmp_db, tmp_path
+    ) -> None:
+        """The perf guard: browsing unpaired photos must not touch the DB."""
+        import sqlalchemy as sa
+
+        from app.db.database import session_scope
+        from app.db.models import Image
+        from app.services.deoldified_pairing_service import get_deoldified_index
+
+        with session_scope() as s:
+            self._seed(s, tmp_path)
+        solo_paths = []
+        with session_scope() as s:
+            for i in range(50):
+                p = tmp_path / f"solo_{i}.jpg"
+                p.write_bytes(b"x")
+                solo_paths.append(p)
+                s.add(Image(file_path=str(p), file_hash=f"s{i}", file_mtime=0.0))
+
+        with session_scope() as s:
+            solos = (
+                s.query(Image)
+                .filter(Image.file_path.like("%solo_%"))
+                .all()
+            )
+            get_deoldified_index().ensure_built(s)
+
+            statements: list[str] = []
+            engine = s.get_bind()
+
+            def _record(conn, cursor, statement, *args) -> None:  # noqa: ANN001
+                statements.append(statement)
+
+            sa.event.listen(engine, "before_cursor_execute", _record)
+            try:
+                svc = DeoldifiedPairingService(s)
+                for img in solos:
+                    assert svc.get_comparison_group(img) == []
+            finally:
+                sa.event.remove(engine, "before_cursor_execute", _record)
+
+            assert len(solos) == 50
+            assert statements == []
+
+    def test_paired_image_still_resolves_its_group(self, tmp_db, tmp_path) -> None:
+        from app.db.database import session_scope
+        from app.db.models import Image
+
+        with session_scope() as s:
+            self._seed(s, tmp_path)
+        with session_scope() as s:
+            stable = s.query(Image).filter(Image.file_hash == "stable").first()
+            group = DeoldifiedPairingService(s).get_comparison_group(stable)
+            assert [m.label for m in group] == ["", "(artistic)", "(stable)"]

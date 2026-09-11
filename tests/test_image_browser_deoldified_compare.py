@@ -259,3 +259,156 @@ def test_compare_mode_survives_opening_another_image(db, qtbot, tmp_path):
 
     assert panel._deol_mode == "compare"
     assert panel._deol_compare is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# #182 — the view switcher must never be hidden behind the pairing setting
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def pair_on_disk(db, tmp_path):
+    """A real B&W + colorized pair, both on disk and in the database."""
+    from app.db.database import session_scope
+    from app.db.models import Image
+
+    bw_path = tmp_path / "photo.jpg"
+    color_path = tmp_path / "photo-deoldified (stable).jpg"
+    save_image_bgr(bw_path, np.zeros((10, 20, 3), dtype=np.uint8))
+    save_image_bgr(color_path, np.full((10, 20, 3), 255, dtype=np.uint8))
+
+    with session_scope() as s:
+        s.add(Image(file_path=str(bw_path), file_hash="bw", file_mtime=0.0))
+        s.add(Image(file_path=str(color_path), file_hash="color", file_mtime=0.0))
+    with session_scope() as s:
+        bw_id = s.query(Image).filter(Image.file_hash == "bw").first().id
+        color_id = s.query(Image).filter(Image.file_hash == "color").first().id
+    return {
+        "bw_id": bw_id, "bw_path": bw_path,
+        "color_id": color_id, "color_path": color_path,
+    }
+
+
+def _set_pairing(monkeypatch, enabled: bool) -> None:
+    """Force the 'deoldified/auto_pair' setting for one test."""
+    import app.app_settings as app_settings
+
+    real = app_settings.app_qsettings()
+
+    class _Fake:
+        def value(self, key, default=None, type=None):  # noqa: A002
+            if key == "deoldified/auto_pair":
+                return enabled
+            return real.value(key, default, type=type)
+
+    monkeypatch.setattr(app_settings, "app_qsettings", lambda: _Fake())
+
+
+def test_view_bar_visible_with_pairing_setting_off(
+    pair_on_disk, qtbot, monkeypatch
+):
+    """The regression guard for #182: the bar appears even with sharing off."""
+    _set_pairing(monkeypatch, False)
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+
+    panel._setup_deoldified_pair(
+        pair_on_disk["bw_id"], str(pair_on_disk["bw_path"])
+    )
+
+    assert len(panel._deol_group) == 2
+    assert panel._deoldified_bar.isVisibleTo(panel) is True
+    assert panel._btn_view_bw.isVisibleTo(panel._deoldified_bar) is True
+    assert panel._btn_view_color.isVisibleTo(panel._deoldified_bar) is True
+
+
+def test_sync_button_hidden_when_pairing_off(pair_on_disk, qtbot, monkeypatch):
+    _set_pairing(monkeypatch, False)
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+
+    panel._setup_deoldified_pair(
+        pair_on_disk["bw_id"], str(pair_on_disk["bw_path"])
+    )
+
+    assert panel._btn_deol_sync.isVisibleTo(panel._deoldified_bar) is False
+    assert panel._deol_pair_partner_id is None
+
+
+def test_sync_button_shown_when_pairing_on(pair_on_disk, qtbot, monkeypatch):
+    _set_pairing(monkeypatch, True)
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+
+    panel._setup_deoldified_pair(
+        pair_on_disk["bw_id"], str(pair_on_disk["bw_path"])
+    )
+
+    assert panel._btn_deol_sync.isVisibleTo(panel._deoldified_bar) is True
+    assert panel._deol_pair_partner_id == pair_on_disk["color_id"]
+
+
+def test_face_data_not_rehomed_when_pairing_off(
+    pair_on_disk, qtbot, monkeypatch
+):
+    """Annotations written on the colorized side must stay on that image."""
+    _set_pairing(monkeypatch, False)
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._current_image_id = pair_on_disk["color_id"]
+
+    panel._setup_deoldified_pair(
+        pair_on_disk["color_id"], str(pair_on_disk["color_path"])
+    )
+
+    assert panel._deol_pair_orig_id is None
+    assert panel._object_image_id() == pair_on_disk["color_id"]
+
+
+def test_face_data_rehomed_when_pairing_on(pair_on_disk, qtbot, monkeypatch):
+    _set_pairing(monkeypatch, True)
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._current_image_id = pair_on_disk["color_id"]
+
+    panel._setup_deoldified_pair(
+        pair_on_disk["color_id"], str(pair_on_disk["color_path"])
+    )
+
+    assert panel._deol_pair_orig_id == pair_on_disk["bw_id"]
+    assert panel._object_image_id() == pair_on_disk["bw_id"]
+
+
+def test_bw_toggle_loads_original_pixels_with_pairing_off(
+    pair_on_disk, qtbot, monkeypatch
+):
+    """Switching to B&W works off the cached group path, not a DB lookup."""
+    _set_pairing(monkeypatch, False)
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._current_path = str(pair_on_disk["color_path"])
+    panel._current_image_id = pair_on_disk["color_id"]
+
+    panel._setup_deoldified_pair(
+        pair_on_disk["color_id"], str(pair_on_disk["color_path"])
+    )
+    assert panel._deol_bw_path == str(pair_on_disk["bw_path"])
+
+    panel._on_deol_view_toggle(False)
+    assert panel._deol_viewing_color is False
+    assert panel._orig_img_bgr is not None
+    assert int(panel._orig_img_bgr.mean()) == 0  # the black B&W image
+
+
+def test_no_bar_when_sibling_file_is_missing(pair_on_disk, qtbot, monkeypatch):
+    _set_pairing(monkeypatch, False)
+    pair_on_disk["color_path"].unlink()
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+
+    panel._setup_deoldified_pair(
+        pair_on_disk["bw_id"], str(pair_on_disk["bw_path"])
+    )
+
+    assert panel._deol_group == []
+    assert panel._deoldified_bar.isVisibleTo(panel) is False

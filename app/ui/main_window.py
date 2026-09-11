@@ -428,6 +428,9 @@ class MainWindow(QMainWindow):
         self._image_browser.object_search_requested.connect(
             self._on_object_search_requested
         )
+        self._image_browser.pairing_settings_requested.connect(
+            lambda: self._on_settings("pairing")
+        )
         self._tabs.addTab(self._image_browser, t("tab_image_browser"))
 
         # --- Tab 2: Családi kereső ---
@@ -1940,9 +1943,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     @Slot()
-    def _on_settings(self) -> None:
+    def _on_settings(self, initial_tab=None) -> None:
+        # QAction.triggered hands us a bool; only a real tab name counts.
+        if not isinstance(initial_tab, str):
+            initial_tab = None
         dlg = SettingsDialog(
-            current_db_path=self._db_path, parent=self, app_config=self._config
+            current_db_path=self._db_path,
+            parent=self,
+            app_config=self._config,
+            initial_tab=initial_tab,
         )
         # Wire up the Drive prefs-changed signal so the chip/button refresh.
         if hasattr(dlg, "_gdrive_tab"):
@@ -1981,6 +1990,9 @@ class MainWindow(QMainWindow):
         if dlg.language_changed():
             self._retranslate()
             self._refresh_persons()
+
+        # A changed pairing setting only takes effect when the image is re-read.
+        self._image_browser.reload_current_image()
 
         # Pick up any recording-setting changes for the next recording.
         self._load_recording_prefs()

@@ -80,6 +80,10 @@ def init_db(db_path: Path | str) -> Engine:
     from app.services.image_library_service import init_image_library
     init_image_library(db_path)
 
+    # The pairing index is keyed to the rows of one database
+    from app.services.deoldified_pairing_service import invalidate_deoldified_index
+    invalidate_deoldified_index()
+
     log.info("Database ready: %s tables", len(Base.metadata.tables))
     return engine
 

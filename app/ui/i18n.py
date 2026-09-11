@@ -2512,16 +2512,26 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                        "cache-elődnek; a saját beírt címek offline is működnek."},
     "deoldified_group":         {"en": "Deoldified / Colorized Pairing",
                                  "hu": "Deoldified / Színezett képpárosítás"},
-    "deoldified_toggle":        {"en": "Automatically pair deoldified (colorized) images",
-                                 "hu": "Deoldified képek automatikus párosítása"},
-    "deoldified_toggle_tip":    {"en": "When enabled, images containing '-deoldified' in their "
-                                       "filename are automatically paired with their original "
-                                       "black-and-white counterpart. Face data from the original "
-                                       "is shown on both versions.",
-                                 "hu": "Ha be van kapcsolva, a '-deoldified' szót tartalmazó "
-                                       "képek automatikusan párosítódnak az eredeti "
-                                       "fekete-fehér képpel. Az arcadatok az eredetiről "
-                                       "mindkét változaton megjelennek."},
+    "deoldified_toggle":        {"en": "Share data between paired images "
+                                       "(faces, image data, object tags)",
+                                 "hu": "Adatok megosztása a párosított képek közt "
+                                       "(arcok, képadatok, objektumjelölések)"},
+    "deoldified_toggle_tip":    {"en": "When enabled, an image containing '-deoldified' in its "
+                                       "filename shares its annotations with the original "
+                                       "black-and-white photo: face data from the original is "
+                                       "shown on both versions, and object tags are kept on the "
+                                       "original so the photo is counted once.",
+                                 "hu": "Ha be van kapcsolva, a '-deoldified' szót tartalmazó kép "
+                                       "megosztja a jelöléseit az eredeti fekete-fehér képpel: "
+                                       "az arcadatok az eredetiről mindkét változaton "
+                                       "megjelennek, az objektumjelölések pedig az eredetin "
+                                       "maradnak, így a fénykép egyszer számít."},
+    "deoldified_view_always":   {"en": "The black-and-white / colorized view switcher always "
+                                       "appears above the image when a pair exists; it does not "
+                                       "depend on this option.",
+                                 "hu": "A fekete-fehér / színezett nézetváltó mindig megjelenik "
+                                       "a kép felett, ha van párja; ez a beállítás nem "
+                                       "befolyásolja."},
     "deoldified_sync_toggle":   {"en": "Automatically copy data between paired images",
                                  "hu": "Adatok automatikus átvétele a párképek közt"},
     "deoldified_sync_toggle_tip": {"en": "When a deoldified pair is opened, copy whatever the "
@@ -2559,6 +2569,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                  "hu": "Nincs átmásolható új adat: a pár már szinkronban van."},
     "ibp_deol_sync_no_pair":    {"en": "No paired image found for the current image.",
                                  "hu": "Nincs párkép a jelenlegi képhez."},
+    "ibp_deol_settings_tip":    {"en": "Pairing settings — decide whether the two versions share "
+                                       "faces, image data and object tags.",
+                                 "hu": "Párosítási beállítások — itt döntheted el, hogy a két "
+                                       "változat megosztja-e az arcokat, a képadatokat és az "
+                                       "objektumjelöléseket."},
 
     # ── Image library ─────────────────────────────────────────────────────
     "img_lib_group":            {"en": "Image Library",

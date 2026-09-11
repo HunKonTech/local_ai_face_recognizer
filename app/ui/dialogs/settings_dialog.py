@@ -194,7 +194,13 @@ class _ModelDownloadThread(QThread):
 class SettingsDialog(QDialog):
     """Settings dialog: language, database management, and TPU status."""
 
-    def __init__(self, current_db_path: str, parent=None, app_config=None) -> None:
+    def __init__(
+        self,
+        current_db_path: str,
+        parent=None,
+        app_config=None,
+        initial_tab: Optional[str] = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(t("settings_title"))
         self.setMinimumWidth(540)
@@ -213,6 +219,8 @@ class SettingsDialog(QDialog):
         self._stats_thread: Optional[_GeneralStatsThread] = None
         self._audio_thread: Optional[_AudioDevicesThread] = None
         self._build_ui()
+        if initial_tab == "pairing":
+            self._tabs_widget.setCurrentWidget(self._pairing_tab)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -222,7 +230,8 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         self._tabs_widget = tabs
         tabs.addTab(self._build_tab_general(), t("settings_tab_general"))
-        tabs.addTab(self._build_tab_pairing(), t("settings_tab_pairing"))
+        self._pairing_tab = self._build_tab_pairing()
+        tabs.addTab(self._pairing_tab, t("settings_tab_pairing"))
         tabs.addTab(self._build_tab_face_quality(), t("settings_tab_quality"))
         tabs.addTab(self._build_tab_tasks(), t("settings_tab_tasks"))
         tabs.addTab(self._build_tab_ai_model(), t("settings_tab_ai_model"))
@@ -458,6 +467,11 @@ class SettingsDialog(QDialog):
         )
         self._deoldified_sync_check.setToolTip(t("deoldified_sync_toggle_tip"))
         deol_layout.addWidget(self._deoldified_sync_check)
+
+        deol_note = QLabel(t("deoldified_view_always"))
+        deol_note.setWordWrap(True)
+        deol_note.setStyleSheet("color: #888; font-size: 11px;")
+        deol_layout.addWidget(deol_note)
 
         layout.addWidget(deol_group)
 
