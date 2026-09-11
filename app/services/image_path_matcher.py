@@ -514,6 +514,11 @@ class ImagePathMatcher:
                         alias.thumbnail_path = new
 
         session.flush()
+        # Rows now point somewhere else, so cached existence answers are stale.
+        from app.services.image_library_service import (
+            invalidate_path_existence_cache,
+        )
+        invalidate_path_existence_cache()
         log.info(
             "Path matcher: re-attached %d image(s), skipped %d",
             result.updated, result.skipped,

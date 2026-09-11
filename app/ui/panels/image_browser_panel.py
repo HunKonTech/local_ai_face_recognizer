@@ -1624,6 +1624,9 @@ class ImageBrowserPanel(QWidget):
     object_search_requested = Signal(int, str)
     # Emitted from the black-and-white / colorized bar to open the pairing settings
     pairing_settings_requested = Signal()
+    # Emitted when an image file could not be opened and the user asks for the
+    # missing-path repair tool.
+    path_repair_requested = Signal()
 
     def __init__(self, config=None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -2039,6 +2042,13 @@ class ImageBrowserPanel(QWidget):
         self._btn_deol_sync.setStyleSheet(_nav_style)
         self._btn_deol_sync.clicked.connect(self._on_deol_sync_clicked)
         _deol_row.addWidget(self._btn_deol_sync)
+        # Shown only after a side failed to load, so a stale path offers its
+        # own way out instead of leaving the toggle apparently dead.
+        self._btn_deol_fix_paths = QPushButton()
+        self._btn_deol_fix_paths.setStyleSheet(_nav_style)
+        self._btn_deol_fix_paths.clicked.connect(self.path_repair_requested.emit)
+        self._btn_deol_fix_paths.setVisible(False)
+        _deol_row.addWidget(self._btn_deol_fix_paths)
         self._btn_deol_settings = QPushButton("⚙")
         self._btn_deol_settings.setStyleSheet(_nav_style)
         self._btn_deol_settings.clicked.connect(self.pairing_settings_requested.emit)
@@ -2438,6 +2448,8 @@ class ImageBrowserPanel(QWidget):
             self._populate_deol_combos()  # refresh translated member labels
         self._btn_deol_sync.setText(t("ibp_deol_sync"))
         self._btn_deol_sync.setToolTip(t("ibp_deol_sync_tip"))
+        self._btn_deol_fix_paths.setText(t("ibp_deol_fix_paths"))
+        self._btn_deol_fix_paths.setToolTip(t("ibp_deol_fix_paths_tip"))
         self._btn_deol_settings.setToolTip(t("ibp_deol_settings_tip"))
 
     def reload_current_image(self) -> None:
@@ -2453,6 +2465,12 @@ class ImageBrowserPanel(QWidget):
             invalidate_deoldified_index,
         )
         invalidate_deoldified_index()
+        # A refresh follows a scan, an import or a path repair — files may have
+        # appeared or moved, so drop the cached existence answers too.
+        from app.services.image_library_service import (
+            invalidate_path_existence_cache,
+        )
+        invalidate_path_existence_cache()
         self._reload_persons_combo()
         self._reload_places()
         prev_folder = self._current_folder
@@ -2746,11 +2764,17 @@ class ImageBrowserPanel(QWidget):
                     self._deol_mode = "bw"
                     img_bgr = bw_bgr
                     show_colorized = False
-                    self._deol_lbl.setText(t("ibp_deol_variant_missing"))
+                    self._deol_show_path_error(t("ibp_deol_variant_missing"))
                 else:
+                    self._deol_show_path_error(t("ibp_deol_side_missing"))
                     return
             else:
+                # The B&W side used to fail silently, which looked exactly like
+                # a dead button; say what happened and offer the repair tool.
+                self._deol_show_path_error(t("ibp_deol_side_missing"))
                 return
+        else:
+            self._deol_clear_path_error()
 
         self._deol_compare = False
         self._image_label.set_compare_mode(False)
@@ -2763,6 +2787,19 @@ class ImageBrowserPanel(QWidget):
         if reset_zoom:
             self._reset_zoom()
         self._redraw_faces()
+
+    def _deol_show_path_error(self, message: str) -> None:
+        """Explain a failed load in the bar and offer the path-repair tool."""
+        self._deol_lbl.setText(message)
+        self._btn_deol_fix_paths.setVisible(True)
+
+    def _deol_clear_path_error(self) -> None:
+        """Restore the normal bar caption after a successful load."""
+        # isHidden(), not isVisible(): the bar may be laid out but not yet
+        # shown, and the caption still has to be restored.
+        if not self._btn_deol_fix_paths.isHidden():
+            self._btn_deol_fix_paths.setVisible(False)
+            self._deol_lbl.setText(t("ibp_deol_pair_lbl"))
 
     def _deol_ensure_compare_bgr(self) -> bool:
         """Load and cache the two selected sides, right resized to left shape."""
@@ -2777,7 +2814,13 @@ class ImageBrowserPanel(QWidget):
         left = load_image_bgr(left_m.file_path)
         right = load_image_bgr(right_m.file_path)
         if left is None or right is None:
+            log.warning(
+                "Cannot load image for deoldified compare: %s",
+                left_m.file_path if left is None else right_m.file_path,
+            )
+            self._deol_show_path_error(t("ibp_deol_side_missing"))
             return False
+        self._deol_clear_path_error()
         if right.shape[:2] != left.shape[:2]:
             right = cv2.resize(
                 right, (left.shape[1], left.shape[0]), interpolation=cv2.INTER_AREA
@@ -2871,6 +2914,9 @@ class ImageBrowserPanel(QWidget):
             self._btn_view_compare.setChecked(False)
         if hasattr(self, "_deol_left_combo"):
             self._deol_update_combo_visibility()
+        if hasattr(self, "_btn_deol_fix_paths"):
+            self._btn_deol_fix_paths.setVisible(False)
+            self._deol_lbl.setText(t("ibp_deol_pair_lbl"))
 
     def _run_deoldified_sync(self, image_id: int, *, announce: bool) -> Optional[dict]:
         """Copy annotations between the current image and its deoldified pair.
@@ -3851,7 +3897,15 @@ class ImageBrowserPanel(QWidget):
             for f in img.faces:
                 _ = f.person
             self._current_image_id = image_id
-            self._current_path = img.file_path
+            # Existence-checked: img.file_path is the absolute path recorded on
+            # the indexing machine, so on a moved or re-rooted library it can
+            # point nowhere.  Everything downstream (pixels, EXIF writes) opens
+            # this path, so it must be the one that is actually on disk.
+            from app.services.image_library_service import (
+                resolve_existing_image_path,
+            )
+            _resolved = resolve_existing_image_path(img)
+            self._current_path = str(_resolved) if _resolved else img.file_path
             self._save_meta_btn.setEnabled(True)
             self.image_displayed.emit(image_id, img.file_path)
             self._detection_done = img.detection_done

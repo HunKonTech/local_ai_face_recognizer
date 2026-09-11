@@ -1714,6 +1714,8 @@ class SettingsDialog(QDialog):
         )
         if not folder:
             return
+        if not self._confirm_library_root(svc, folder):
+            return
         try:
             if svc is not None:
                 svc.set_library_root(folder)
@@ -1724,6 +1726,37 @@ class SettingsDialog(QDialog):
             QMessageBox.information(self, t("img_lib_group"), t("img_lib_root_changed"))
         except (NotADirectoryError, RuntimeError) as exc:
             QMessageBox.warning(self, t("error"), str(exc))
+
+    def _confirm_library_root(self, svc, folder: str) -> bool:
+        """Ask before adopting a root under which no stored path resolves.
+
+        The stored ``relative_path`` values belong to one specific root.
+        Pointing the library somewhere else silently breaks every image —
+        exactly how the doubled ``_external`` prefix arose — so sample a few
+        rows and let the user see the damage before it is saved.
+        """
+        if svc is None:
+            return True
+        try:
+            from app.db.database import session_scope
+
+            with session_scope() as session:
+                found, checked = svc.count_resolvable(session, folder)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Library root pre-check skipped: %s", exc)
+            return True
+
+        if checked == 0 or found > 0:
+            return True
+
+        answer = QMessageBox.question(
+            self,
+            t("img_lib_group"),
+            t("img_lib_root_no_match", checked=checked, path=folder),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
 
     def _on_migrate_paths(self) -> None:
         svc = get_image_library_optional()

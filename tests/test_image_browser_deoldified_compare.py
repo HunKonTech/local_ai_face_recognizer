@@ -412,3 +412,67 @@ def test_no_bar_when_sibling_file_is_missing(pair_on_disk, qtbot, monkeypatch):
 
     assert panel._deol_group == []
     assert panel._deoldified_bar.isVisibleTo(panel) is False
+
+
+def test_missing_side_reports_and_offers_repair(db, qtbot, tmp_path):
+    """Issue #179: a side that cannot be opened must say so, not sit silent."""
+    bw_path = tmp_path / "bw.jpg"
+    save_image_bgr(bw_path, np.zeros((10, 20, 3), dtype=np.uint8))
+    gone = tmp_path / "missing-deoldified (artistic).jpg"
+
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._deol_group = [
+        ComparisonMember(1, str(bw_path), "", True),
+        ComparisonMember(2, str(gone), "(artistic)", False),
+    ]
+    panel._deol_bw_path = str(bw_path)
+    panel._deol_pair_color_path = str(gone)
+
+    panel._apply_single_view(True, reset_zoom=False)
+
+    # Degrades to the readable side instead of freezing on the old pixels.
+    assert panel._deol_viewing_color is False
+    assert panel._orig_img_bgr is not None
+    assert not panel._btn_deol_fix_paths.isHidden()
+    assert panel._deol_lbl.text()
+
+
+def test_missing_bw_side_reports_instead_of_silent_return(db, qtbot, tmp_path):
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    gone = tmp_path / "nothing.jpg"
+    panel._deol_bw_path = str(gone)
+    panel._deol_group = [
+        ComparisonMember(1, str(gone), "", True),
+        ComparisonMember(2, str(gone), "(artistic)", False),
+    ]
+
+    panel._apply_single_view(False, reset_zoom=False)
+
+    assert not panel._btn_deol_fix_paths.isHidden()
+
+
+def test_repair_button_emits_signal(db, qtbot, tmp_path):
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    with qtbot.waitSignal(panel.path_repair_requested, timeout=1000):
+        panel._btn_deol_fix_paths.click()
+
+
+def test_successful_load_clears_the_error_state(db, qtbot, tmp_path):
+    bw_path = tmp_path / "bw.jpg"
+    color_path = tmp_path / "color.jpg"
+    save_image_bgr(bw_path, np.zeros((10, 20, 3), dtype=np.uint8))
+    save_image_bgr(color_path, np.full((10, 20, 3), 200, dtype=np.uint8))
+
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._deol_bw_path = str(bw_path)
+    panel._deol_pair_color_path = str(color_path)
+    panel._deol_show_path_error("boom")
+    assert not panel._btn_deol_fix_paths.isHidden()
+
+    panel._apply_single_view(True, reset_zoom=False)
+    assert panel._btn_deol_fix_paths.isHidden()
+    assert panel._deol_viewing_color is True

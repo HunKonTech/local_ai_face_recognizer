@@ -2559,6 +2559,15 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "ibp_deol_bw_label":        {"en": "Black & white",        "hu": "Fekete-fehér"},
     "ibp_deol_variant_missing": {"en": "Colorized version file is missing; showing black & white.",
                                  "hu": "A színezett változat fájlja hiányzik; a fekete-fehér nézet látható."},
+    "ibp_deol_side_missing":    {"en": "This version's file cannot be opened; it may have been "
+                                       "moved or the image library root is wrong.",
+                                 "hu": "Ennek a változatnak a fájlja nem nyitható meg; lehet, hogy "
+                                       "elmozdult, vagy rossz a képkönyvtár gyökere."},
+    "ibp_deol_fix_paths":       {"en": "Fix paths…",           "hu": "Útvonalak javítása…"},
+    "ibp_deol_fix_paths_tip":   {"en": "Look for the missing files and re-point the database at "
+                                       "them.",
+                                 "hu": "A hiányzó fájlok megkeresése, és az adatbázis "
+                                       "hozzáigazítása."},
     "ibp_deol_sync":            {"en": "Copy data from pair",  "hu": "Adatok átvétele a párról"},
     "ibp_deol_sync_tip":        {"en": "Copy whatever the paired image is missing: faces, image "
                                        "data and object tags. Existing data is never overwritten.",
@@ -2638,6 +2647,13 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                  "hu": "Kihagyás egyelőre"},
     "img_lib_root_changed":     {"en": "Image library root updated.",
                                  "hu": "Képkönyvtár gyökere frissítve."},
+    "img_lib_root_no_match":    {"en": "None of {checked} checked images can be found under "
+                                       "{path}. The stored relative paths belong to a different "
+                                       "root, so every image would break. Use this folder anyway?",
+                                 "hu": "A megvizsgált {checked} képből egyet sem találtam a "
+                                       "{path} mappa alatt. A tárolt relatív útvonalak más "
+                                       "gyökérhez tartoznak, így minden kép elérhetetlenné "
+                                       "válna. Mégis ezt a mappát választod?"},
     "img_lib_n_relative":       {"en": "{n} image(s) with relative paths",
                                  "hu": "{n} kép relatív útvonallal"},
     "img_lib_n_absolute":       {"en": "{n} image(s) with absolute paths only",

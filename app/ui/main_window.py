@@ -435,6 +435,9 @@ class MainWindow(QMainWindow):
         self._image_browser.pairing_settings_requested.connect(
             lambda: self._on_settings("pairing")
         )
+        self._image_browser.path_repair_requested.connect(
+            self._open_path_repair_dialog
+        )
         self._tabs.addTab(self._image_browser, t("tab_image_browser"))
 
         # --- Tab 2: Családi kereső ---

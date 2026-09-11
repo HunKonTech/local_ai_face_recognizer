@@ -23,6 +23,11 @@ Path resolution priority (``resolve_path``)
 2. ``file_path`` as absolute          → legacy / same-machine fallback
 3. ``None``                           → broken / unknown
 
+``resolve_path`` never touches the filesystem, so it stays cheap in bulk
+loops.  ``resolve_existing_path`` tries the same candidates but returns the
+first one that exists — use it wherever a file is about to be opened or
+shown, so a stale library root cannot break loading.
+
 Module-level singleton
 ----------------------
 Follow the same pattern as ``app.db.database``:
@@ -38,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
@@ -91,6 +97,22 @@ def resolve_image_path(image: "Image") -> Optional[Path]:
     """
     if _service is not None:
         return _service.resolve_path(image)
+    if getattr(image, "file_path", None):
+        return Path(image.file_path)
+    return None
+
+
+def resolve_existing_image_path(image: "Image") -> Optional[Path]:
+    """Return the first *existing* absolute path for *image*.
+
+    Like :func:`resolve_image_path`, but it verifies the candidates on disk
+    and falls back to ``file_path`` when ``relative_path`` + library root
+    points at a file that is not there.  Use it for display and loading;
+    use :func:`resolve_image_path` in bulk loops where the filesystem must
+    not be touched.
+    """
+    if _service is not None:
+        return _service.resolve_existing_path(image)
     if getattr(image, "file_path", None):
         return Path(image.file_path)
     return None
@@ -169,6 +191,7 @@ class ImageLibraryService:
         self._persist_library_root(root)
         self._library_root = root
         self._config_loaded = True
+        invalidate_path_existence_cache()
         log.info("Image library root set: %s", root)
 
     def local_config_path(self) -> Path:
@@ -226,6 +249,70 @@ class ImageLibraryService:
             return Path(fp)
 
         return None
+
+    def resolve_existing_path(self, image: "Image") -> Optional[Path]:
+        """Return the first candidate path for *image* that exists on disk.
+
+        ``resolve_path`` trusts ``relative_path`` blindly.  That breaks when
+        the stored relative paths were written against a different library
+        root than the one configured now — for example a project imported
+        from a ``.facepack`` (relative paths starting with ``_external/``)
+        whose root is later re-pointed at the original picture folder.  The
+        join then silently produces a doubled prefix and every load fails.
+
+        Candidates are tried in ``resolve_path`` order and the first existing
+        one wins.  When none exist, the ``resolve_path`` result is returned
+        unchanged so callers keep logging the primary, expected location.
+        """
+        primary = self.resolve_path(image)
+        if primary is None:
+            return None
+        if _path_exists(str(primary)):
+            return primary
+
+        fp = getattr(image, "file_path", None)
+        if fp:
+            fallback = Path(fp)
+            if fallback != primary and _path_exists(str(fallback)):
+                log.debug(
+                    "Image %s resolved via file_path fallback: %s (expected %s)",
+                    getattr(image, "id", "?"), fallback, primary,
+                )
+                return fallback
+
+        return primary
+
+    def count_resolvable(
+        self,
+        session: "Session",  # noqa: F821
+        root: Path | str,
+        sample_size: int = 50,
+    ) -> tuple[int, int]:
+        """Return ``(found, checked)`` for a sample of rows under *root*.
+
+        Used before switching the library root: if none of the sampled
+        ``relative_path`` values resolve under the candidate root, the switch
+        would break every image.  Rows without a ``relative_path`` are not
+        counted, because the root does not affect them.
+        """
+        from app.db.models import Image
+
+        root = Path(root).expanduser()
+        rows = (
+            session.query(Image.relative_path)
+            .filter(Image.relative_path.isnot(None))
+            .limit(max(1, sample_size))
+            .all()
+        )
+        checked = 0
+        found = 0
+        for (rel,) in rows:
+            if not rel:
+                continue
+            checked += 1
+            if _path_exists(str(root / _from_posix(rel))):
+                found += 1
+        return found, checked
 
     def is_path_under_root(self, absolute_path: Path | str) -> bool:
         """Return ``True`` if *absolute_path* is inside the library root."""
@@ -413,6 +500,26 @@ class ImageLibraryService:
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=4096)
+def _path_exists(path_str: str) -> bool:
+    """Cached ``Path.exists()`` so repeated resolution stays cheap.
+
+    Browsing a large library resolves the same handful of paths over and
+    over (thumbnail, single view, compare view, pair sync); a bounded cache
+    keeps that off the disk.  Call :func:`invalidate_path_existence_cache`
+    after anything that moves or creates image files.
+    """
+    try:
+        return Path(path_str).exists()
+    except OSError:  # e.g. disconnected network drive, invalid name
+        return False
+
+
+def invalidate_path_existence_cache() -> None:
+    """Forget cached path-existence answers (files moved, drive attached)."""
+    _path_exists.cache_clear()
+
 
 def _from_posix(posix_path: str) -> Path:
     """Convert a stored POSIX-style relative path to a native :class:`~pathlib.Path`.

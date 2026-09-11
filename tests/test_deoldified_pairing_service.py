@@ -868,6 +868,40 @@ class TestGetComparisonGroup:
             orig = s.query(Image).filter(Image.file_hash == "orig").first()
             assert DeoldifiedPairingService(s).get_comparison_group(orig) == []
 
+    def test_stale_library_root_does_not_drop_variants(self, tmp_db, tmp_path) -> None:
+        """Issue #179: a wrong root must not hide files reachable via file_path.
+
+        The rows carry ``_external/...`` relative paths from a ``.facepack``
+        import while the root points at the picture folder, so the join yields
+        a doubled prefix.  The group must still come out complete.
+        """
+        from app.db.database import session_scope
+        from app.db.models import Image
+        from app.services.image_library_service import (
+            get_image_library_optional,
+            invalidate_path_existence_cache,
+        )
+
+        pictures = tmp_path / "pictures"
+        pictures.mkdir()
+        with session_scope() as s:
+            paths = self._seed(s, pictures)
+        with session_scope() as s:
+            for key, path in paths.items():
+                row = s.query(Image).filter(Image.file_hash == key).first()
+                row.relative_path = f"_external/pictures/{path.name}"
+
+        svc = get_image_library_optional()
+        assert svc is not None
+        svc.set_library_root(pictures)
+        invalidate_path_existence_cache()
+
+        with session_scope() as s:
+            orig = s.query(Image).filter(Image.file_hash == "orig").first()
+            group = DeoldifiedPairingService(s).get_comparison_group(orig)
+        assert [m.label for m in group] == ["", "(artistic)", "(stable)"]
+        assert group[1].file_path == str(paths["artistic"])
+
     def test_no_group_when_bw_original_file_missing(self, tmp_db, tmp_path) -> None:
         from app.db.database import session_scope
         from app.db.models import Image

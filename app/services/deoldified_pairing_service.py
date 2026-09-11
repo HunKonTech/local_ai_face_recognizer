@@ -249,7 +249,7 @@ class DeoldifiedPairingService:
         variants), so callers can fall back to single-image behaviour.
         """
         from app.db.models import Image
-        from app.services.image_library_service import resolve_image_path
+        from app.services.image_library_service import resolve_existing_image_path
 
         index = get_deoldified_index()
         index.ensure_built(self._session)
@@ -282,7 +282,9 @@ class DeoldifiedPairingService:
             return []
 
         def _member(img: "Image", *, is_bw: bool) -> Optional[ComparisonMember]:
-            resolved = resolve_image_path(img)
+            # Existence-checked: a stale library root must not drop a variant
+            # whose file is still reachable through file_path.
+            resolved = resolve_existing_image_path(img)
             path = str(resolved) if resolved else img.file_path
             if not path or not Path(path).exists():
                 log.debug(
@@ -566,10 +568,12 @@ class DeoldifiedPairingService:
         # already synced image stays cheap.
         if crops_dir is not None and thumbnail_size is not None:
             from app.services.face_crop_service import save_crop_for_face
-            from app.services.image_library_service import resolve_image_path
+            from app.services.image_library_service import (
+                resolve_existing_image_path,
+            )
             from app.utils.image_utils import load_image_bgr
 
-            resolved = resolve_image_path(target)
+            resolved = resolve_existing_image_path(target)
             img_bgr = load_image_bgr(
                 str(resolved) if resolved else target.file_path
             )

@@ -518,3 +518,153 @@ class TestScanServiceIntegration:
             img = session.query(Image).first()
         assert img is not None
         assert img.relative_path == "photo.jpg"
+
+
+# ---------------------------------------------------------------------------
+# Existence-checked resolution (issue #179)
+# ---------------------------------------------------------------------------
+
+class TestResolveExistingPath:
+    """A stale library root must not hide a file that is still reachable.
+
+    Reproduces the reported failure: a project imported from a ``.facepack``
+    stores ``relative_path`` values that start with ``_external/``; when the
+    library root is later re-pointed at the original picture folder, the join
+    produces a doubled prefix and every load fails.
+    """
+
+    def _service(self, tmp_path, root):
+        from app.services.image_library_service import (
+            invalidate_path_existence_cache,
+        )
+
+        invalidate_path_existence_cache()
+        svc = ImageLibraryService(tmp_path / "test.db")
+        svc._library_root = Path(root)
+        svc._config_loaded = True
+        return svc
+
+    def test_falls_back_to_file_path_when_join_is_wrong(self, tmp_path):
+        real = tmp_path / "pictures" / "album" / "photo.jpg"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"x")
+
+        # Root re-pointed at the picture folder while relative_path still
+        # carries the archive's "_external/<original tree>" prefix.
+        svc = self._service(tmp_path, tmp_path / "pictures")
+        image = _make_image(
+            str(real), relative_path="_external/pictures/album/photo.jpg"
+        )
+
+        assert svc.resolve_path(image) == (
+            tmp_path / "pictures" / "_external" / "pictures" / "album" / "photo.jpg"
+        )
+        assert svc.resolve_existing_path(image) == real
+
+    def test_prefers_relative_path_when_it_exists(self, tmp_path):
+        root = tmp_path / "images"
+        real = root / "album" / "photo.jpg"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"x")
+
+        svc = self._service(tmp_path, root)
+        image = _make_image(
+            r"D:\old machine\album\photo.jpg", relative_path="album/photo.jpg"
+        )
+        assert svc.resolve_existing_path(image) == real
+
+    def test_returns_primary_when_nothing_exists(self, tmp_path):
+        root = tmp_path / "images"
+        root.mkdir()
+        svc = self._service(tmp_path, root)
+        image = _make_image(
+            str(tmp_path / "gone" / "photo.jpg"), relative_path="album/photo.jpg"
+        )
+        # The expected location is kept, so log messages stay meaningful.
+        assert svc.resolve_existing_path(image) == root / "album" / "photo.jpg"
+
+    def test_no_relative_path_uses_file_path(self, tmp_path):
+        real = tmp_path / "photo.jpg"
+        real.write_bytes(b"x")
+        svc = self._service(tmp_path, tmp_path / "images")
+        assert svc.resolve_existing_path(_make_image(str(real))) == real
+
+    def test_module_helper_uses_global_service(self, tmp_path):
+        from app.services.image_library_service import (
+            invalidate_path_existence_cache,
+            resolve_existing_image_path,
+        )
+
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        root = tmp_path / "images"
+        root.mkdir()
+        real = tmp_path / "elsewhere" / "photo.jpg"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"x")
+
+        svc = init_image_library(db_path)
+        svc.set_library_root(root)
+        invalidate_path_existence_cache()
+
+        image = _make_image(str(real), relative_path="album/photo.jpg")
+        assert resolve_image_path(image) == root / "album" / "photo.jpg"
+        assert resolve_existing_image_path(image) == real
+
+
+class TestCountResolvable:
+    def test_counts_only_rows_with_relative_path(self, tmp_path):
+        from app.services.image_library_service import (
+            invalidate_path_existence_cache,
+        )
+
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        root = tmp_path / "images"
+        (root / "album").mkdir(parents=True)
+        (root / "album" / "a.jpg").write_bytes(b"x")
+
+        with session_scope() as session:
+            session.add(Image(
+                file_path=str(root / "album" / "a.jpg"),
+                file_hash="a", file_mtime=0.0,
+                relative_path="album/a.jpg",
+            ))
+            session.add(Image(
+                file_path=str(root / "album" / "b.jpg"),
+                file_hash="b", file_mtime=0.0,
+                relative_path="album/b.jpg",
+            ))
+            session.add(Image(
+                file_path=str(tmp_path / "legacy.jpg"),
+                file_hash="c", file_mtime=0.0,
+                relative_path=None,
+            ))
+
+        invalidate_path_existence_cache()
+        svc = ImageLibraryService(db_path)
+        with session_scope() as session:
+            found, checked = svc.count_resolvable(session, root)
+        assert (found, checked) == (1, 2)
+
+    def test_reports_zero_for_an_unrelated_root(self, tmp_path):
+        from app.services.image_library_service import (
+            invalidate_path_existence_cache,
+        )
+
+        db_path = tmp_path / "test.db"
+        init_db(db_path)
+        with session_scope() as session:
+            session.add(Image(
+                file_path=str(tmp_path / "a.jpg"),
+                file_hash="a", file_mtime=0.0,
+                relative_path="_external/a.jpg",
+            ))
+
+        invalidate_path_existence_cache()
+        svc = ImageLibraryService(db_path)
+        other = tmp_path / "other"
+        other.mkdir()
+        with session_scope() as session:
+            found, checked = svc.count_resolvable(session, other)
+        assert found == 0 and checked == 1
