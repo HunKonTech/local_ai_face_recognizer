@@ -59,7 +59,7 @@ class ObjectMatchWorker:
                 ctx.report(min(99, percent), f"{stage} {done}/{total}")
 
             def cancelled() -> bool:
-                return bool(ctx.token.cancelled())
+                return ctx.token.cancelled
 
             if self._object_id is None:
                 stats = service.find_all_objects(
