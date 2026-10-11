@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.db.models import Face, FaceCorrection, Person
 from app.services.face_crop_service import face_debug_state
@@ -802,6 +802,7 @@ class IdentityService:
         """Return all faces assigned to *person_id*."""
         return (
             self._session.query(Face)
+            .options(joinedload(Face.image), joinedload(Face.person))
             .filter(Face.person_id == person_id)
             .filter(Face.is_excluded == False)  # noqa: E712
             .all()

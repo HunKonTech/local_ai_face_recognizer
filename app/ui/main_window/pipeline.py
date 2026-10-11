@@ -400,8 +400,6 @@ class PipelineMixin:
             # at startup only (_start_crop_repair_task); selecting a person reads.
             is_protected = person.is_protected
             is_auto_named = person.is_auto_named
-            for f in faces:
-                _ = f.image  # noqa: F841
             self._cluster_panel.show_person(
                 person.name,
                 faces,

@@ -660,20 +660,22 @@ class ClusterPanel(QWidget):
         self.selection_changed.emit(0)
         self._header.setText(t("face_count_header", name=person_name, n=len(faces)))
 
+        debug = log.isEnabledFor(logging.DEBUG)
         for face in faces:
-            log.debug(
-                "Cluster grid item: FaceId=%s PersonId=%s crop_path=%r "
-                "image_path=%r bbox=(%s,%s,%s,%s) preview_source=%r",
-                face.id,
-                face.person_id,
-                face.crop_path,
-                face.image.file_path if face.image else None,
-                face.bbox_x,
-                face.bbox_y,
-                face.bbox_w,
-                face.bbox_h,
-                face.crop_path,
-            )
+            if debug:
+                log.debug(
+                    "Cluster grid item: FaceId=%s PersonId=%s crop_path=%r "
+                    "image_path=%r bbox=(%s,%s,%s,%s) preview_source=%r",
+                    face.id,
+                    face.person_id,
+                    face.crop_path,
+                    face.image.file_path if face.image else None,
+                    face.bbox_x,
+                    face.bbox_y,
+                    face.bbox_w,
+                    face.bbox_h,
+                    face.crop_path,
+                )
             thumb = FaceThumbnail(face)
             thumb.clicked.connect(self._on_thumb_clicked)
             thumb.right_clicked.connect(self.face_right_clicked.emit)
