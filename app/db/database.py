@@ -156,6 +156,14 @@ def _migrate_add_columns(engine: Engine) -> None:
             ("auto_merge_decision_json", "TEXT"),
             ("is_uncertain_identification", "BOOLEAN NOT NULL DEFAULT 0"),
             ("identification_note", "TEXT"),
+            ("label_review_status", "VARCHAR(16)"),
+            ("embedding_consistency", "FLOAT"),
+        ],
+        # create_all() has already created training_runs (also on old DBs).
+        "training_runs": [
+            ("metrics_json", "TEXT"),
+            ("measured_precision", "FLOAT"),
+            ("n_reviewed", "INTEGER"),
         ],
     }
     with engine.connect() as conn:
@@ -422,6 +430,90 @@ def _migrate_deep_recognition_tables(engine: Engine) -> None:
             )
         )
     log.debug("Migration: deep recognition tables ensured")
+    _migrate_face_vetoes(engine)
+
+
+def _migrate_face_vetoes(engine: Engine) -> None:
+    """Create face_vetoes and back-fill it once from legacy judgements.
+
+    Before this table existed a "not this person" decision was stored only as a
+    FaceCorrection pair against some *other* face of the person — the veto was
+    lost as soon as that face moved.  The one-shot back-fill snapshots what
+    those pairs mean *now* (face ↔ current person of the partner face) plus
+    every reverted / corrected automatic assignment.  Idempotent: a flag row
+    in ``schema_flags`` prevents re-deriving vetoes from later-moved faces.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS face_vetoes (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    face_id     INTEGER NOT NULL
+                        REFERENCES faces(id) ON DELETE CASCADE,
+                    person_id   INTEGER NOT NULL
+                        REFERENCES persons(id) ON DELETE CASCADE,
+                    source      VARCHAR(16),
+                    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT ux_face_veto UNIQUE (face_id, person_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_face_vetoes_face_id "
+                "ON face_vetoes(face_id)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_face_vetoes_person_id "
+                "ON face_vetoes(person_id)"
+            )
+        )
+        conn.execute(
+            text("CREATE TABLE IF NOT EXISTS schema_flags (name TEXT PRIMARY KEY)")
+        )
+        done = conn.execute(
+            text("SELECT 1 FROM schema_flags WHERE name = 'face_vetoes_backfill'")
+        ).first()
+        if done is not None:
+            return
+        # Pair a → current person of b (and vice versa), never the face's own person.
+        # created_at is explicit: the ORM-created table has no DB default, and
+        # OR IGNORE would silently drop rows violating its NOT NULL.
+        for this_col, other_col in (("face_id_a", "face_id_b"), ("face_id_b", "face_id_a")):
+            conn.execute(
+                text(
+                    f"""
+                    INSERT OR IGNORE INTO face_vetoes (face_id, person_id, source, created_at)
+                    SELECT fc.{this_col}, other.person_id, 'migrated', CURRENT_TIMESTAMP
+                    FROM face_corrections fc
+                    JOIN faces other ON other.id = fc.{other_col}
+                    JOIN faces this ON this.id = fc.{this_col}
+                    WHERE fc.same_person = 0
+                      AND other.person_id IS NOT NULL
+                      AND (this.person_id IS NULL OR this.person_id != other.person_id)
+                    """
+                )
+            )
+        conn.execute(
+            text(
+                """
+                INSERT OR IGNORE INTO face_vetoes (face_id, person_id, source, created_at)
+                SELECT aa.face_id, aa.person_id, 'migrated', CURRENT_TIMESTAMP
+                FROM auto_assignments aa
+                JOIN faces f ON f.id = aa.face_id
+                WHERE aa.status IN ('reverted', 'corrected')
+                  AND (f.person_id IS NULL OR f.person_id != aa.person_id)
+                """
+            )
+        )
+        conn.execute(
+            text("INSERT INTO schema_flags (name) VALUES ('face_vetoes_backfill')")
+        )
+    log.info("Migration: face_vetoes back-filled from legacy judgements")
 
 
 def _migrate_object_tagging(engine: Engine) -> None:

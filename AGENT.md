@@ -100,6 +100,7 @@ local_ai_face_recognizer/
 │   ├── deep/
 │   │   ├── classifier.py          # Optional learned classifier layer
 │   │   ├── dataset.py             # Training/inference dataset helpers
+│   │   ├── evaluation.py          # Open-set accuracy + review-feedback precision
 │   │   └── debug_info.py          # Deep recognition diagnostics
 │   ├── clustering/
 │   │   └── clusterer.py           # DBSCAN over cosine distance

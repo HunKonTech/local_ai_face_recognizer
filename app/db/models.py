@@ -652,6 +652,20 @@ class Face(Base):
     # research evidence, doubts or conflicting family memories.  Optional.
     identification_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Deep engine label-noise review: "suspicious" = the face looks much more
+    # like another person than its own (excluded from training until the user
+    # decides), "kept" = the user confirmed the label despite the warning.
+    # NULL = never flagged.
+    label_review_status: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True
+    )
+    # Cosine agreement of the embeddings of the crop and its mirror image
+    # (flip test-time augmentation) — low values mean an unreliable embedding
+    # (profile, blur, occlusion).  NULL when embedded without TTA.
+    embedding_consistency: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     image: Mapped["Image"] = relationship("Image", back_populates="faces")
@@ -1130,6 +1144,41 @@ AUTO_ASSIGN_STATUS_AUTO = "auto"            # made by the engine, awaiting revie
 AUTO_ASSIGN_STATUS_CONFIRMED = "confirmed"  # user approved → trusted training data
 AUTO_ASSIGN_STATUS_CORRECTED = "corrected"  # user moved the face to someone else
 AUTO_ASSIGN_STATUS_REVERTED = "reverted"    # user sent the face back to unknown
+# Not assigned: the engine was close but unsure — offered as a one-click
+# "near match" suggestion (active learning).  The face itself is untouched.
+AUTO_ASSIGN_STATUS_NEAR = "near"
+
+# Face.label_review_status values (deep engine label-noise filter).
+LABEL_REVIEW_SUSPICIOUS = "suspicious"
+LABEL_REVIEW_KEPT = "kept"
+
+
+class FaceVeto(Base):
+    """A hard "this face is NOT this person" judgement.
+
+    Written whenever the user rejects / corrects an automatic assignment (or
+    removes a suspicious label).  Unlike a :class:`FaceCorrection` pair it does
+    not depend on some third face of the person staying where it is, so the
+    veto survives later edits.  The deep engine never assigns a vetoed pair
+    and learns from these rows as hard negatives.
+    """
+
+    __tablename__ = "face_vetoes"
+    __table_args__ = (UniqueConstraint("face_id", "person_id", name="ux_face_veto"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    face_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("faces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    person_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("persons.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # "revert" | "correct" | "near_reject" | "label_review" | "migrated"
+    source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<FaceVeto face={self.face_id} person={self.person_id}>"
 
 
 class TrainingRun(Base):
@@ -1164,6 +1213,14 @@ class TrainingRun(Base):
     model_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # JSON diagnostics: calibration (meta threshold, out-of-fold precision /
+    # coverage), suspicious labels, applied strictness, optional evaluation.
+    metrics_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Real precision measured from the user's review decisions (confirmed vs
+    # corrected/reverted) at the time of this run, and how many were reviewed.
+    measured_precision: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    n_reviewed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     assignments: Mapped[List["AutoAssignment"]] = relationship(
         "AutoAssignment", back_populates="training_run", cascade="all, delete-orphan"

@@ -1207,6 +1207,16 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                                      "hu": "KIHAGYVA — modell nincs betanítva"},
     "debug_viz_reason_no_embedding": {"en": "SKIPPED — no embedding",
                                       "hu": "KIHAGYVA — nincs embedding"},
+    "debug_viz_reason_unknown_class": {"en": "REJECTED — looks like a stranger",
+                                       "hu": "ELUTASÍTVA — ismeretlennek tűnik"},
+    "debug_viz_reason_knn":         {"en": "REJECTED — nearest faces disagree",
+                                     "hu": "ELUTASÍTVA — a legközelebbi arcok mást mutatnak"},
+    "debug_viz_reason_correction":  {"en": "REJECTED — you said it is not this person",
+                                     "hu": "ELUTASÍTVA — jelezted, hogy nem ez a személy"},
+    "debug_viz_reason_date":        {"en": "REJECTED — photo outside the person's lifetime",
+                                     "hu": "ELUTASÍTVA — a fotó a személy életén kívül esik"},
+    "debug_viz_reason_repeat":      {"en": "REJECTED — person already on this photo",
+                                     "hu": "ELUTASÍTVA — a személy már szerepel a képen"},
     "debug_viz_flow_title":         {"en": "Decision path", "hu": "Döntési útvonal"},
     "debug_viz_nav_live_tooltip":   {"en": "Jump to latest face (live follow mode)",
                                      "hu": "Ugrás a legutóbbi archoz (élő követési mód)"},
@@ -3017,6 +3027,74 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "autoAssign.status_reverted":
         {"en": "Undone",
          "hu": "Visszavonva"},
+    "autoAssign.sort_label":
+        {"en": "Order:",
+         "hu": "Sorrend:"},
+    "autoAssign.sort_uncertain":
+        {"en": "Least certain first",
+         "hu": "Legbizonytalanabb elöl"},
+    "autoAssign.sort_certain":
+        {"en": "Most certain first",
+         "hu": "Legbiztosabb elöl"},
+    "autoAssign.sort_tooltip":
+        {"en": "Reviewing the least certain groupings first teaches the AI the most.",
+         "hu": "A legbizonytalanabb csoportosítások átnézése tanítja a legtöbbet az AI-nak."},
+    "autoAssign.near_header":
+        {"en": "Near matches — the AI was unsure ({n})",
+         "hu": "Majdnem-találatok — az AI bizonytalan volt ({n})"},
+    "autoAssign.near_intro":
+        {"en": "These faces were NOT assigned: the AI found a likely person but was "
+               "not sure enough. One click confirms or rejects — each answer is "
+               "exactly the example the AI needs most.",
+         "hu": "Ezeket az arcokat az AI NEM rendelte hozzá: talált valószínű személyt, "
+               "de nem volt elég biztos. Egy kattintással megerősítheted vagy "
+               "elutasíthatod — minden válasz pont az a példa, amire az AI-nak a "
+               "legnagyobb szüksége van."},
+    "autoAssign.near_empty":
+        {"en": "No near matches in the last run.",
+         "hu": "Az utolsó futásban nem volt majdnem-találat."},
+    "autoAssign.near_confirm":
+        {"en": "Yes, it's them",
+         "hu": "Igen, ő az"},
+    "autoAssign.near_confirm_tooltip":
+        {"en": "Assign the face to this person (trusted training example).",
+         "hu": "Az arc hozzárendelése ehhez a személyhez (megbízható tanítópélda)."},
+    "autoAssign.near_reject":
+        {"en": "Not them",
+         "hu": "Nem ő"},
+    "autoAssign.near_reject_tooltip":
+        {"en": "The face stays where it is; the AI will never suggest this person for it again.",
+         "hu": "Az arc marad, ahol van; az AI soha többé nem ajánlja hozzá ezt a személyt."},
+    "autoAssign.suspicious_header":
+        {"en": "Suspicious labels ({n})",
+         "hu": "Gyanús címkék ({n})"},
+    "autoAssign.suspicious_intro":
+        {"en": "These faces are labeled with a person, but look much more like "
+               "someone else. They are left out of AI training until you decide.",
+         "hu": "Ezek az arcok egy személyhez vannak rendelve, de sokkal inkább "
+               "valaki másra hasonlítanak. Amíg nem döntesz, kimaradnak az AI "
+               "tanításából."},
+    "autoAssign.suspicious_empty":
+        {"en": "No suspicious labels.",
+         "hu": "Nincs gyanús címke."},
+    "autoAssign.suspicious_lookalike":
+        {"en": "{name} — looks more like {other}",
+         "hu": "{name} — inkább {other} személyre hasonlít"},
+    "autoAssign.suspicious_keep":
+        {"en": "Label is right",
+         "hu": "A címke jó"},
+    "autoAssign.suspicious_keep_tooltip":
+        {"en": "Keep the label and use the face for training again.",
+         "hu": "A címke marad, és az arc újra tanítóadat lesz."},
+    "autoAssign.suspicious_remove":
+        {"en": "Remove label",
+         "hu": "Címke eltávolítása"},
+    "autoAssign.suspicious_remove_tooltip":
+        {"en": "Send the face back to the unknown faces; the AI will not put it on this person again.",
+         "hu": "Az arc visszakerül az ismeretlenek közé; az AI nem teszi vissza erre a személyre."},
+    "autoAssign.metrics":
+        {"en": "AI calibration: target precision {target}, measured from your reviews {measured}",
+         "hu": "AI kalibráció: cél-pontosság {target}, az átnézéseid alapján mért {measured}"},
     "scanModes.openButton":
         {"en": "Scan & Maintenance …",
          "hu": "Beolvasás és karbantartás …"},
@@ -3256,6 +3334,36 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "scanModes.ignoredFaces.startButton":
         {"en": "Manage Ignored Faces",
          "hu": "Kizárt arcok kezelése"},
+    "scanModes.reembedFaces.title":
+        {"en": "Recompute Face Embeddings (AI)",
+         "hu": "Arc-jellemzők újraszámolása (AI)"},
+    "scanModes.reembedFaces.description":
+        {"en": "Recomputes the embedding of every face with the current settings "
+               "(e.g. mirror-image averaging, which makes every face vector cleaner "
+               "and records how reliable it is), then retrains the AI model from "
+               "scratch and re-recognizes unknown faces. Face boxes and person "
+               "assignments are kept.",
+         "hu": "Minden arc jellemzővektorát újraszámolja a jelenlegi beállításokkal "
+               "(pl. tükörkép-átlagolással, ami minden arcvektort tisztábbá tesz, és "
+               "rögzíti, mennyire megbízható), majd nulláról újratanítja az AI "
+               "modellt, és újra felismeri az ismeretlen arcokat. Az arckeretek és a "
+               "személy-hozzárendelések megmaradnak."},
+    "scanModes.reembedFaces.startButton":
+        {"en": "Recompute Embeddings",
+         "hu": "Jellemzők újraszámolása"},
+    "scanModes.reembedFaces.warning":
+        {"en": "Slow on large libraries — every face crop is processed again",
+         "hu": "Nagy könyvtárnál lassú — minden arcképet újra feldolgoz"},
+    "reembed_confirm_title":
+        {"en": "Recompute embeddings",
+         "hu": "Jellemzők újraszámolása"},
+    "reembed_confirm_msg":
+        {"en": "Recompute the embedding of every face and retrain the AI model from "
+               "scratch?\n\nFace boxes and person assignments are kept. This can "
+               "take a long time on a large library.",
+         "hu": "Újraszámolja minden arc jellemzővektorát, és nulláról újratanítja "
+               "az AI modellt?\n\nAz arckeretek és a személy-hozzárendelések "
+               "megmaradnak. Nagy könyvtárnál sokáig tarthat."},
     "cleanup_empty_unknowns_title":
         {"en": "Clean Up Empty Unknown Persons",
          "hu": "Üres Unknown személyek tisztítása"},
@@ -4063,6 +4171,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "task_deep_train":      {"en": "AI training",             "hu": "AI tanítás"},
     "task_deep_detect":     {"en": "AI face detection",       "hu": "AI arc-detektálás"},
     "task_deep_cluster":    {"en": "Unknown cluster rebuild",  "hu": "Unknown klaszter újraépítés"},
+    "task_deep_reembed":    {"en": "AI embedding recompute",   "hu": "AI jellemző-újraszámolás"},
     "task_astro_export":    {"en": "Website export",          "hu": "Weboldal export"},
     "task_metadata_export": {"en": "Face metadata embed",     "hu": "Arc-metaadatok beágyazása"},
     "task_thumbnail_build": {"en": "Thumbnail generation",    "hu": "Bélyegképek készítése"},

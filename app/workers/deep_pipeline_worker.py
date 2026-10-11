@@ -57,7 +57,7 @@ from app.services.deep_recognition_service import (
 )
 from app.services.detection_run_logger import DetectionRunLogger
 from app.services.detection_service import DetectionService
-from app.services.embedding_service import EmbeddingService
+from app.services.embedding_service import EmbeddingService, embedder_identity
 from app.services.intra_image_consistency_service import (
     IntraImageConsistencyService,
     IntraImageConsistencyStats,
@@ -85,6 +85,9 @@ MODE_DETECT_FACES = "detect_faces"
 # Lightweight rebuild of Unknown groups: ignored filter + clustering +
 # intra-image consistency + suggestions. No scan/detection/training.
 MODE_CLUSTER = "cluster"
+# Recompute every embedding with the current settings (e.g. flip-TTA), then
+# retrain the model from scratch and re-recognize.  No scan / detection.
+MODE_REEMBED = "reembed"
 
 
 class DeepPipelineWorker(QThread):
@@ -131,6 +134,7 @@ class DeepPipelineWorker(QThread):
             MODE_DETECT_FACES,
             MODE_REBUILD_MODEL,
             MODE_CLUSTER,
+            MODE_REEMBED,
         ):
             raise ValueError(f"Unknown deep pipeline mode: {mode!r}")
         # Accept legacy single-folder callers via `root_folder` keyword.
@@ -273,8 +277,14 @@ class DeepPipelineWorker(QThread):
         if self._mode == MODE_CLUSTER:
             return self._run_cluster_only_pipeline()
 
+        if self._mode == MODE_REEMBED:
+            return self._run_reembed_pipeline()
+
         # Rescan and Rebuild both gain the multi-stage non-face cleanup stage.
         n_stages = 10 if self._mode == MODE_RESCAN else 11
+        cluster_first = self._config.deep_recognition.cluster_before_recognition
+        if cluster_first:
+            n_stages += 1
         stage = [0]
 
         def announce(message: str) -> None:
@@ -350,6 +360,13 @@ class DeepPipelineWorker(QThread):
         # --- Permanently-ignored face filter ---
         self._run_ignored_filter()
 
+        # --- Group new unknown faces first: their groups then vote ---
+        # (an unsure face follows its "Unknown N" group's clear majority).
+        if cluster_first:
+            announce("Grouping new unknown faces (before recognition) …")
+            self._run_clustering()
+            self._checkpoint()
+
         # --- Train + recognize (the deep learning core) ---
         announce(
             "Training the neural network from your categorized faces "
@@ -405,7 +422,8 @@ class DeepPipelineWorker(QThread):
             f"{' (model reused — data unchanged)' if train.reused_existing_model else ''} | "
             f"AI assigned {rec.n_assigned} of {rec.n_candidates} unknown face(s) "
             f"(outlier={rec.n_rejected_outlier}, "
-            f"unsure={rec.n_rejected_threshold + rec.n_rejected_margin + rec.n_rejected_prototype}) | "
+            f"unsure={rec.n_rejected_threshold + rec.n_rejected_margin + rec.n_rejected_prototype + rec.n_rejected_knn + rec.n_rejected_unknown_class}, "
+            f"near-matches={rec.n_near_suggestions}) | "
             f"overlaps removed: {overlap_stats.faces_removed} | "
             f"unknown groups: +{cluster_stats.n_new_persons} | "
             f"intra-image fixes: {consistency_stats.n_faces_reassigned} | "
@@ -451,13 +469,7 @@ class DeepPipelineWorker(QThread):
             self._emit_progress(current, total or 0, "Training", detail)
 
         with session_scope() as session:
-            svc = DeepRecognitionService(
-                session=session,
-                config=self._config.deep_recognition,
-                model_dir=self._config.resolve(
-                    self._config.deep_recognition.model_dir
-                ),
-            )
+            svc = self._deep_service(session)
             _, train, _ = svc.train(
                 mode=MODE_TRAIN, progress_cb=train_cb, force=True
             )
@@ -490,13 +502,7 @@ class DeepPipelineWorker(QThread):
         """
         self._emit_log("Stage 1/3: Deleting the existing AI model …")
         with session_scope() as session:
-            DeepRecognitionService(
-                session=session,
-                config=self._config.deep_recognition,
-                model_dir=self._config.resolve(
-                    self._config.deep_recognition.model_dir
-                ),
-            ).delete_model()
+            self._deep_service(session).delete_model()
         self._checkpoint()
 
         self._emit_log("Stage 2/3: Generating missing face embeddings …")
@@ -524,16 +530,7 @@ class DeepPipelineWorker(QThread):
             self._emit_progress(current, total or 0, "Recognizing", detail)
 
         with session_scope() as session:
-            svc = DeepRecognitionService(
-                session=session,
-                config=self._config.deep_recognition,
-                model_dir=self._config.resolve(
-                    self._config.deep_recognition.model_dir
-                ),
-                identity_guard=getattr(
-                    self._config, "recognition_identity_guard", None
-                ),
-            )
+            svc = self._deep_service(session)
             result = svc.train_and_recognize(
                 mode=MODE_REBUILD_MODEL,
                 train_progress_cb=train_cb,
@@ -716,13 +713,7 @@ class DeepPipelineWorker(QThread):
         # stale model (trained on data that no longer exists) can never linger or
         # be reused. The train stage below retrains fresh (force=True).
         with session_scope() as session:
-            DeepRecognitionService(
-                session=session,
-                config=self._config.deep_recognition,
-                model_dir=self._config.resolve(
-                    self._config.deep_recognition.model_dir
-                ),
-            ).delete_model()
+            self._deep_service(session).delete_model()
 
         log.info(
             "Rebuild reset: deleted %d automatic face(s), kept %d human-confirmed.",
@@ -847,6 +838,94 @@ class DeepPipelineWorker(QThread):
                 expected_dim=embedder.embedding_dim,
             )
 
+    def _deep_service(self, session) -> DeepRecognitionService:
+        """The deep engine service, wired to this run's config + embedder id."""
+        return DeepRecognitionService(
+            session=session,
+            config=self._config.deep_recognition,
+            model_dir=self._config.resolve(self._config.deep_recognition.model_dir),
+            identity_guard=getattr(self._config, "recognition_identity_guard", None),
+            embedder_id=embedder_identity(self._config),
+        )
+
+    # ------------------------------------------------------------------
+    # Re-embed pipeline (all embeddings recomputed, model rebuilt)
+    # ------------------------------------------------------------------
+
+    def _run_reembed_pipeline(self) -> PipelineResult:
+        """Recompute every embedding with the current settings, then retrain.
+
+        Use after switching on flip-TTA (or another embedding setting): mixed
+        old/new vectors still work, but only a full re-embed gives every face
+        the cleaner vector and the reliability score.  Person assignments and
+        face boxes are untouched.
+        """
+        from app.services.embedding_service import build_embedder
+
+        self._emit_log("Stage 1/2: Recomputing every face embedding …")
+        embedder = build_embedder(self._config)
+        self._emit_log(
+            f"  Embedder backend: {getattr(embedder, '_backend', '?')}"
+            f" (dim={embedder.embedding_dim})"
+        )
+
+        def embed_cb(current, total, face_id):
+            self._emit_progress(current, total or 0, "Embedding", f"face #{face_id}")
+
+        try:
+            with session_scope() as session:
+                embedded = EmbeddingService(
+                    session=session,
+                    embedder=embedder,
+                    config=self._config,
+                    progress_cb=embed_cb,
+                ).reembed_all(
+                    exclude_low_quality=self._config.deep_recognition.strict_quality_filter
+                )
+        except ImportError as exc:
+            log.error("TFLite backend missing: %s", exc)
+            raise RuntimeError(
+                "Hiányzik a TFLite futtatókörnyezet. "
+                "Telepítsd/javítsd a függőségeket:\n"
+                "  pip install ai-edge-litert\n"
+                f"Részletek: {exc}"
+            ) from exc
+        self._checkpoint()
+
+        self._emit_log(
+            "Stage 2/2: Training a fresh neural network and re-recognizing "
+            "(this may take a while — accuracy over speed) …"
+        )
+
+        def train_cb(current, total, detail):
+            self._emit_progress(current, total or 0, "Training", detail)
+
+        def recognize_cb(current, total, detail):
+            self._emit_progress(current, total or 0, "Recognizing", detail)
+
+        with session_scope() as session:
+            svc = self._deep_service(session)
+            svc.delete_model()
+            result = svc.train_and_recognize(
+                mode=MODE_REBUILD_MODEL,
+                train_progress_cb=train_cb,
+                recognize_progress_cb=recognize_cb,
+            )
+        n_suggestions = self._run_suggestions()
+        rec = result.recognition
+        summary = (
+            f"Done (reembed) — {embedded} face(s) re-embedded | model trained on "
+            f"{result.train.n_examples} face(s) of {result.train.n_persons} "
+            f"person(s) | AI assigned {rec.n_assigned} of {rec.n_candidates} "
+            f"unknown face(s), {rec.n_near_suggestions} near-match suggestion(s)"
+        )
+        self._emit_log(summary)
+        return PipelineResult(
+            True, summary,
+            n_suggestions=n_suggestions,
+            n_auto_assignments=rec.n_assigned,
+        )
+
     def _run_overlap_resolution(self) -> OverlapResolutionStats:
         try:
             with session_scope() as session:
@@ -930,16 +1009,7 @@ class DeepPipelineWorker(QThread):
                     self.face_debug.emit(info)
 
         with session_scope() as session:
-            svc = DeepRecognitionService(
-                session=session,
-                config=self._config.deep_recognition,
-                model_dir=self._config.resolve(
-                    self._config.deep_recognition.model_dir
-                ),
-                identity_guard=getattr(
-                    self._config, "recognition_identity_guard", None
-                ),
-            )
+            svc = self._deep_service(session)
             result = svc.train_and_recognize(
                 mode=self._mode,
                 train_progress_cb=train_cb,

@@ -201,6 +201,7 @@ class ScanModesDialog(QDialog):
             ("identityRepair", "identity_repair", False),
             ("cleanupEmptyUnknowns", "cleanup_empty_unknowns", False),
             ("ignoredFaces", "manage_ignored_faces", False),
+            ("reembedFaces", "reembed_faces", False),
         ]
         for key, action, danger in maintenance:
             warn_key = f"scanModes.{key}.warning"

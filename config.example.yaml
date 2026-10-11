@@ -112,6 +112,13 @@ embedding:
   # whole library afterwards, otherwise old and new embeddings are not comparable.
   # crop_mode: legacy
 
+  # Mirror-image test-time augmentation: the crop and its mirror are embedded
+  # and averaged (same vector space, less noise), and their agreement is stored
+  # per face as an embedding-reliability score used by the AI engine.  Old and
+  # new vectors stay comparable; "Recompute Face Embeddings (AI)" in Scan &
+  # Maintenance upgrades the whole library at once.
+  flip_tta: true
+
 clustering:
   # Legacy DBSCAN grouping settings. The main pipeline now uses the learned
   # recognition settings below to assign unresolved faces to labeled people.
@@ -227,10 +234,99 @@ deep_recognition:
 
   # --- Continual learning from automatic assignments ---
   use_auto_assignments_for_training: true
-  auto_training_min_confidence: 0.92
+  # A calibrated P(correct) when the meta-classifier is active.
+  auto_training_min_confidence: 0.97
 
   # Use the slower high-accuracy detector pass in the AI pipeline.
   high_accuracy_detection: false
+
+  # ===== Accuracy settings (measure with: python -m scripts.deep_eval) =====
+
+  # --- Calibration ---
+  # Automatic assignments aim for this precision.  Calibration keeps whole
+  # photo sessions together (no burst-shot leakage) and simulates strangers
+  # by hiding each test face's true person.
+  target_precision: 0.98
+  # Assumed share of strangers among the unknown faces of the archive.
+  expected_unknown_ratio: 0.5
+  # Per-person probability thresholds shrink towards the global one with this
+  # many pseudo-examples (people with few faces use mostly the global value).
+  threshold_shrinkage: 5.0
+
+  # --- Robust matching ---
+  # Of the k nearest training faces, at least this share must be the winner
+  # (k shrinks to the winner's face count) — one mislabeled face can no longer
+  # pull its lookalikes onto the wrong person.
+  knn_k: 5
+  min_knn_agreement: 0.5
+
+  # --- Calibrated meta-classifier: P(correct) from probability, similarities,
+  #     k-NN agreement, face size, quality and embedding reliability ---
+  use_meta_classifier: true
+  meta_min_rows: 30
+  meta_min_threshold: 0.5
+  meta_max_threshold: 0.97
+
+  # --- Learning from mistakes / clean training data ---
+  # Your "not this person" decisions weigh this much in calibration.
+  hard_negative_weight: 2.0
+  # Explicit "unknown" network output, trained on faces resembling nobody known.
+  use_unknown_class: true
+  unknown_class_max_similarity: 0.40
+  min_unknown_examples: 10
+  max_unknown_examples: 400
+  # Labeled faces looking much more like someone else are flagged "suspicious"
+  # (review tab) and left out of training until you decide.
+  label_noise_min_other_similarity: 0.55
+  label_noise_margin: 0.15
+  label_noise_max_fraction: 0.2
+  # Near-identical burst shots of one person count once.
+  dedup_similarity: 0.97
+  # Per-person sub-centers (e.g. child / adult look).
+  faces_per_sub_center: 8
+  max_sub_centers: 4
+
+  # --- Context ---
+  # A second appearance of a person on the same photo needs stronger evidence
+  # (usually it is a lookalike relative).
+  repeat_on_image_strict: true
+  repeat_extra_confidence: 0.10
+  # Never name a face on a photo taken before the person's birth / after their
+  # death (birth_date / death_date vs photo date, with tolerance).
+  date_veto_enabled: true
+  date_veto_tolerance_years: 1
+  # Unsure members of an "Unknown N" group follow the group's clear majority.
+  cluster_vote_enabled: true
+  cluster_vote_min_size: 3
+  cluster_vote_min_assigned: 2
+  cluster_vote_min_purity: 0.8
+  cluster_vote_min_similarity: 0.45
+  cluster_vote_relief: 0.20
+  # Person confirmed on another photo of the same day → slightly lower bar.
+  event_prior_bonus: 0.05
+  # Group new unknown faces before recognition (enables the group vote).
+  cluster_before_recognition: true
+
+  # --- Active learning & feedback ---
+  # Close-but-unsure faces are offered as one-click "near matches".
+  near_suggestions_enabled: true
+  near_min_score: 0.30
+  near_min_similarity: 0.45
+  max_near_suggestions: 200
+  # When the precision measured from your reviews drops below
+  # target_precision, every threshold tightens (up to max_strictness).
+  feedback_window: 300
+  feedback_min_reviewed: 20
+  feedback_tighten_gain: 1.0
+  max_strictness: 0.15
+  # Extra train + recognize rounds learning from the run's own surest results.
+  self_training_rounds: 0
+
+  # --- Evaluation ---
+  # Run the (slow) open-set evaluation after each training; metrics are stored
+  # on the training run.  The same report: python -m scripts.deep_eval
+  evaluate_after_training: false
+  evaluation_holdout_fraction: 0.2
 
 ai_face_detection:
   # AI (deep learning) face detection — analysis only. Part of the AI pipeline

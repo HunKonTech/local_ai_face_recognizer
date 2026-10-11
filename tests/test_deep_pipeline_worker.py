@@ -119,9 +119,28 @@ def test_overlap_resolution_runs_again_after_recognition(tmp_db, monkeypatch):
 
     overlap_calls = [i for i, n in enumerate(calls) if n == "_run_overlap_resolution"]
     rec_call = calls.index("_run_deep_train_and_recognize")
-    cluster_call = calls.index("_run_clustering")
+    cluster_calls = [i for i, n in enumerate(calls) if n == "_run_clustering"]
     assert len(overlap_calls) == 2
-    assert overlap_calls[0] < rec_call < overlap_calls[1] < cluster_call
+    # New unknown faces are grouped *before* recognition (their groups vote),
+    # and what is still unknown afterwards is grouped again at the end.
+    assert len(cluster_calls) == 2
+    assert overlap_calls[0] < cluster_calls[0] < rec_call
+    assert rec_call < overlap_calls[1] < cluster_calls[1]
+
+
+def test_reembed_mode_recomputes_then_retrains(tmp_db, monkeypatch):
+    """The re-embed mode never scans or detects — embeddings, then the model."""
+    from app.workers.deep_pipeline_worker import MODE_REEMBED
+
+    worker = DeepPipelineWorker(
+        root_folders=["/x"], config=AppConfig(), mode=MODE_REEMBED
+    )
+    calls: list[str] = []
+    for name in ("_run_scan", "_run_detection", "_run_embedding"):
+        monkeypatch.setattr(worker, name, lambda *_a, _n=name, **_k: calls.append(_n))
+    monkeypatch.setattr(worker, "_run_reembed_pipeline", lambda: calls.append("reembed"))
+    worker._run_pipeline()
+    assert calls == ["reembed"]
 
 
 def test_invalid_mode_raises():

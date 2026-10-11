@@ -113,6 +113,9 @@ _GATE_DISPLAY_NAMES = {
     "margin":     "Margin gate",
     "sim_floor":  "Sim-floor gate",
     "sim_margin": "Sim-margin gate",
+    "unknown":    "Unknown-output gate",
+    "meta":       "Calibrated-confidence gate",
+    "knn":        "Nearest-neighbour gate",
 }
 
 _GATE_DESCRIPTIONS = {
@@ -121,6 +124,9 @@ _GATE_DESCRIPTIONS = {
     "margin":     "Probability gap to runner-up ≥ min margin\n(no ambiguity between persons)",
     "sim_floor":  "Max cosine sim to winner's examples ≥ floor\n(not just MLP overconfidence)",
     "sim_margin": "Winner sim − runner-up sim ≥ margin\n(winner clearly closer in embedding space)",
+    "unknown":    "P(unknown) < P(winner)\n(the network does not think it is a stranger)",
+    "meta":       "Calibrated P(correct) ≥ threshold\n(set where measured precision reaches the target)",
+    "knn":        "Share of the winner among the nearest training faces ≥ min\n(one mislabeled face cannot attract lookalikes)",
 }
 
 # Colors
@@ -1115,6 +1121,11 @@ class AIVisualizationWindow(QDialog):
             "prototype": t("debug_viz_reason_prototype"),
             "untrained": t("debug_viz_reason_untrained"),
             "no_embedding": t("debug_viz_reason_no_embedding"),
+            "unknown_class": t("debug_viz_reason_unknown_class"),
+            "knn": t("debug_viz_reason_knn"),
+            "correction": t("debug_viz_reason_correction"),
+            "date": t("debug_viz_reason_date"),
+            "repeat_on_image": t("debug_viz_reason_repeat"),
         }
         reason_text = reason_map.get(pred.reason, pred.reason)
         name_text = pred.person_name or "—"
