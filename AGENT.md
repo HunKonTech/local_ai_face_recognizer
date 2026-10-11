@@ -13,7 +13,7 @@ pytest -q tests/test_post_buffer_release.py  # Test release posting
 python -m app.main                   # Run app directly (after setup)
 ```
 
-**Languages**: English / Hungarian (EN / HU) via [`app/ui/i18n.py`](app/ui/i18n.py) — ALL UI strings in both.
+**Languages**: English / Hungarian (EN / HU) via [`app/ui/i18n/`](app/ui/i18n/) — ALL UI strings in both.
 
 **⚠️ Git Workflow**: You **cannot commit directly**. Stage changes with `git add`, then request human approval. The human reviews and commits with proper GitHub issue references (`#13 #18 #10`).
 
@@ -32,7 +32,7 @@ python -m app.main                   # Run app directly (after setup)
 
 | Task | File(s) | Quick Command |
 |------|---------|---------------|
-| Add UI string (EN + HU) | [`app/ui/i18n.py`](app/ui/i18n.py) | Add to `_STRINGS`, use `t("key")` in widget |
+| Add UI string (EN + HU) | [`app/ui/i18n/strings/`](app/ui/i18n/strings/) | Add to the matching `sNN_*.py` part (`STRINGS`), use `t("key")` |
 | Fix TPU issue | [`app/ui/dialogs/tpu_status_dialog.py`](app/ui/dialogs/tpu_status_dialog.py) | Show fix dialog with symlink command |
 | Add detection model | [`app/detectors/factory.py`](app/detectors/factory.py) | Update `create_detector()`, add fallback |
 | Adjust embedding params | [`config.yaml`](config.yaml) → [`app/config.py`](app/config.py) | Update threshold, dimensions |
@@ -67,7 +67,7 @@ Users never research; app always shows exact fix commands or one-click button. E
 | [`app/clustering/clusterer.py`](app/clustering/clusterer.py) | `Clusterer.cluster()` | DBSCAN cosine distance |
 | [`app/services/scan_service.py`](app/services/scan_service.py) | `ScanService.scan()` | Find new image files |
 | [`app/services/detection_service.py`](app/services/detection_service.py) | `DetectionService.detect_faces()` | Run detector on image |
-| [`app/ui/i18n.py`](app/ui/i18n.py) | `t("key")` | Translate string to EN/HU |
+| [`app/ui/i18n/`](app/ui/i18n/) | `t("key")` | Translate string to EN/HU |
 | [`app/tasks/manager.py`](app/tasks/manager.py) | `get_task_manager().submit()`, `TaskPriority`, `BackgroundTask` | Priority-scheduled background tasks with UI visibility + auto-cleanup |
 
 ---
@@ -157,13 +157,13 @@ local_ai_face_recognizer/
 │   │   ├── person_search.py       # Person search helpers
 │   │   └── fuzzy_date.py          # Fuzzy/partial date handling
 │   └── ui/
-│       ├── i18n.py                # t("key") - EN + HU strings
-│       ├── main_window.py         # Main QMainWindow
+│       ├── i18n/                  # t("key"); strings/ holds EN+HU parts (s01_*.py …)
+│       ├── main_window/           # MainWindow = window.py + mixins (ui_build, pipeline, gdrive, …)
 │       ├── theme.py               # Application theme
 │       ├── display_utils.py       # UI formatting helpers
 │       ├── panels/
 │       │   ├── cluster_panel.py   # Face recognition/person face grid
-│       │   ├── image_browser_panel.py # Photo browser and metadata workflows
+│       │   ├── image_browser/         # Photo browser: panel.py + mixins (tree, face_editing, …); image_browser_panel.py = compat shim
 │       │   ├── persons_panel.py   # Person detail/list tab
 │       │   ├── family_search_panel.py # Family search tab
 │       │   ├── locations_panel.py # Places/map tab
@@ -270,7 +270,7 @@ python -c "from app.db.database import init_db; init_db(); print('DB ready')"
 | **SQLite + WAL** | No external DB dependency; offline-first; fast concurrent reads | [`db/database.py`](app/db/database.py) |
 | **Session context manager** | Auto-commit/rollback; prevents transaction leaks | All services |
 | **MobileFaceNet fallback** | Manual download (no canonical URL); fallback HOG keeps app running | [`embeddings/tflite_embedder.py`](app/embeddings/tflite_embedder.py) |
-| **i18n via `t("key")`** | Bilingual requirement; single source of truth | [`ui/i18n.py`](app/ui/i18n.py) |
+| **i18n via `t("key")`** | Bilingual requirement; single source of truth | [`ui/i18n/`](app/ui/i18n/) |
 | **Multiple DB support** | Let users switch databases; path saved in `~/.face_local_prefs.json` | [`ui/dialogs/settings_dialog.py`](app/ui/dialogs/settings_dialog.py) |
 | **TaskManager for all background work** | Unified scheduling, priority queue, pause/resume, UI visibility; auto-cleanup after 5 min | [`tasks/manager.py`](app/tasks/manager.py) |
 
@@ -322,7 +322,7 @@ scan:
 
 ## UI Feature Checklist
 
-1. **Strings**: Add to [`app/ui/i18n.py`](app/ui/i18n.py) (EN + HU)
+1. **Strings**: Add to [`app/ui/i18n/`](app/ui/i18n/) (EN + HU)
 2. **Widget code**: Use `t("key")`, never hardcode
 3. **Persistent UI**: Add to `_retranslate()` in [`main_window.py`](app/ui/main_window.py)
 4. **New dependency**: Update `pyproject.toml`, add graceful fallback + clear error message with install command
@@ -346,7 +346,7 @@ scan:
 - → Poor clustering → adjust `clustering.epsilon` in `config.yaml` (default 0.4)
 
 **UI strings not translated?**
-- → Check [`app/ui/i18n.py`](app/ui/i18n.py): missing EN or HU entry? Add both.
+- → Check [`app/ui/i18n/`](app/ui/i18n/): missing EN or HU entry? Add both.
 - → Widget not using `t("key")`? Update widget code.
 
 **Database issues?**
@@ -357,56 +357,4 @@ scan:
 
 ## Release Social Posting (Buffer)
 
-This repository has release-to-social automation via Buffer.
-
-Current implementation:
-- Workflow file: `.github/workflows/build-release.yml`
-- Posting script: `scripts/post_buffer_release.py`
-- Tests: `tests/test_post_buffer_release.py`
-
-Behavior:
-- After the `release` job succeeds, a separate `post-to-buffer` job runs.
-- It runs only for `push` events and only on the first workflow attempt:
-  `needs.release.result == 'success' && github.event_name == 'push' && github.run_attempt == 1`
-- The posting step uses `continue-on-error: true`, so social posting must never fail the release.
-- Default posting mode is `shareNow`, so the post should publish immediately.
-- If `BUFFER_POST_MODE` is empty, the script falls back to `shareNow`.
-
-Required org/repo secret:
-- `BUFFER_API_KEY`
-
-Optional org/repo secrets:
-- `BUFFER_CHANNEL_ID` — recommended if multiple Buffer channels exist
-- `BUFFER_CHANNEL_NAME` — optional fallback selector when channel ID is not set
-- `BUFFER_ORGANIZATION_ID` — optional, otherwise the script auto-discovers organizations
-- `BUFFER_CHANNEL_SERVICE` — optional, defaults to `twitter`
-- `BUFFER_POST_MODE` — optional, defaults to `shareNow`
-- `BUFFER_POST_TEMPLATE` — optional custom post template
-
-Buffer posting details:
-- The script creates a text post through Buffer's GraphQL API at `https://api.buffer.com`
-- It auto-selects the first connected `twitter` channel when no explicit channel secret is set
-- If multiple matching channels exist, the script picks the first sorted match and prints a warning
-- The template supports:
-  `{app_name}`, `{tag}`, `{version}`, `{platforms}`, `{release_url}`
-- Successful platform names are derived from the build job results
-- The generated text is capped at 280 characters
-
-Recommended setup for this repo:
-- Set `BUFFER_API_KEY`
-- Leave `BUFFER_POST_MODE` empty or set it explicitly to `shareNow`
-- If more than one Buffer/X account is connected, set `BUFFER_CHANNEL_ID`
-
-Useful local checks:
-
-```bash
-pytest -q tests/test_post_buffer_release.py
-
-BUFFER_POST_MODE='' python3 scripts/post_buffer_release.py \
-  --dry-run \
-  --app-name "Face-Local" \
-  --tag "v1.2.3" \
-  --release-url "https://github.com/example/repo/releases/tag/v1.2.3" \
-  --platform "macOS=success" \
-  --platform "Windows=success"
-```
+Details moved to [`docs/release-social-posting.md`](docs/release-social-posting.md).
