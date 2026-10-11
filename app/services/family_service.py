@@ -317,15 +317,19 @@ def derive_code_relations(code: Optional[str]) -> list[CodeRelation]:
 
     if info.suffix_type == "sibling":
         path = info.sibling_path
-        if len(path) > 1:
-            anchor = f"{base_str}{scheme.sibling_letter}{path[0]}"
-            return continuation(anchor, path[1:])
         marker = scheme.ancestor_letter
-        rels = [CodeRelation("sibling", base)]
+        # C0F1T3x: the sibling hangs off an ancestor, not off the base person.
+        via = "".join(str(d) for d in info.via_ancestor_path)
+        sib_base_str = f"{base_str}{marker}{via}" if via else base_str
+        sib_base = CodeRef(sib_base_str) if via else base
+        if len(path) > 1:
+            anchor = f"{sib_base_str}{scheme.sibling_letter}{path[0]}"
+            return continuation(anchor, path[1:])
+        rels = [CodeRelation("sibling", sib_base)]
         if marker:
             rels += [
-                CodeRelation("parent", CodeRef(f"{base_str}{marker}1")),
-                CodeRelation("parent", CodeRef(f"{base_str}{marker}2")),
+                CodeRelation("parent", CodeRef(f"{sib_base_str}{marker}1")),
+                CodeRelation("parent", CodeRef(f"{sib_base_str}{marker}2")),
             ]
         return rels
 

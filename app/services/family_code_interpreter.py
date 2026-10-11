@@ -77,6 +77,8 @@ _BASE_TOKEN_RE = re.compile(r"\{([1-9][0-9]*)\}|([0-9])")
 class _CompiledScheme:
     suffix_re: Optional[re.Pattern]
     range_re: Optional[re.Pattern]
+    # <ancestor>[12]+ immediately followed by a sibling suffix (C0F1T30)
+    via_re: Optional[re.Pattern]
     # Marker letter → "ancestor" | "sibling" | "spouse" | "friend"
     letter_to_kind: dict
 
@@ -120,8 +122,19 @@ def _compiled(scheme: FamilyCodeScheme) -> _CompiledScheme:
         if scheme.friend_letter
         else None
     )
+    via_re = (
+        re.compile(
+            rf"^(.*?)({re.escape(scheme.ancestor_letter)}[12]+)"
+            rf"({re.escape(scheme.sibling_letter)}[1-9][0-9]*)$"
+        )
+        if scheme.ancestor_letter and scheme.sibling_letter
+        else None
+    )
     compiled = _CompiledScheme(
-        suffix_re=suffix_re, range_re=range_re, letter_to_kind=letter_to_kind
+        suffix_re=suffix_re,
+        range_re=range_re,
+        via_re=via_re,
+        letter_to_kind=letter_to_kind,
     )
     _COMPILE_CACHE[key] = compiled
     return compiled
@@ -164,6 +177,9 @@ class ExtendedCodeInfo:
     sibling_path: tuple[int, ...]    # digits after T (first = sibling index)
     spouse_path: tuple[int, ...]     # digits after H ([0]=spouse number, rest=children)
     is_stepchild: bool               # last digit follows a non-initial spouse-zero
+    # Ancestor digits walked up before a sibling suffix (C0F1T30: (1,) = father,
+    # then his 3rd sibling's spouse); empty for plain codes.
+    via_ancestor_path: tuple[int, ...] = ()
 
 
 # ── Low-level parsing ─────────────────────────────────────────────────────────
@@ -324,8 +340,14 @@ def parse_extended_code(
                 f"engedélyezett gyökérbetűk: {allowed}."
             )
 
+    via_ancestor_path: tuple[int, ...] = ()
+    via_m = compiled.via_re.match(rest) if compiled.via_re else None
     suffix_m = compiled.suffix_re.search(rest) if compiled.suffix_re else None
-    if suffix_m:
+    if via_m:
+        via_ancestor_path = tuple(int(c) for c in via_m.group(2)[1:])
+        suffix_str = via_m.group(3)
+        base = via_m.group(1)
+    elif suffix_m:
         suffix_str = suffix_m.group(1)
         base = rest[: suffix_m.start()]
     else:
@@ -381,6 +403,7 @@ def parse_extended_code(
         sibling_path=sibling_path,
         spouse_path=spouse_path,
         is_stepchild=_detect_stepchild(path_digits, external=is_external),
+        via_ancestor_path=via_ancestor_path,
     )
 
 
@@ -761,7 +784,11 @@ def _describe_single(
         return f"{base_poss} {nom}"
 
     if info.suffix_type == "sibling":
-        return f"{base_poss} {_sibling_desc(info.sibling_path)}"
+        sib = _sibling_desc(info.sibling_path)
+        if info.via_ancestor_path:
+            _, anc_poss = _ancestor_desc(info.via_ancestor_path)
+            return f"{base_poss} {anc_poss} {sib}"
+        return f"{base_poss} {sib}"
 
     if info.suffix_type == "spouse":
         return f"{base_poss} {_spouse_desc(info.spouse_path)}"
