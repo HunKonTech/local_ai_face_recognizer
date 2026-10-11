@@ -8,6 +8,9 @@ The user can:
 * **correct** — pick the right person (or create a new one); the engine
   records the mistake as a correction and learns from it;
 * **revert** — send the face back to where it was before the run.
+
+Batch shortcuts: tick rows and accept/move/reject them together, or accept
+every grouping whose match is at or above a chosen percentage in one go.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +49,15 @@ from app.ui.i18n import t
 log = logging.getLogger(__name__)
 
 _ROW_STYLE = "QFrame { background: #232323; border-radius: 6px; }"
+
+# Remembered "accept all at or above N%" threshold (QSettings key + default).
+_S_ACCEPT_THRESHOLD = "auto_assignments/accept_threshold_pct"
+_DEFAULT_ACCEPT_THRESHOLD = 90
+
+
+def _score_pct(score: float) -> int:
+    """Match score as the whole percentage shown on the row."""
+    return int(round(max(0.0, min(1.0, score)) * 100))
 
 
 def _open_decision_graph(
@@ -222,7 +235,7 @@ class _AutoAssignmentRow(QFrame):
         info.addWidget(origin)
         row.addLayout(info, stretch=1)
 
-        pct = int(round(max(0.0, min(1.0, dto.score)) * 100))
+        pct = _score_pct(dto.score)
         score = QLabel(t("suggestions_similarity", pct=pct))
         score.setAlignment(Qt.AlignCenter)
         # Min width keeps the score column aligned across rows; it must grow,
@@ -265,6 +278,10 @@ class _AutoAssignmentRow(QFrame):
     @property
     def assignment_id(self) -> int:
         return self._dto.assignment_id
+
+    @property
+    def score_pct(self) -> int:
+        return _score_pct(self._dto.score)
 
     def is_selected(self) -> bool:
         return self._check.isChecked()
@@ -361,6 +378,39 @@ class AutoAssignmentsTab(QWidget):
         self._select_bar.setVisible(False)
         root.addWidget(self._select_bar)
 
+        # ── Threshold toolbar: accept every grouping at/above N% at once ──
+        self._threshold_bar = QWidget()
+        thr = QHBoxLayout(self._threshold_bar)
+        thr.setContentsMargins(0, 0, 0, 0)
+        thr.setSpacing(6)
+
+        self._threshold_label = QLabel(t("autoAssign.threshold_label"))
+        self._threshold_label.setStyleSheet("color: #aaa;")
+        thr.addWidget(self._threshold_label)
+
+        self._threshold_spin = QSpinBox()
+        self._threshold_spin.setRange(0, 100)
+        self._threshold_spin.setSuffix(" %")
+        self._threshold_spin.setValue(self._load_threshold())
+        self._threshold_spin.setToolTip(t("autoAssign.accept_above_tooltip"))
+        self._threshold_spin.valueChanged.connect(self._on_threshold_changed)
+        thr.addWidget(self._threshold_spin)
+
+        self._select_above_btn = QPushButton()
+        self._select_above_btn.setToolTip(t("autoAssign.select_above_tooltip"))
+        self._select_above_btn.clicked.connect(self._on_select_above)
+        thr.addWidget(self._select_above_btn)
+
+        self._accept_above_btn = QPushButton()
+        self._accept_above_btn.setToolTip(t("autoAssign.accept_above_tooltip"))
+        self._accept_above_btn.setStyleSheet("QPushButton { color: #88ee88; }")
+        self._accept_above_btn.clicked.connect(self._on_accept_above)
+        thr.addWidget(self._accept_above_btn)
+
+        thr.addStretch()
+        self._threshold_bar.setVisible(False)
+        root.addWidget(self._threshold_bar)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self._list_widget = QWidget()
@@ -443,7 +493,9 @@ class AutoAssignmentsTab(QWidget):
         self._empty_label.setVisible(not dtos)
         self._revert_all_btn.setVisible(bool(dtos))
         self._select_bar.setVisible(bool(dtos))
+        self._threshold_bar.setVisible(bool(dtos))
         self._update_selection_ui()
+        self._update_threshold_ui()
         self.count_changed.emit(len(dtos))
         self._refresh_decided()
 
@@ -592,6 +644,68 @@ class AutoAssignmentsTab(QWidget):
         if not ids:
             return
         self._run_action(lambda svc: svc.confirm_assignments(ids), "accept_selected")
+
+    # ── Accept everything at/above a threshold ────────────────────────
+
+    @staticmethod
+    def _load_threshold() -> int:
+        try:
+            from app.app_settings import app_qsettings
+
+            value = int(
+                app_qsettings().value(_S_ACCEPT_THRESHOLD, _DEFAULT_ACCEPT_THRESHOLD)
+            )
+        except Exception:  # noqa: BLE001 — a bad stored value must not break the tab
+            return _DEFAULT_ACCEPT_THRESHOLD
+        return max(0, min(100, value))
+
+    def _on_threshold_changed(self, value: int) -> None:
+        try:
+            from app.app_settings import app_qsettings
+
+            app_qsettings().setValue(_S_ACCEPT_THRESHOLD, int(value))
+        except Exception:  # noqa: BLE001
+            log.exception("Failed to store the accept threshold")
+        self._update_threshold_ui()
+
+    def _ids_above_threshold(self) -> List[int]:
+        """Open groupings whose shown match % is at or above the threshold."""
+        limit = self._threshold_spin.value()
+        return [r.assignment_id for r in self._rows if r.score_pct >= limit]
+
+    def _update_threshold_ui(self) -> None:
+        pct = self._threshold_spin.value()
+        n = len(self._ids_above_threshold())
+        self._select_above_btn.setText(t("autoAssign.select_above", pct=pct, n=n))
+        self._accept_above_btn.setText(t("autoAssign.accept_above", pct=pct, n=n))
+        self._select_above_btn.setEnabled(n > 0)
+        self._accept_above_btn.setEnabled(n > 0)
+
+    def _on_select_above(self) -> None:
+        """Tick exactly the rows at/above the threshold (for a final look)."""
+        limit = self._threshold_spin.value()
+        for row in self._rows:
+            row.set_selected(row.score_pct >= limit)
+        self._update_selection_ui()
+
+    def _on_accept_above(self) -> None:
+        ids = self._ids_above_threshold()
+        if not ids:
+            return
+        answer = QMessageBox.question(
+            self,
+            t("autoAssign.accept_above_confirm_title"),
+            t(
+                "autoAssign.accept_above_confirm_msg",
+                n=len(ids),
+                pct=self._threshold_spin.value(),
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._run_action(lambda svc: svc.confirm_assignments(ids), "accept_above")
 
     def _on_reject_selected(self) -> None:
         ids = self._selected_ids()

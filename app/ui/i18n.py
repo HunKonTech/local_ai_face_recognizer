@@ -2900,6 +2900,34 @@ _STRINGS: Dict[str, Dict[str, str]] = {
                "training data and moves to the reviewed list",
          "hu": "Minden kijelölt csoportosítás egyszerre megerősítve — mind "
                "megbízható tanítópéldává válik és átkerül az átnézett listába"},
+    "autoAssign.threshold_label":
+        {"en": "Match ≥",
+         "hu": "Egyezés ≥"},
+    "autoAssign.select_above":
+        {"en": "Select ≥ {pct}% ({n})",
+         "hu": "{pct}% felettiek kijelölése ({n})"},
+    "autoAssign.select_above_tooltip":
+        {"en": "Tick exactly the groupings whose match is at or above the "
+               "threshold, so you can look them over before accepting",
+         "hu": "Pontosan azok a csoportosítások lesznek kijelölve, amelyek "
+               "egyezése eléri a küszöböt — elfogadás előtt átnézheted őket"},
+    "autoAssign.accept_above":
+        {"en": "Accept all ≥ {pct}% ({n})",
+         "hu": "Minden elfogadása {pct}% felett ({n})"},
+    "autoAssign.accept_above_tooltip":
+        {"en": "Confirm every grouping whose match is at or above the chosen "
+               "percentage — each becomes trusted training data",
+         "hu": "Minden csoportosítás megerősítése, amelynek egyezése eléri a "
+               "megadott százalékot — mind megbízható tanítópéldává válik"},
+    "autoAssign.accept_above_confirm_title":
+        {"en": "Accept groupings above the threshold?",
+         "hu": "Küszöb feletti csoportosítások elfogadása?"},
+    "autoAssign.accept_above_confirm_msg":
+        {"en": "{n} automatic groupings with a match of {pct}% or higher will "
+               "be confirmed. The AI treats them as trusted training data.",
+         "hu": "{n} automatikus csoportosítás, amelynek egyezése legalább "
+               "{pct}%, megerősítésre kerül. Az AI ezeket megbízható "
+               "tanítópéldaként kezeli."},
     "autoAssign.reject_selected":
         {"en": "Reject selected ({n})",
          "hu": "Kijelöltek elutasítása ({n})"},
