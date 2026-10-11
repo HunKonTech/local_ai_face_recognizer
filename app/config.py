@@ -622,6 +622,17 @@ class ObjectMatchingConfig:
     # Minimum normalised score for a suggestion to be recorded.
     min_score: float = 0.35
 
+    # Hits scoring at least ``auto_accept_score`` are tagged without review.
+    # They stay listed as "automatically tagged" in the review dialog, where
+    # they can be confirmed or reverted; until confirmed they are not used as
+    # reference samples, so one wrong hit cannot spread.
+    auto_accept: bool = True
+    auto_accept_score: float = 0.85
+
+    # After a scan, search every object with a reference on the new / changed
+    # images in the background.
+    search_new_images: bool = True
+
     # Hard cap on extraction worker threads; the resource governor may lower
     # it further when the machine is busy.
     max_workers: int = 4
@@ -1256,6 +1267,13 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             min_scale=objm.get("min_scale", base_objm.min_scale),
             max_scale=objm.get("max_scale", base_objm.max_scale),
             min_score=objm.get("min_score", base_objm.min_score),
+            auto_accept=objm.get("auto_accept", base_objm.auto_accept),
+            auto_accept_score=objm.get(
+                "auto_accept_score", base_objm.auto_accept_score
+            ),
+            search_new_images=objm.get(
+                "search_new_images", base_objm.search_new_images
+            ),
             max_workers=objm.get("max_workers", base_objm.max_workers),
         )
 

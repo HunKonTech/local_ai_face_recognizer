@@ -9,6 +9,7 @@ related persons).
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import List, Optional
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.app_settings import app_qsettings
+from app.config import ObjectMatchingConfig
 from app.db.database import session_scope
 from app.db.models import OBJECT_ROLES, Person
 from app.services.object_service import (
@@ -69,6 +71,31 @@ _ROLE_I18N = {role: f"object_role_{role}" for role in OBJECT_ROLES}
 
 def _role_label(role: str) -> str:
     return t(_ROLE_I18N.get(role, "object_role_other"))
+
+
+def _setting_bool(key: str, default: bool) -> bool:
+    """Read a boolean QSettings value, which may come back as a string."""
+    value = app_qsettings().value(key, None)
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ("1", "true", "yes")
+
+
+def matching_preferences(base: ObjectMatchingConfig) -> ObjectMatchingConfig:
+    """*base* with the user's object-matching checkboxes applied (#164).
+
+    ``config.yaml`` gives the defaults; once the user ticks a box in the
+    Objects tab, that choice wins.
+    """
+    return replace(
+        base,
+        auto_accept=_setting_bool("object_matching/auto_accept", base.auto_accept),
+        search_new_images=_setting_bool(
+            "object_matching/search_new_images", base.search_new_images
+        ),
+    )
 
 
 class _AddPersonDialog(QDialog):
@@ -138,10 +165,15 @@ class ObjectsPanel(QWidget):
     # know which folder is open in the browser, so MainWindow resolves it.
     object_search_requested = Signal(int, str)
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        matching_config: Optional[ObjectMatchingConfig] = None,
+    ) -> None:
         super().__init__(parent)
         self._current_object_id: Optional[int] = None
         self._current_occurrences: List = []
+        self._matching_config = matching_config or ObjectMatchingConfig()
         self._build_ui()
         self.refresh()
 
@@ -473,7 +505,9 @@ class ObjectsPanel(QWidget):
         self._add_person_btn.setEnabled(True)
         self._remove_person_btn.setEnabled(True)
         # Only a framed marking gives the matcher something to look for.
-        self._search_btn.setEnabled(any(o.bbox_w for o in occurrences))
+        self._search_btn.setEnabled(
+            self._matching_config.enabled and any(o.bbox_w for o in occurrences)
+        )
 
     # ------------------------------------------------------------------
     # Object matching (#164)
@@ -524,6 +558,17 @@ class ObjectsPanel(QWidget):
         self._search_auto.toggled.connect(self._save_search_settings)
         layout.addWidget(self._search_auto)
 
+        prefs = matching_preferences(self._matching_config)
+        self._search_auto_accept = QCheckBox()
+        self._search_auto_accept.setChecked(prefs.auto_accept)
+        self._search_auto_accept.toggled.connect(self._save_search_settings)
+        layout.addWidget(self._search_auto_accept)
+
+        self._search_new_images = QCheckBox()
+        self._search_new_images.setChecked(prefs.search_new_images)
+        self._search_new_images.toggled.connect(self._save_search_settings)
+        layout.addWidget(self._search_new_images)
+
         self._search_btn = QPushButton()
         self._search_btn.setEnabled(False)
         self._search_btn.clicked.connect(self._on_search)
@@ -539,8 +584,20 @@ class ObjectsPanel(QWidget):
         self._search_sens_label.setText(t("object_match_sensitivity"))
         self._search_sens.setToolTip(t("object_match_sensitivity_tip"))
         self._search_auto.setText(t("object_match_auto_after_tag"))
+        self._search_auto_accept.setText(
+            t("object_match_auto_accept").format(
+                score=int(round(self._matching_config.auto_accept_score * 100))
+            )
+        )
+        self._search_auto_accept.setToolTip(t("object_match_auto_accept_tip"))
+        self._search_new_images.setText(t("object_match_search_new_images"))
+        self._search_new_images.setToolTip(t("object_match_search_new_images_tip"))
         self._search_btn.setText(t("object_match_search"))
-        self._search_btn.setToolTip(t("object_match_search_tip"))
+        self._search_btn.setToolTip(
+            t("object_match_search_tip")
+            if self._matching_config.enabled
+            else t("object_match_disabled_tip")
+        )
 
     def _save_search_settings(self) -> None:
         settings = app_qsettings()
@@ -550,6 +607,12 @@ class ObjectsPanel(QWidget):
         settings.setValue("object_matching/sensitivity", self._search_sens.value())
         settings.setValue(
             "object_matching/auto_search_after_tag", self._search_auto.isChecked()
+        )
+        settings.setValue(
+            "object_matching/auto_accept", self._search_auto_accept.isChecked()
+        )
+        settings.setValue(
+            "object_matching/search_new_images", self._search_new_images.isChecked()
         )
 
     def _on_search(self) -> None:

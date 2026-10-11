@@ -31,8 +31,10 @@ from sqlalchemy.orm import Session
 from app.config import ObjectMatchingConfig
 from app.db.models import (
     OBJECT_GEOMETRY_BBOX,
+    OBJECT_MATCH_AUTO,
     Image,
     ImageFeatures,
+    ObjectMatchSuggestion,
     ObjectOccurrence,
     ObjectPatchFeatures,
 )
@@ -443,8 +445,15 @@ class ObjectFeatureService:
         """Bbox occurrences of *object_id* — the object's reference samples.
 
         Every accepted match adds one here, which is how the matcher gets better
-        at an object the more often it is confirmed.
+        at an object the more often it is confirmed.  Automatic tags that the
+        user has not confirmed yet are left out, so one wrong hit cannot seed
+        further wrong hits.
         """
+        unconfirmed = select(ObjectMatchSuggestion.created_occurrence_id).where(
+            ObjectMatchSuggestion.object_id == object_id,
+            ObjectMatchSuggestion.status == OBJECT_MATCH_AUTO,
+            ObjectMatchSuggestion.created_occurrence_id.isnot(None),
+        )
         stmt = (
             select(ObjectOccurrence)
             .where(
@@ -452,6 +461,7 @@ class ObjectFeatureService:
                 ObjectOccurrence.geometry_type == OBJECT_GEOMETRY_BBOX,
                 ObjectOccurrence.bbox_w.isnot(None),
                 ObjectOccurrence.bbox_h.isnot(None),
+                ObjectOccurrence.id.not_in(unconfirmed),
             )
             .order_by(ObjectOccurrence.id)
         )
@@ -508,6 +518,35 @@ class ObjectFeatureService:
         if row is not None:
             self.session.delete(row)
             self.session.flush()
+
+    def invalidate_images(self, image_ids: Sequence[int]) -> int:
+        """Drop cached features of images whose file changed on disk.
+
+        The cache is keyed by image id and extractor settings only, so a
+        rescanned, edited photo would otherwise keep matching with its old
+        descriptors.  Reference crops cut from those images are dropped too.
+        Returns the number of image rows removed.
+        """
+        ids = [int(i) for i in image_ids]
+        if not ids:
+            return 0
+        removed = 0
+        # Chunked to stay under SQLite's bound-parameter limit.
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            removed += (
+                self.session.query(ImageFeatures)
+                .filter(ImageFeatures.image_id.in_(chunk))
+                .delete(synchronize_session=False)
+            )
+            occ_ids = select(ObjectOccurrence.id).where(
+                ObjectOccurrence.image_id.in_(chunk)
+            )
+            self.session.query(ObjectPatchFeatures).filter(
+                ObjectPatchFeatures.occurrence_id.in_(occ_ids)
+            ).delete(synchronize_session=False)
+        self.session.flush()
+        return removed
 
     # -- internals -------------------------------------------------------
 

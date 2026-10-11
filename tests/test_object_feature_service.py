@@ -198,6 +198,28 @@ def test_ensure_patch_features_extracts_reference_crops(db):
         assert session.get(ObjectPatchFeatures, occ.id) is None
 
 
+def test_invalidate_images_drops_image_and_crop_features(db):
+    """A rescanned, changed file must not keep matching with old descriptors."""
+    path = os.path.join(db, "scene.png")
+    cv2.imwrite(path, make_texture(400, 300, seed=9))
+    with session_scope() as session:
+        image = _add_image(session, path)
+        objects = ObjectService(session)
+        obj = objects.create_object(name="Lámpa")
+        occ = objects.add_occurrence_bbox(obj.id, image.id, 40, 40, 200, 150)
+
+        service = ObjectFeatureService(session)
+        service.ensure_image_features([image.id])
+        service.ensure_patch_features([occ])
+        assert service.load_image_features(image.id) is not None
+
+        assert service.invalidate_images([image.id]) == 1
+        session.expire_all()
+        assert service.load_image_features(image.id) is None
+        assert session.get(ObjectPatchFeatures, occ.id) is None
+        assert service.invalidate_images([]) == 0
+
+
 def test_reference_occurrences_only_returns_bbox_markings(db):
     path = os.path.join(db, "scene.png")
     cv2.imwrite(path, make_texture(400, 300, seed=8))

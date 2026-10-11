@@ -1705,6 +1705,9 @@ class AiFaceDetection(Base):
 OBJECT_MATCH_PENDING = "pending"
 OBJECT_MATCH_ACCEPTED = "accepted"
 OBJECT_MATCH_REJECTED = "rejected"
+# Scored above ``auto_accept_score``: the occurrence was created without review
+# but stays revertible until the user confirms it.
+OBJECT_MATCH_AUTO = "auto"
 
 
 class ImageFeatures(Base):
@@ -1786,9 +1789,11 @@ class ObjectMatchSuggestion(Base):
     """A candidate "this object also appears here" hit awaiting review.
 
     Analogous to :class:`AiFaceDetection`: raw matcher output kept separate
-    from the manual ``object_occurrences`` rows.  Only an explicit accept
-    turns a suggestion into a real occurrence.  A rejected row is kept
-    forever so the same wrong pairing is never suggested again.
+    from the manual ``object_occurrences`` rows.  Normally only an explicit
+    accept turns a suggestion into a real occurrence; a hit scoring above
+    ``auto_accept_score`` is tagged at once and kept as status ``auto`` so it
+    can still be confirmed or reverted.  A rejected row is kept forever so the
+    same wrong pairing is never suggested again.
     """
 
     __tablename__ = "object_match_suggestions"
@@ -1833,7 +1838,7 @@ class ObjectMatchSuggestion(Base):
         Integer, ForeignKey("object_occurrences.id", ondelete="SET NULL"), nullable=True
     )
 
-    # "pending" | "accepted" | "rejected"
+    # "pending" | "accepted" | "rejected" | "auto"
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default=OBJECT_MATCH_PENDING
     )
