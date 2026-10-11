@@ -603,11 +603,17 @@ class AutoAssignmentsTab(QWidget):
         uncertain_first = self._sort_combo.currentData() != "certain"
         dtos.sort(key=lambda d: d.score, reverse=not uncertain_first)
 
+        # Keep the user's ticks across the rebuild: a single-row action
+        # (confirm / correct / revert) must not wipe the batch selection.
+        # Rows that were just decided simply drop out of the list.
+        selected = set(self._selected_ids())
+
         _clear_layout(self._list_layout)
         self._rows = []
 
         for dto in dtos:
             row = _AutoAssignmentRow(dto, deep_config=self._deep_config)
+            row.set_selected(dto.assignment_id in selected)
             row.confirmed.connect(self._on_confirm)
             row.corrected.connect(self._on_correct)
             row.reverted.connect(self._on_revert)
