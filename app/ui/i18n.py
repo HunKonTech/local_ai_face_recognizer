@@ -248,6 +248,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "ft_kind_descendant":   {"en": "descendant", "hu": "leszármazott"},
     "ft_kind_sibling":      {"en": "sibling", "hu": "testvér"},
     "ft_kind_cousin":       {"en": "relative", "hu": "rokon"},
+    "ft_kind_in_law":       {"en": "in-law", "hu": "házastárs rokona"},
     "ft_kind_unrelated":    {"en": "not related", "hu": "nem rokon"},
 
     # ── Family tree editor dialog ────────────────────────────────────────────────

@@ -6,10 +6,10 @@ orange = female), connected by spouse lines and parent→child elbows. The
 focused / selected person is outlined in red. This replaces the old collapsible
 tree-list with the picture-style layout.
 
-Layout is a barycentre row layout: each generation is a row, and within a row
-nodes are ordered by the average column of their parents, so children sit under
-their parents without overlaps. It is intentionally simple and overlap-free
-rather than a full Sugiyama layout.
+Each generation is a row; horizontal placement comes from
+:mod:`app.services.family_tree_layout` (children centred under their parents,
+couples side by side, separate branches side by side). Sibling buses that
+would overlap in the same gap between rows are spread onto separate tracks.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
 )
 
+from app.services.family_tree_layout import compute_layout
 from app.services.family_tree_service import FamilyTreeGraph
 
 # Colours (kept close to the reference chart).
@@ -349,130 +350,27 @@ class FamilyTreeView(QGraphicsView):
         return max(self.H_GAP, max_label_w)
 
     def _layout(self, graph: FamilyTreeGraph, h_gap: Optional[int] = None):
-        """Return (positions{pid:(x,y)}, total_width, gens{gen:[nodes]})."""
+        """Return (positions{pid:(x,y)}, total_width, gens{gen:[nodes]}).
+
+        Horizontal placement comes from :func:`compute_layout` (children under
+        their parents, couples side by side, branches never interleaved).
+        """
         if h_gap is None:
             h_gap = self.H_GAP
+        placed = compute_layout(
+            graph.nodes.values(), box_w=self.BOX_W, gap=h_gap
+        )
+        step_y = self.BOX_H + self.V_GAP
+        positions: dict[int, tuple[float, float]] = {
+            pid: (x, band * step_y) for pid, (x, band) in placed.items()
+        }
         gens: dict[int, list] = defaultdict(list)
         for node in graph.nodes.values():
             gens[node.generation].append(node)
-
-        col_of: dict[int, int] = {}
-        sorted_gens = sorted(gens)
-        for band_index, gen in enumerate(sorted_gens):
-            nodes = gens[gen]
-            # Base ordering key per node: the top band has no parents to anchor
-            # to, so it sorts by name; lower bands sort by the barycentre of
-            # their parents' columns so children sit under their parents.
-            if band_index == 0:
-                base_key = {n.person_id: (n.name.lower(), n.person_id) for n in nodes}
-            else:
-                def _bary(node):
-                    cols = [col_of[p] for p in node.parent_ids if p in col_of]
-                    return sum(cols) / len(cols) if cols else float("inf")
-
-                base_key = {
-                    n.person_id: (_bary(n), n.name.lower(), n.person_id) for n in nodes
-                }
-
-            nodes_sorted = self._order_generation(nodes, base_key)
-            gens[gen] = nodes_sorted
-            for column, node in enumerate(nodes_sorted):
-                col_of[node.person_id] = column
-
-        step_x = self.BOX_W + h_gap
-        step_y = self.BOX_H + self.V_GAP
-        positions: dict[int, tuple[float, float]] = {}
-        for band_index, gen in enumerate(sorted_gens):
-            for node in gens[gen]:
-                positions[node.person_id] = (
-                    col_of[node.person_id] * step_x,
-                    band_index * step_y,
-                )
-
-        max_cols = max((len(gens[g]) for g in sorted_gens), default=1)
-        total_w = max(max_cols, 1) * step_x - h_gap
+        for nodes in gens.values():
+            nodes.sort(key=lambda n: positions[n.person_id][0])
+        total_w = max((x for x, _ in positions.values()), default=0) + self.BOX_W
         return positions, total_w, gens
-
-    @staticmethod
-    def _order_generation(nodes: list, base_key: dict) -> list:
-        """Order one generation so married couples sit side by side.
-
-        Barycentre sorting alone scatters spouses: a married-in partner with no
-        parents in the tree gets an ``inf`` barycentre and lands at the far edge,
-        so their spouse line stretches across everyone else's boxes and the
-        marriage label ends up over unrelated people. Here we first group nodes
-        into spouse-connected clusters (using only spouse links *within* this
-        generation), lay each cluster out as a chain with partners adjacent, then
-        order the clusters by their strongest (smallest) base key. Non-married
-        people stay single-node clusters and keep their barycentre position.
-        """
-        ids_here = {n.person_id for n in nodes}
-        node_by_id = {n.person_id: n for n in nodes}
-
-        # Spouse adjacency restricted to this generation.
-        adj: dict[int, list[int]] = {pid: [] for pid in ids_here}
-        for n in nodes:
-            for s in n.spouse_ids:
-                if s in ids_here:
-                    adj[n.person_id].append(s)
-
-        # Connected components over the intra-generation spouse edges.
-        seen: set[int] = set()
-        clusters: list[list[int]] = []
-        for pid in sorted(ids_here, key=lambda p: base_key[p]):
-            if pid in seen:
-                continue
-            comp: list[int] = []
-            stack = [pid]
-            seen.add(pid)
-            while stack:
-                cur = stack.pop()
-                comp.append(cur)
-                for nb in adj[cur]:
-                    if nb not in seen:
-                        seen.add(nb)
-                        stack.append(nb)
-            clusters.append(comp)
-
-        ordered_clusters = []
-        for comp in clusters:
-            internal = FamilyTreeView._order_cluster(comp, adj, base_key)
-            ordered_clusters.append((min(base_key[p] for p in comp), internal))
-        ordered_clusters.sort(key=lambda t: t[0])
-
-        return [
-            node_by_id[pid]
-            for _, internal in ordered_clusters
-            for pid in internal
-        ]
-
-    @staticmethod
-    def _order_cluster(comp: list, adj: dict, base_key: dict) -> list:
-        """Order one spouse cluster as a chain with partners adjacent.
-
-        Walks the spouse subgraph starting from a chain endpoint (a person with
-        a single partner) so simple couples and remarriage chains keep every
-        pair side by side; a star (one person with several partners) keeps as
-        many pairs adjacent as a single row allows.
-        """
-        if len(comp) <= 1:
-            return list(comp)
-        comp_set = set(comp)
-        endpoints = [p for p in comp if len([q for q in adj[p] if q in comp_set]) == 1]
-        start = min(endpoints or comp, key=lambda p: base_key[p])
-
-        order: list[int] = []
-        visited: set[int] = set()
-        cur: Optional[int] = start
-        while cur is not None:
-            order.append(cur)
-            visited.add(cur)
-            nxts = [q for q in adj[cur] if q in comp_set and q not in visited]
-            cur = min(nxts, key=lambda q: base_key[q]) if nxts else None
-        # Anything unreachable in a single walk (star/cycle leftovers) trails by key.
-        leftovers = [p for p in comp if p not in visited]
-        order.extend(sorted(leftovers, key=lambda p: base_key[p]))
-        return order
 
     # ------------------------------------------------------------------
     # Drawing
@@ -542,33 +440,44 @@ class FamilyTreeView(QGraphicsView):
             parents_in_graph = frozenset(p for p in node.parent_ids if p in positions)
             if not parents_in_graph:
                 continue
-            # Expand: add each listed parent's spouse if that spouse is also a
-            # parent somewhere in the graph, so partial-link siblings share a bus.
+            # Expand a lone listed parent with their spouse if that spouse is
+            # also a parent somewhere in the graph, so partial-link siblings
+            # share a bus. Children with both parents listed keep exactly that
+            # pair, so remarriages get one bus per marriage.
             couple_key: set[int] = set(parents_in_graph)
-            for p in parents_in_graph:
-                pnode = graph.node(p)
+            if len(parents_in_graph) == 1:
+                pnode = graph.node(next(iter(parents_in_graph)))
                 if pnode:
                     for spouse in pnode.spouse_ids:
                         if spouse in all_parents:
                             couple_key.add(spouse)
             children_by_parents[frozenset(couple_key)].append(pid)
 
+        families = []
         for parent_ids_fs, children in children_by_parents.items():
-            parents_in_pos = [p for p in parent_ids_fs if p in positions]
+            parents_in_pos = sorted(p for p in parent_ids_fs if p in positions)
             if not parents_in_pos:
                 continue
-
             parent_centers = [self._center(*positions[p]) for p in parents_in_pos]
             # Horizontal midpoint between the parents (or single parent).
             drop_x = sum(c[0] for c in parent_centers) / len(parent_centers)
             # Bottom edge of the parents' row.
             py = max(c[1] for c in parent_centers) + self.BOX_H / 2
-            bus_y = py + self.V_GAP / 2
-
             children_sorted = sorted(children, key=lambda c: positions[c][0])
             child_x = {
                 c: positions[c][0] + self.BOX_W / 2 for c in children_sorted
             }
+            families.append(
+                (parents_in_pos, parent_centers, drop_x, py, children_sorted, child_x)
+            )
+        bus_ys = _bus_tracks(
+            [(py, [drop_x, *child_x.values()]) for _, _, drop_x, py, _, child_x in families],
+            self.V_GAP,
+        )
+
+        for (parents_in_pos, parent_centers, drop_x, py, children_sorted, child_x), bus_y in zip(
+            families, bus_ys
+        ):
 
             gidx = len(self._connector_groups)
             self._connector_groups.append({
@@ -847,6 +756,40 @@ class FamilyTreeView(QGraphicsView):
             self.reset_zoom()
         else:
             super().keyPressEvent(event)
+
+
+def _bus_tracks(
+    families: list[tuple[float, list[float]]], v_gap: float
+) -> list[float]:
+    """Bus y per sibling group so buses sharing a row gap never overlap.
+
+    ``families`` holds ``(parents_bottom_y, connection_xs)`` per group. Groups
+    whose horizontal spans overlap in the same gap get separate tracks
+    (greedy interval colouring), spread evenly around the gap's middle.
+    """
+    out = [0.0] * len(families)
+    by_gap: dict[float, list[int]] = defaultdict(list)
+    for i, (py, _) in enumerate(families):
+        by_gap[round(py, 1)].append(i)
+    for py, idxs in by_gap.items():
+        spans = {i: (min(families[i][1]), max(families[i][1])) for i in idxs}
+        track_end: list[float] = []
+        track_of: dict[int, int] = {}
+        for i in sorted(idxs, key=lambda i: spans[i]):
+            left, right = spans[i]
+            for t, end in enumerate(track_end):
+                if end < left - 6:
+                    track_of[i] = t
+                    track_end[t] = right
+                    break
+            else:
+                track_of[i] = len(track_end)
+                track_end.append(right)
+        k = len(track_end)
+        spacing = min(10.0, (v_gap - 20) / max(k - 1, 1))
+        for i in idxs:
+            out[i] = py + v_gap / 2 + (track_of[i] - (k - 1) / 2) * spacing
+    return out
 
 
 def _marriage_label(

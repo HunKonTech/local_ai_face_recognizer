@@ -356,9 +356,9 @@ def test_selecting_single_parent_child_highlights_both_parents(db, qtbot):
 
 
 def _column_of(view, pid):
-    """Layout column index of a person (boxes are on a fixed x grid)."""
+    """Box x in units of one box + spouse gap (adjacent boxes differ by 1)."""
     step_x = view.BOX_W + view._min_spouse_gap(view._graph)
-    return round(view._node_items[pid].pos().x() / step_x)
+    return view._node_items[pid].pos().x() / step_x
 
 
 def test_spouses_are_placed_side_by_side(db, qtbot):
@@ -398,10 +398,10 @@ def test_spouses_are_placed_side_by_side(db, qtbot):
     view.set_graph(graph)
 
     # Top-band couple is adjacent.
-    assert abs(_column_of(view, gm) - _column_of(view, gp)) == 1
+    assert abs(_column_of(view, gm) - _column_of(view, gp)) == pytest.approx(1)
     # Every married pair in the child band is adjacent, not scattered.
     for kid, partner in couples:
-        assert abs(_column_of(view, kid) - _column_of(view, partner)) == 1
+        assert abs(_column_of(view, kid) - _column_of(view, partner)) == pytest.approx(1)
 
 
 def test_selecting_parent_highlights_all_children_down(db, qtbot):

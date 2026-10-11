@@ -338,6 +338,10 @@ const dataJson = JSON.stringify({ persons });
         function add(s) { s.forEach(function (x) { keep.add(x); }); }
         if (mode === 'ancestors' || mode === 'lineage') add(walk(selectedId, 'parents'));
         if (mode === 'descendants' || mode === 'lineage') add(walk(selectedId, 'children'));
+        // Direct line also shows the spouse's ancestors (like the app's focus view).
+        if (mode === 'lineage') {
+          byId.get(selectedId).spouses.forEach(function (sp) { keep.add(sp); add(walk(sp, 'parents')); });
+        }
         // Include spouses of every kept person so couples render together.
         Array.from(keep).forEach(function (id) {
           var n = byId.get(id);
@@ -346,43 +350,266 @@ const dataJson = JSON.stringify({ persons });
         return keep;
       }
 
-      // ---- layout: generation bands, barycentre ordering (mirrors the app) ----
-      function layout(persons) {
-        var gens = new Map();
-        persons.forEach(function (p) {
-          if (!gens.has(p.generation)) gens.set(p.generation, []);
-          gens.get(p.generation).push(p);
-        });
-        var sortedGens = Array.from(gens.keys()).sort(function (a, b) { return a - b; });
+      // ---- layout: line-by-line port of app/services/family_tree_layout.py,
+      //      so the export places people exactly like the desktop app ----
+      var SWEEPS = 6;
 
-        // Build display-number map: oldest generation = 1, newest = N.
-        genDisplayMap = new Map();
-        sortedGens.forEach(function (g, i) { genDisplayMap.set(g, i + 1); });
+      function cmpArr(a, b) {
+        var n = Math.min(a.length, b.length);
+        for (var i = 0; i < n; i++) {
+          var x = a[i], y = b[i];
+          if (Array.isArray(x)) { var c = cmpArr(x, y); if (c) return c; continue; }
+          if (x < y) return -1;
+          if (x > y) return 1;
+        }
+        return a.length - b.length;
+      }
+      function numAsc(a, b) { return a - b; }
 
-        var colOf = new Map();
-        sortedGens.forEach(function (g, band) {
-          var nodes = gens.get(g);
-          if (band === 0) {
-            nodes.sort(function (a, b) { return a.name.localeCompare(b.name, 'hu') || a.id - b.id; });
-          } else {
-            var bary = function (n) {
-              var cols = n.parents.map(function (pid) { return colOf.get(pid); }).filter(function (c) { return c !== undefined; });
-              if (!cols.length) return Number.POSITIVE_INFINITY;
-              return cols.reduce(function (s, c) { return s + c; }, 0) / cols.length;
-            };
-            nodes.sort(function (a, b) { return (bary(a) - bary(b)) || a.name.localeCompare(b.name, 'hu') || a.id - b.id; });
+      // Weighted least-squares non-decreasing fit (pool adjacent violators).
+      function isotonic(targets, weights) {
+        var pools = []; // [value, weight, count]
+        for (var i = 0; i < targets.length; i++) {
+          pools.push([targets[i], weights[i], 1]);
+          while (pools.length > 1 && pools[pools.length - 2][0] > pools[pools.length - 1][0]) {
+            var b = pools.pop(), a = pools.pop(), wt = a[1] + b[1];
+            pools.push([(a[0] * a[1] + b[0] * b[1]) / wt, wt, a[2] + b[2]]);
           }
-          nodes.forEach(function (n, col) { colOf.set(n.id, col); });
+        }
+        var out = [];
+        pools.forEach(function (p) { for (var k = 0; k < p[2]; k++) out.push(p[0]); });
+        return out;
+      }
+
+      // Order a spouse block as a chain so every couple stays adjacent.
+      function chainOrder(block, spouses, pref) {
+        if (block.length <= 1) return block.slice();
+        var inside = new Set(block);
+        var adj = new Map();
+        block.forEach(function (p) { adj.set(p, spouses.get(p).filter(function (q) { return inside.has(q); })); });
+        var byPref = function (a, b) { return cmpArr(pref.get(a), pref.get(b)); };
+        var ends = block.filter(function (p) { return adj.get(p).length === 1; });
+        var cur = (ends.length ? ends : block).slice().sort(byPref)[0];
+        var order = [], visited = new Set();
+        while (cur !== undefined) {
+          order.push(cur); visited.add(cur);
+          var nxt = adj.get(cur).filter(function (q) { return !visited.has(q); }).sort(byPref);
+          cur = nxt[0];
+        }
+        block.filter(function (p) { return !visited.has(p); }).sort(byPref).forEach(function (p) { order.push(p); });
+        return order;
+      }
+
+      function computeLayout(persons, boxW, gap, groupGap) {
+        var byId = new Map();
+        persons.forEach(function (p) { byId.set(p.id, p); });
+        var gensArr = Array.from(new Set(persons.map(function (p) { return p.generation; }))).sort(numAsc);
+        var bandOfGen = new Map();
+        gensArr.forEach(function (g, i) { bandOfGen.set(g, i); });
+        var band = new Map(), parents = new Map(), children = new Map(), spouses = new Map(), key = new Map();
+        persons.forEach(function (p) { band.set(p.id, bandOfGen.get(p.generation)); children.set(p.id, []); });
+        persons.forEach(function (p) {
+          var ps = p.parents.filter(function (q) { return byId.has(q) && band.get(q) < band.get(p.id); }).sort(numAsc);
+          parents.set(p.id, ps);
+          ps.forEach(function (q) { children.get(q).push(p.id); });
+          spouses.set(p.id, p.spouses.filter(function (q) { return byId.has(q) && band.get(q) === band.get(p.id); }).sort(numAsc));
+          key.set(p.id, [p.birthDate || '~', (p.name || '').toLowerCase(), p.id]);
         });
-        var stepX = BOX_W + H_GAP, stepY = BOX_H + V_GAP;
-        var pos = new Map();
-        sortedGens.forEach(function (g, band) {
-          gens.get(g).forEach(function (n) { pos.set(n.id, { x: colOf.get(n.id) * stepX, y: band * stepY }); });
+        var byKey = function (a, b) { return cmpArr(key.get(a), key.get(b)); };
+
+        // Connected family branches, largest/oldest first.
+        var seen = new Set(), comps = [];
+        Array.from(byId.keys()).sort(numAsc).forEach(function (start) {
+          if (seen.has(start)) return;
+          seen.add(start);
+          var comp = [], stack = [start];
+          while (stack.length) {
+            var cur = stack.pop();
+            comp.push(cur);
+            parents.get(cur).concat(children.get(cur), spouses.get(cur)).forEach(function (nb) {
+              if (!seen.has(nb)) { seen.add(nb); stack.push(nb); }
+            });
+          }
+          comps.push(comp);
         });
-        var maxCols = 1;
-        sortedGens.forEach(function (g) { maxCols = Math.max(maxCols, gens.get(g).length); });
-        var width = maxCols * stepX - H_GAP;
-        return { pos: pos, sortedGens: sortedGens, gens: gens, width: width, stepY: stepY };
+        comps.sort(function (a, b) { return (b.length - a.length) || (Math.min.apply(null, a) - Math.min.apply(null, b)); });
+
+        // Spouse-connected groups within one band.
+        function blocksOf(members) {
+          var here = new Set(members), seenB = new Set(), out = [];
+          members.forEach(function (pid) {
+            if (seenB.has(pid)) return;
+            seenB.add(pid);
+            var comp = [], stack = [pid];
+            while (stack.length) {
+              var cur = stack.pop();
+              comp.push(cur);
+              spouses.get(cur).forEach(function (s) {
+                if (here.has(s) && !seenB.has(s)) { seenB.add(s); stack.push(s); }
+              });
+            }
+            out.push(comp);
+          });
+          return out;
+        }
+
+        function layoutComponent(comp) {
+          var step = boxW + gap;
+          var rows = new Map();
+          comp.forEach(function (pid) {
+            var b = band.get(pid);
+            if (!rows.has(b)) rows.set(b, []);
+            rows.get(b).push(pid);
+          });
+          var bands = Array.from(rows.keys()).sort(numAsc);
+          var blocks = new Map();
+          bands.forEach(function (b) { blocks.set(b, blocksOf(rows.get(b).slice().sort(byKey))); });
+          var x = new Map(); // box centre per person
+
+          function family(order) {
+            for (var i = 0; i < order.length; i++) if (parents.get(order[i]).length) return parents.get(order[i]);
+            return null;
+          }
+          function place(entries) {
+            entries.sort(function (a, b) { return (a.desired - b.desired) || cmpArr(a.tb, b.tb); });
+            var targets = [], weights = [], offsets = [];
+            var cursor = 0, prevFam = null;
+            entries.forEach(function (e, i) {
+              var width = e.order.length * boxW + (e.order.length - 1) * gap;
+              var fam = family(e.order);
+              if (i) {
+                var same = fam !== null && prevFam !== null && cmpArr(fam, prevFam) === 0;
+                cursor += same ? gap : groupGap;
+              }
+              offsets.push(cursor);
+              targets.push(e.desired - width / 2 - cursor);
+              weights.push(e.order.length);
+              cursor += width;
+              prevFam = fam;
+            });
+            var fitted = isotonic(targets, weights);
+            entries.forEach(function (e, i) {
+              var left = fitted[i] + offsets[i];
+              e.order.forEach(function (m, j) { x.set(m, left + j * step + boxW / 2); });
+            });
+          }
+          function memberOffsets(order) {
+            var n = order.length, offs = new Map();
+            order.forEach(function (m, i) { offs.set(m, (i - (n - 1) / 2) * step); });
+            return offs;
+          }
+          function sweepDown(b) {
+            var entries = [];
+            var fallback = 0;
+            x.forEach(function (v) { fallback = Math.max(fallback, v); });
+            blocks.get(b).forEach(function (block) {
+              var wanted = new Map();
+              block.forEach(function (m) {
+                var ps = parents.get(m);
+                if (ps.length && ps.every(function (p) { return x.has(p); })) {
+                  wanted.set(m, ps.reduce(function (s, p) { return s + x.get(p); }, 0) / ps.length);
+                }
+              });
+              var pref = new Map();
+              block.forEach(function (m) {
+                var v = wanted.has(m) ? wanted.get(m) : (x.has(m) ? x.get(m) : fallback);
+                pref.set(m, [v, key.get(m)]);
+              });
+              var order = chainOrder(block, spouses, pref);
+              var offs = memberOffsets(order);
+              var desired;
+              if (wanted.size) {
+                var sum = 0;
+                wanted.forEach(function (v, m) { sum += v - offs.get(m); });
+                desired = sum / wanted.size;
+              } else if (order.every(function (m) { return x.has(m); })) {
+                desired = order.reduce(function (s, m) { return s + x.get(m); }, 0) / order.length;
+              } else {
+                fallback += step * (order.length + 1);
+                desired = fallback;
+              }
+              entries.push({ desired: desired, tb: [family(order) || [], key.get(order[0])], order: order });
+            });
+            place(entries);
+          }
+          function sweepUp(b) {
+            var entries = [];
+            blocks.get(b).forEach(function (block) {
+              var order = block.slice().sort(function (p, q) { return x.get(p) - x.get(q); });
+              var centre = order.reduce(function (s, m) { return s + x.get(m); }, 0) / order.length;
+              var inside = new Set(order), shifts = [];
+              order.forEach(function (m) {
+                children.get(m).forEach(function (c) {
+                  var ps = parents.get(c).filter(function (p) { return inside.has(p); });
+                  if (m !== ps[0]) return; // count each child once per block
+                  var junction = ps.reduce(function (s, p) { return s + x.get(p); }, 0) / ps.length;
+                  shifts.push(x.get(c) - junction);
+                });
+              });
+              var desired = centre + (shifts.length ? shifts.reduce(function (s, v) { return s + v; }, 0) / shifts.length : 0);
+              entries.push({ desired: desired, tb: [family(order) || [], key.get(order[0])], order: order });
+            });
+            place(entries);
+          }
+
+          bands.forEach(sweepDown);
+          for (var it = 0; it < SWEEPS; it++) {
+            bands.slice(0, -1).reverse().forEach(sweepUp);
+            bands.slice(1).forEach(sweepDown);
+          }
+          var left = new Map();
+          x.forEach(function (cx, pid) { left.set(pid, cx - boxW / 2); });
+          return left;
+        }
+
+        var positions = new Map(), offset = 0;
+        comps.forEach(function (comp) {
+          var xs = layoutComponent(comp);
+          var lo = Infinity, hi = -Infinity;
+          xs.forEach(function (v) { lo = Math.min(lo, v); hi = Math.max(hi, v + boxW); });
+          xs.forEach(function (v, pid) { positions.set(pid, { x: v - lo + offset, band: band.get(pid) }); });
+          offset += hi - lo + groupGap;
+        });
+        return { positions: positions, gens: gensArr };
+      }
+
+      // Bus y per sibling group, so buses sharing one gap between rows never
+      // overlap (greedy interval colouring). Port of _bus_tracks in the app.
+      function busTracks(groups) {
+        var byGap = new Map();
+        groups.forEach(function (g, i) {
+          var k = Math.round(g.gapTop * 10) / 10;
+          if (!byGap.has(k)) byGap.set(k, []);
+          byGap.get(k).push(i);
+        });
+        var out = new Array(groups.length);
+        byGap.forEach(function (idxs, gapTop) {
+          var span = function (i) { var xs = groups[i].xs; return [Math.min.apply(null, xs), Math.max.apply(null, xs)]; };
+          var trackEnd = [], trackOf = new Map();
+          idxs.slice().sort(function (a, b) { return cmpArr(span(a), span(b)); }).forEach(function (i) {
+            var s = span(i), t = 0;
+            for (; t < trackEnd.length; t++) if (trackEnd[t] < s[0] - 6) break;
+            trackOf.set(i, t);
+            trackEnd[t] = s[1];
+          });
+          var k = trackEnd.length;
+          var spacing = Math.min(10, (V_GAP - 20) / Math.max(k - 1, 1));
+          idxs.forEach(function (i) { out[i] = gapTop + V_GAP / 2 + (trackOf.get(i) - (k - 1) / 2) * spacing; });
+        });
+        return out;
+      }
+
+      function layout(persons, hGap) {
+        var R = computeLayout(persons, BOX_W, hGap, 2 * hGap);
+        genDisplayMap = new Map();
+        R.gens.forEach(function (g, i) { genDisplayMap.set(g, i + 1); });
+        var stepY = BOX_H + V_GAP;
+        var pos = new Map(), width = 0;
+        R.positions.forEach(function (p, id) {
+          pos.set(id, { x: p.x, y: p.band * stepY });
+          width = Math.max(width, p.x + BOX_W);
+        });
+        return { pos: pos, sortedGens: R.gens, width: width, stepY: stepY };
       }
 
       function elide(s, n) { return s.length <= n ? s : s.slice(0, n - 1) + '…'; }
@@ -454,6 +681,12 @@ const dataJson = JSON.stringify({ persons });
         return path;
       }
 
+      function marriageInfo(a, b) {
+        var pa = byId.get(a), pb = byId.get(b);
+        return (pa && pa.spouseMarriageDates && pa.spouseMarriageDates[String(b)]) ||
+               (pb && pb.spouseMarriageDates && pb.spouseMarriageDates[String(a)]) || null;
+      }
+
       // ---- full (re)render for a person subset ----
       function render() {
         var keep = visibleSet();
@@ -472,41 +705,25 @@ const dataJson = JSON.stringify({ persons });
         }
         showHint(null);
 
-        var L = layout(persons);
-        var pos = L.pos;
-
-        // Widen gaps between spouse pairs so marriage-date labels fit.
-        // Per-generation pass: nodes are sorted by x, and we accumulate an
-        // extraShift that is applied to every node to the right of a widened pair.
-        L.sortedGens.forEach(function (g) {
-          var genList = L.gens.get(g).slice().sort(function (a, b) {
-            return L.pos.get(a.id).x - L.pos.get(b.id).x;
-          });
-          var extraShift = 0;
-          genList.forEach(function (n, i) {
-            if (extraShift) {
-              var p = L.pos.get(n.id);
-              L.pos.set(n.id, { x: p.x + extraShift, y: p.y });
-            }
-            if (i + 1 >= genList.length) return;
-            var nxt = genList[i + 1];
-            var nSpouses = (byId.get(n.id) || { spouses: [] }).spouses;
-            if (nSpouses.indexOf(nxt.id) === -1) return;
-            // Consecutive spouse pair — check marriage label width.
-            var sid = Math.min(n.id, nxt.id), lid = Math.max(n.id, nxt.id);
-            var minfo = ((byId.get(sid) || {}).spouseMarriageDates || {})[String(lid)] ||
-                        ((byId.get(lid) || {}).spouseMarriageDates || {})[String(sid)] || null;
+        // Gap between boxes: wide enough for the widest visible marriage label
+        // (the app does the same in _min_spouse_gap).
+        var hGap = H_GAP;
+        persons.forEach(function (p) {
+          p.spouses.forEach(function (sp) {
+            if (!present.has(sp)) return;
+            var minfo = marriageInfo(p.id, sp);
             if (!minfo || (!minfo.date && !minfo.place)) return;
             var lines = [minfo.date, minfo.place].filter(Boolean);
-            var maxLen = lines.reduce(function (m, s) { return Math.max(m, s.length); }, 0);
-            var neededGap = Math.ceil(maxLen * 5.8) + 40;
-            if (neededGap > H_GAP) extraShift += neededGap - H_GAP;
+            var combined = lines.join(', ');
+            var longest = combined.length <= 24 || lines.length === 1
+              ? combined.length
+              : lines.reduce(function (m, t) { return Math.max(m, t.length); }, 0);
+            hGap = Math.max(hGap, Math.ceil(longest * 5.8) + 20);
           });
         });
-        // Recompute canvas width after gap expansion.
-        var maxPosX = 0;
-        L.pos.forEach(function (pt) { maxPosX = Math.max(maxPosX, pt.x + BOX_W); });
-        L.width = maxPosX;
+
+        var L = layout(persons, hGap);
+        var pos = L.pos;
 
         L.pos.forEach(function (pt, id) { posCache.set(id, pt); });
 
@@ -548,10 +765,7 @@ const dataJson = JSON.stringify({ persons });
             var lineY = left.y + BOX_H / 2;
             gLinks.appendChild(elbow([[left.x + BOX_W, lineY], [right.x, lineY]]));
             // Marriage date + place label between the two boxes.
-            var smallerId = p.id < sp ? p.id : sp;
-            var largerId = p.id < sp ? sp : p.id;
-            var minfo = (byId.get(smallerId) && byId.get(smallerId).spouseMarriageDates && byId.get(smallerId).spouseMarriageDates[String(largerId)]) ||
-                        (byId.get(largerId) && byId.get(largerId).spouseMarriageDates && byId.get(largerId).spouseMarriageDates[String(smallerId)]) || null;
+            var minfo = marriageInfo(p.id, sp);
             if (minfo && (minfo.date || minfo.place)) {
               var midX = (left.x + BOX_W + right.x) / 2;
               var lines = [minfo.date, minfo.place].filter(Boolean);
@@ -589,7 +803,7 @@ const dataJson = JSON.stringify({ persons });
         // Parent→child connectors: group siblings by shared parent set so we
         // draw one clean "hat" connector (shared stem + horizontal bar + drops)
         // instead of separate overlapping elbows per child.
-        var siblingGroups = new Map(); // parentKey → {stemX, stemY, midY, children:[{cx,cy}]}
+        var siblingGroups = new Map(); // parentKey → {stemX, stemY, gapTop, children:[{cx,cy}]}
         persons.forEach(function (p) {
           var visParents = p.parents.filter(function (pid) { return present.has(pid); });
           if (!visParents.length) return;
@@ -602,19 +816,22 @@ const dataJson = JSON.stringify({ persons });
             // bottom (BOX_H), so the vertical drop meets the horizontal line.
             var parentsAreSpouses = visParents.length === 2 &&
               (byId.get(visParents[0]) && byId.get(visParents[0]).spouses.indexOf(visParents[1]) !== -1);
-            var parentBottomY = Math.max.apply(null, pPos.map(function (c) { return c.y; }));
-            var stemY = parentsAreSpouses
-              ? parentBottomY + BOX_H / 2
-              : parentBottomY + BOX_H;
-            siblingGroups.set(pKey, { stemX: stemX, stemY: stemY, midY: stemY + V_GAP / 2, children: [] });
+            var parentRowY = Math.max.apply(null, pPos.map(function (c) { return c.y; }));
+            var stemY = parentsAreSpouses ? parentRowY + BOX_H / 2 : parentRowY + BOX_H;
+            siblingGroups.set(pKey, { stemX: stemX, stemY: stemY, gapTop: parentRowY + BOX_H, children: [] });
           }
           var a = pos.get(p.id);
           siblingGroups.get(pKey).children.push({ cx: a.x + BOX_W / 2, cy: a.y });
         });
-        siblingGroups.forEach(function (g) {
+        var groupList = Array.from(siblingGroups.values());
+        var busYs = busTracks(groupList.map(function (g) {
+          return { gapTop: g.gapTop, xs: g.children.map(function (c) { return c.cx; }).concat([g.stemX]) };
+        }));
+        groupList.forEach(function (g, gi) {
+          var midY = busYs[gi];
           var cxs = g.children.map(function (c) { return c.cx; });
           // Vertical stem from parent midpoint down to the horizontal bar.
-          gLinks.appendChild(elbow([[g.stemX, g.stemY], [g.stemX, g.midY]]));
+          gLinks.appendChild(elbow([[g.stemX, g.stemY], [g.stemX, midY]]));
           // Horizontal bar spanning from the stem across to every sibling. Must
           // include the stem's x, otherwise a single child (or any child whose
           // column differs from the parent midpoint) leaves the stem and the
@@ -622,11 +839,11 @@ const dataJson = JSON.stringify({ persons });
           var barLeft = Math.min.apply(null, cxs.concat([g.stemX]));
           var barRight = Math.max.apply(null, cxs.concat([g.stemX]));
           if (barRight > barLeft) {
-            gLinks.appendChild(elbow([[barLeft, g.midY], [barRight, g.midY]]));
+            gLinks.appendChild(elbow([[barLeft, midY], [barRight, midY]]));
           }
           // Individual drops from bar down to each child.
           g.children.forEach(function (c) {
-            gLinks.appendChild(elbow([[c.cx, g.midY], [c.cx, c.cy]]));
+            gLinks.appendChild(elbow([[c.cx, midY], [c.cx, c.cy]]));
           });
         });
 

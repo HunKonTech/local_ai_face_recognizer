@@ -33,6 +33,7 @@ LineageKind = Literal[
     "descendant",   # to_id is a descendant of from_id
     "sibling",
     "cousin",       # shares an ancestor, neither direct line nor sibling
+    "in_law",       # related to from_id's spouse (e.g. parent-in-law)
     "unrelated",
 ]
 
@@ -130,6 +131,79 @@ def infer_coparent_links(
     return extra
 
 
+def assign_generations(
+    ids: set[int],
+    parents: dict[int, set[int]],
+    spouses: dict[int, set[int]],
+) -> dict[int, int]:
+    """Generation band per person for a whole forest (0 = top).
+
+    A child sits at least one band below each parent and spouses share a band
+    (bounded relaxation — the parent graph is acyclic, so it converges). Then
+    every couple is pulled down to sit directly above its highest child, so a
+    married-in spouse's parents do not float in the top band, several bands
+    above their child.
+
+    Pure function shared by the in-app tree and the web export.
+    """
+    gen = {pid: 0 for pid in ids}
+    limit = len(ids) + 1
+    for _ in range(limit):
+        changed = False
+        for pid in ids:
+            for parent in parents.get(pid, ()):
+                if parent in gen and gen[pid] < gen[parent] + 1:
+                    gen[pid] = gen[parent] + 1
+                    changed = True
+        for pid in ids:
+            for spouse in spouses.get(pid, ()):
+                if spouse in gen:
+                    top = max(gen[pid], gen[spouse])
+                    if gen[pid] != top or gen[spouse] != top:
+                        gen[pid] = gen[spouse] = top
+                        changed = True
+        if not changed:
+            break
+
+    children: dict[int, set[int]] = defaultdict(set)
+    for child in ids:
+        for parent in parents.get(child, ()):
+            if parent in gen:
+                children[parent].add(child)
+
+    # Spouse-connected clusters move as one unit so couples stay aligned.
+    clusters: list[list[int]] = []
+    seen: set[int] = set()
+    for pid in sorted(ids):
+        if pid in seen:
+            continue
+        seen.add(pid)
+        comp, stack = [], [pid]
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for spouse in spouses.get(cur, ()):
+                if spouse in gen and spouse not in seen:
+                    seen.add(spouse)
+                    stack.append(spouse)
+        clusters.append(comp)
+
+    for _ in range(limit):
+        changed = False
+        for comp in clusters:
+            kid_gens = [gen[c] for m in comp for c in children.get(m, ())]
+            if not kid_gens:
+                continue
+            target = min(kid_gens) - 1
+            if any(gen[m] < target for m in comp):
+                for m in comp:
+                    gen[m] = max(gen[m], target)
+                changed = True
+        if not changed:
+            break
+    return gen
+
+
 @dataclass
 class LineagePath:
     """The connection between two people through a common ancestor.
@@ -182,7 +256,7 @@ class FamilyTreeService:
                 far above/below the root to walk (``None`` = unlimited).
         """
         self._require_person(root_id)
-        parents, children, spouses = self._build_adjacency()
+        parents, children, spouses = self._build_adjacency(infer_coparents=True)
         members = self._member_flags()
 
         gen: dict[int, int] = {root_id: 0}
@@ -226,18 +300,21 @@ class FamilyTreeService:
         *,
         include_non_members: bool = True,
     ) -> FamilyTreeGraph:
-        """Build only the direct line of ``root_id``.
+        """Build the direct line of ``root_id`` (the "focus on person" view).
 
-        Includes the root, every ancestor (parents upward), every descendant
-        (children downward), the root's spouse(s) and each descendant's
-        spouse(s) so couples render together. Collateral relatives — siblings,
-        cousins, aunts/uncles — are intentionally excluded.
+        Includes the root, its spouse(s), every ancestor of the root **and of
+        the root's spouses**, every descendant, plus the spouse(s) of every
+        ancestor and descendant so each couple renders together. A child linked
+        to only one member of a couple counts as the child of both (see
+        :func:`infer_coparent_links`), so focusing either spouse shows their
+        common descendants. Collateral relatives — siblings, cousins,
+        aunts/uncles — are intentionally excluded.
 
         Generations are relative to the root: ancestors negative, descendants
         positive, spouses share their partner's band.
         """
         self._require_person(root_id)
-        parents, children, spouses = self._build_adjacency()
+        parents, children, spouses = self._build_adjacency(infer_coparents=True)
         members = self._member_flags()
 
         def _allowed(person_id: int) -> bool:
@@ -246,14 +323,19 @@ class FamilyTreeService:
             return include_non_members or members.get(person_id, True)
 
         gen: dict[int, int] = {root_id: 0}
+        for spouse in sorted(spouses.get(root_id, ())):
+            if _allowed(spouse):
+                gen[spouse] = 0
 
-        # Ancestors (upward).
-        queue: deque[int] = deque([root_id])
+        # Ancestors (upward) of the root and its spouses.
+        ancestors: set[int] = set()
+        queue: deque[int] = deque(sorted(gen))
         while queue:
             current = queue.popleft()
-            for parent in parents.get(current, ()):
+            for parent in sorted(parents.get(current, ())):
                 if parent not in gen and _allowed(parent):
                     gen[parent] = gen[current] - 1
+                    ancestors.add(parent)
                     queue.append(parent)
 
         # Descendants (downward). Track them so we add their spouses below.
@@ -261,15 +343,15 @@ class FamilyTreeService:
         queue = deque([root_id])
         while queue:
             current = queue.popleft()
-            for child in children.get(current, ()):
+            for child in sorted(children.get(current, ())):
                 if child not in gen and _allowed(child):
                     gen[child] = gen[current] + 1
                     descendants.add(child)
                     queue.append(child)
 
-        # Spouses of the root and of every descendant (to show couples).
-        for pid in [root_id, *descendants]:
-            for spouse in spouses.get(pid, ()):
+        # Spouses of every ancestor and descendant (to show couples).
+        for pid in sorted(ancestors | descendants, key=lambda p: (gen[p], p)):
+            for spouse in sorted(spouses.get(pid, ())):
                 if spouse not in gen and _allowed(spouse):
                     gen[spouse] = gen[pid]
 
@@ -282,7 +364,7 @@ class FamilyTreeService:
         (a child sits one band below its lowest parent, spouses share a band),
         so the result can be laid out in generation bands without a single root.
         """
-        parents, children, spouses = self._build_adjacency()
+        parents, children, spouses = self._build_adjacency(infer_coparents=True)
         members = self._member_flags()
         ids = set(parents) | set(children) | set(spouses)
         if not include_non_members:
@@ -299,25 +381,11 @@ class FamilyTreeService:
         """Generation per node: child = max(parent)+1, spouses aligned.
 
         Uses bounded relaxation (the parent graph is acyclic, so it converges).
+        Afterwards people without parents are pulled down to sit directly above
+        their highest child: a married-in spouse's parents would otherwise stay
+        in the top band, several bands above their child.
         """
-        gen = {pid: 0 for pid in ids}
-        for _ in range(len(ids) + 1):
-            changed = False
-            for pid in ids:
-                for parent in parents.get(pid, ()):
-                    if parent in gen and gen[pid] < gen[parent] + 1:
-                        gen[pid] = gen[parent] + 1
-                        changed = True
-            for pid in ids:
-                for spouse in spouses.get(pid, ()):
-                    if spouse in gen:
-                        top = max(gen[pid], gen[spouse])
-                        if gen[pid] != top or gen[spouse] != top:
-                            gen[pid] = gen[spouse] = top
-                            changed = True
-            if not changed:
-                break
-        return gen
+        return assign_generations(ids, parents, spouses)
 
     # ------------------------------------------------------------------
     # Lineage queries
@@ -342,7 +410,9 @@ class FamilyTreeService:
         if person_id_a == person_id_b:
             return LineagePath(person_id_a, person_id_b, "self", (person_id_a,), 0, 0)
 
-        parents, _, spouses = self._build_adjacency()
+        # Couples count as joint parents here too, so a child linked to only
+        # one spouse is still the other spouse's descendant.
+        parents, _, spouses = self._build_adjacency(infer_coparents=True)
         if person_id_b in spouses.get(person_id_a, set()):
             return LineagePath(
                 person_id_a, person_id_b, "spouse", (person_id_a, person_id_b), 0, 0
@@ -352,6 +422,10 @@ class FamilyTreeService:
         depth_b = self._ancestor_depths(person_id_b, parents)
         common = set(depth_a) & set(depth_b)
         if not common:
+            # Related through a spouse (e.g. the spouse's parents or siblings)?
+            for spouse in sorted(spouses.get(person_id_a, ())):
+                if set(self._ancestor_depths(spouse, parents)) & set(depth_b):
+                    return LineagePath(person_id_a, person_id_b, "in_law")
             return LineagePath(person_id_a, person_id_b, "unrelated")
 
         lca = min(common, key=lambda pid: depth_a[pid] + depth_b[pid])
@@ -448,9 +522,13 @@ class FamilyTreeService:
     # ------------------------------------------------------------------
 
     def _build_adjacency(
-        self,
+        self, *, infer_coparents: bool = False
     ) -> tuple[dict[int, set[int]], dict[int, set[int]], dict[int, set[int]]]:
-        """Load all relationships once into parent/child/spouse adjacency maps."""
+        """Load all relationships once into parent/child/spouse adjacency maps.
+
+        With ``infer_coparents`` a child linked to only one member of a couple
+        is also linked to the other spouse (see :func:`infer_coparent_links`).
+        """
         parents: dict[int, set[int]] = defaultdict(set)
         children: dict[int, set[int]] = defaultdict(set)
         spouses: dict[int, set[int]] = defaultdict(set)
@@ -466,6 +544,11 @@ class FamilyTreeService:
             elif rtype == REL_SPOUSE:
                 spouses[a_id].add(b_id)
                 spouses[b_id].add(a_id)
+        if infer_coparents:
+            everyone = set(parents) | set(children) | set(spouses)
+            for coparent, child in infer_coparent_links(parents, spouses, everyone):
+                parents[child].add(coparent)
+                children[coparent].add(child)
         return parents, children, spouses
 
     def _marriage_dates(
@@ -512,8 +595,7 @@ class FamilyTreeService:
 
         # Show couples as joint parents: a child linked to only one member of a
         # couple is treated as a child of both spouses (see infer_coparent_links).
-        # Mutates fresh per-build adjacency only — the LCA / relationship_path
-        # queries read their own _build_adjacency() and stay unaffected.
+        # Mutates fresh per-build adjacency only.
         for coparent, child in infer_coparent_links(parents, spouses, included):
             parents[child].add(coparent)
             children[coparent].add(child)

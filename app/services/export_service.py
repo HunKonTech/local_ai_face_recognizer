@@ -2014,31 +2014,18 @@ def _build_family_tree_export(
     # Show couples as joint parents: a child linked to only one member of a
     # couple becomes a child of both spouses, so siblings share one bus and both
     # parents highlight as ancestors — matching the in-app family tree.
-    from app.services.family_tree_service import infer_coparent_links
+    from app.services.family_tree_service import (
+        assign_generations,
+        infer_coparent_links,
+    )
 
     for coparent, child in infer_coparent_links(parents, spouses, ids):
         parents[child].add(coparent)
         children[coparent].add(child)
 
-    # Generation per node: child = max(parent)+1, spouses aligned. The parent
-    # graph is acyclic, so bounded relaxation converges (mirrors FamilyTreeService).
-    gen = {pid: 0 for pid in ids}
-    for _ in range(len(ids) + 1):
-        changed = False
-        for pid in ids:
-            for parent in parents.get(pid, ()):  # noqa: B007
-                if gen[pid] < gen.get(parent, 0) + 1:
-                    gen[pid] = gen[parent] + 1
-                    changed = True
-        for pid in ids:
-            for spouse in spouses.get(pid, ()):
-                if spouse in gen:
-                    top = max(gen[pid], gen[spouse])
-                    if gen[pid] != top or gen[spouse] != top:
-                        gen[pid] = gen[spouse] = top
-                        changed = True
-        if not changed:
-            break
+    # Generation per node (child below its parents, spouses aligned, couples
+    # pulled down above their children) — shared with the in-app tree.
+    gen = assign_generations(ids, parents, spouses)
 
     # Best-effort membership flags (older DBs may lack the column).
     members: Dict[int, bool] = {}

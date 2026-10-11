@@ -203,6 +203,142 @@ def _parse_extended_tree_code(code: str) -> Optional[FamilyCodeInfo]:
     return None
 
 
+@dataclass(frozen=True)
+class CodeRef:
+    """A person referenced by a family code.
+
+    ``is_root`` marks the family's root person, who may be stored either as the
+    bare letter (``C``) or with the root-person marker (``C0``); ``code`` is then
+    just the root letter.
+    """
+
+    code: str
+    is_root: bool = False
+
+
+@dataclass(frozen=True)
+class CodeRelation:
+    """One relationship implied by a family code, seen from the code's owner.
+
+    ``kind``: ``parent`` (``ref`` is the owner's parent), ``child`` (``ref`` is
+    the owner's child), ``spouse`` or ``sibling`` (the owner shares ``ref``'s
+    parents).
+    """
+
+    kind: Literal["parent", "child", "spouse", "sibling"]
+    ref: CodeRef
+
+
+def derive_code_relations(code: Optional[str]) -> list[CodeRelation]:
+    """Relationships a single family code implies, following the interpreter.
+
+    The grammar is the one :func:`describe_family_code` explains to the user:
+
+    * ``C`` / ``C0`` — the root person; ``C00`` — the root's spouse;
+    * ``C8`` — child of the root, ``C80`` — spouse of ``C8``, ``C801`` — child
+      of ``C80`` from a previous relationship, ``G1{2}3`` — child of ``G1`` and
+      ``G1H2``;
+    * ``C0F1`` / ``C0F2`` — father / mother of ``C0`` (and spouses of each
+      other), ``C0F12`` — mother of ``C0F1`` …;
+    * ``C00T1`` — sibling of ``C00`` (child of ``C00F1`` / ``C00F2``),
+      ``C00T10`` — the sibling's spouse, ``C00T11`` — the sibling's child;
+    * ``G1H2`` — 2nd spouse of ``G1``, ``G1H21`` — that spouse's child.
+
+    For backwards compatibility a bare ``C0`` is also reported as the spouse of
+    a person coded exactly ``C`` (the older simple grammar); the caller only
+    links it when such a different person exists.
+
+    Friend, multi, range and external codes imply no relationships. Pure
+    function — persons are resolved by the caller.
+    """
+    if not code:
+        return []
+    try:
+        info = parse_extended_code(code)
+    except ValueError:
+        return []
+    if info.is_external or info.suffix_type == "friend":
+        return []
+
+    scheme = get_active_scheme()
+    letter = info.root
+    digits = info.path_digits
+    nums = info.path_spouse_nums
+
+    def code_of(ds: tuple[int, ...], ns: tuple[Optional[int], ...]) -> str:
+        return letter + "".join(
+            (f"{{{n}}}" if n else "") + str(d) for d, n in zip(ds, ns)
+        )
+
+    def ref_of(ds: tuple[int, ...], ns: tuple[Optional[int], ...]) -> CodeRef:
+        if ds in ((), (0,)):
+            return CodeRef(letter, is_root=True)
+        return CodeRef(code_of(ds, ns))
+
+    def continuation(anchor: str, rest: tuple[int, ...]) -> list[CodeRelation]:
+        # ``rest`` continues a person path from ``anchor``: a trailing 0 is the
+        # spouse of what precedes it, any other digit a child of it.
+        target = CodeRef(anchor + "".join(str(d) for d in rest[:-1]))
+        if rest[-1] == 0:
+            return [CodeRelation("spouse", target)]
+        return [CodeRelation("parent", target)]
+
+    base = ref_of(digits, nums)
+    base_str = code_of(digits, nums)
+
+    if info.suffix_type is None:
+        if not digits:
+            return []
+        if digits == (0,):
+            # Legacy simple grammar: C0 = spouse of C (only if C exists).
+            return [CodeRelation("spouse", CodeRef(letter))]
+        prefix, pnums = digits[:-1], nums[:-1]
+        target = ref_of(prefix, pnums)
+        if digits[-1] == 0:
+            return [CodeRelation("spouse", target)]
+        rels = [CodeRelation("parent", target)]
+        spouse_num = nums[-1]
+        if spouse_num and scheme.spouse_letter:
+            rels.append(
+                CodeRelation(
+                    "parent",
+                    CodeRef(f"{code_of(prefix, pnums)}{scheme.spouse_letter}{spouse_num}"),
+                )
+            )
+        return rels
+
+    if info.suffix_type == "ancestor":
+        path = info.ancestor_path
+        marker = scheme.ancestor_letter
+        above = "".join(str(d) for d in path[:-1])
+        child = base if len(path) == 1 else CodeRef(f"{base_str}{marker}{above}")
+        partner = CodeRef(f"{base_str}{marker}{above}{3 - path[-1]}")
+        return [CodeRelation("child", child), CodeRelation("spouse", partner)]
+
+    if info.suffix_type == "sibling":
+        path = info.sibling_path
+        if len(path) > 1:
+            anchor = f"{base_str}{scheme.sibling_letter}{path[0]}"
+            return continuation(anchor, path[1:])
+        marker = scheme.ancestor_letter
+        rels = [CodeRelation("sibling", base)]
+        if marker:
+            rels += [
+                CodeRelation("parent", CodeRef(f"{base_str}{marker}1")),
+                CodeRelation("parent", CodeRef(f"{base_str}{marker}2")),
+            ]
+        return rels
+
+    if info.suffix_type == "spouse":
+        path = info.spouse_path
+        if len(path) > 1:
+            anchor = f"{base_str}{scheme.spouse_letter}{path[0]}"
+            return continuation(anchor, path[1:])
+        return [CodeRelation("spouse", base)]
+
+    return []
+
+
 def family_codes_are_siblings(code_a: Optional[str], code_b: Optional[str]) -> bool:
     """Return True when two non-spouse FamilyCodes have the same derived parent."""
     info_a = parse_family_code(code_a)
@@ -552,14 +688,21 @@ class FamilyService:
         self._session.flush()
         return True
 
-    def link_derived_parents(self, person_id: int) -> list[Relationship]:
+    def link_derived_parents(
+        self, person_id: int, *, include_dependents: bool = True
+    ) -> list[Relationship]:
         """Materialise the relationships a person's family code implies.
 
-        For a parent-disambiguated child code (``G1{2}3``) this links both the
-        first parent (``G1``) and the brace-derived second parent (``G1H2``) as
-        ParentChild, and links the two parents to each other as spouses.  For a
-        numbered-spouse code (``G1H2``) it links the spouse relationship with the
-        base person (``G1``).
+        Covers the whole code grammar (see :func:`derive_code_relations`):
+        children (``C8``, ``G1{2}3``) are linked to their parent(s), spouses
+        (``C80``, ``C00``, ``G1H2``) to their partner, ancestors (``C0F1``) to
+        the child they are the parent of and to their own partner (``C0F2``),
+        siblings (``C00T1``) to the shared parents. Two parents found for one
+        child are also linked as spouses.
+
+        With ``include_dependents`` the relationships of persons whose codes
+        refer *to* this person are materialised too, so coding the people in
+        any order (e.g. the father before the child) ends up fully linked.
 
         Linking is best-effort: only relationships whose other person already
         exists (matched by family code) are created.  Returns the list of
@@ -568,35 +711,99 @@ class FamilyService:
         propagate so the caller can surface them.
         """
         person = self._require_person(person_id)
-        info = parse_family_code(person.family_code)
-        if info is None:
-            return []
-
-        created: list[Relationship] = []
-
-        # Numbered-spouse code (G1H2): link as spouse of the base person.
-        if info.spouse_of_code and info.parent_code is None:
-            base = self.find_by_family_code(info.spouse_of_code)
-            if base is not None and base.id != person.id:
-                created.append(self.add_spouse(base.id, person.id))
-            return created
-
-        # Braced child (G1{2}3): link both parents, and the parents as spouses.
-        parent_codes = [c for c in (info.parent_code, info.second_parent_code) if c]
-        parent_persons: list[Person] = []
-        for parent_code in parent_codes:
-            parent = self.find_by_family_code(parent_code)
-            if parent is None or parent.id == person.id:
-                continue
-            parent_persons.append(parent)
-            created.append(self.add_parent_child(parent.id, person.id))
-
-        if len(parent_persons) == 2:
-            created.append(
-                self.add_spouse(parent_persons[0].id, parent_persons[1].id)
-            )
-
+        created = self._link_code_relations(person)
+        if include_dependents and person.family_code:
+            for dependent in self._code_dependents(person):
+                created.extend(self._link_code_relations(dependent))
         return created
+
+    def _link_code_relations(self, person: Person) -> list[Relationship]:
+        created: list[Relationship] = []
+        parent_ids: list[int] = []
+        for rel in derive_code_relations(person.family_code):
+            other = self._resolve_code_ref(rel.ref)
+            if other is None or other.id == person.id:
+                continue
+            if rel.kind == "parent":
+                if other.id not in parent_ids:
+                    parent_ids.append(other.id)
+                created.append(self.add_parent_child(other.id, person.id))
+            elif rel.kind == "child":
+                created.append(self.add_parent_child(person.id, other.id))
+            elif rel.kind == "spouse":
+                created.append(self.add_spouse(person.id, other.id))
+            elif rel.kind == "sibling":
+                for parent_id in self._parent_ids(other.id):
+                    if parent_id == person.id:
+                        continue
+                    if parent_id not in parent_ids:
+                        parent_ids.append(parent_id)
+                    created.append(self.add_parent_child(parent_id, person.id))
+
+        if len(parent_ids) == 2:
+            created.append(self.add_spouse(parent_ids[0], parent_ids[1]))
+        return created
+
+    def _resolve_code_ref(self, ref: CodeRef) -> Optional[Person]:
+        """Find the person a :class:`CodeRef` points at (root: ``C`` or ``C0``)."""
+        candidates = [ref.code, f"{ref.code}0"] if ref.is_root else [ref.code]
+        for code in candidates:
+            try:
+                person = self.find_by_family_code(code)
+            except ValueError:
+                person = None
+            if person is not None:
+                return person
+        return None
+
+    def _code_dependents(self, person: Person) -> list[Person]:
+        """Persons whose family code refers to ``person`` (e.g. its child)."""
+        own = (person.family_code or "").strip().upper()
+        if not own:
+            return []
+        root_letter = own[0]
+        is_root = self._resolve_code_ref(CodeRef(root_letter, is_root=True))
+        is_root = is_root is not None and is_root.id == person.id
+        # A code referring to X always starts with X's own base path, except
+        # for braced children of a numbered spouse (G1{2}3 → G1H2) and children
+        # of the root (C8 → C0): those share only the root letter / base.
+        if is_root:
+            prefix = root_letter
+        else:
+            try:
+                info = parse_extended_code(own)
+            except ValueError:
+                return []
+            prefix = own
+            if info.suffix_type == "spouse":
+                prefix = own[: own.rfind(get_active_scheme().spouse_letter or "H")]
+        rows = (
+            self._session.query(Person)
+            .filter(Person.family_code.like(f"{prefix}%"))
+            .filter(Person.id != person.id)
+            .all()
+        )
+        out: list[Person] = []
+        for candidate in rows:
+            for rel in derive_code_relations(candidate.family_code):
+                if (rel.ref.is_root and is_root) or (
+                    not rel.ref.is_root and rel.ref.code == own
+                ):
+                    out.append(candidate)
+                    break
+        return out
+
+    def _parent_ids(self, person_id: int) -> list[int]:
+        return [
+            pid
+            for (pid,) in self._session.query(Relationship.person_a_id)
+            .filter(
+                Relationship.relationship_type == REL_PARENT_CHILD,
+                Relationship.person_b_id == person_id,
+            )
+            .order_by(Relationship.person_a_id)
+            .all()
+        ]
 
     def regenerate_all_links(self) -> int:
         """Re-derive relationships from every person's family code.
@@ -617,7 +824,9 @@ class FamilyService:
         touched = 0
         for pid in person_ids:
             try:
-                touched += len(self.link_derived_parents(pid))
+                touched += len(
+                    self.link_derived_parents(pid, include_dependents=False)
+                )
             except ValueError:
                 continue  # invalid/cyclic code — leave it for manual fixing
         return touched

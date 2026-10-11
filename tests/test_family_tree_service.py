@@ -122,6 +122,46 @@ def test_build_lineage_excludes_collateral_relatives(db):
         assert p["Cousin"] not in present                     # sibling's child
 
 
+def test_build_lineage_shows_couples_on_both_sides(db):
+    """Focus view (#151): ancestors' spouses, the spouse's ancestors, and
+    children linked to only one spouse all appear."""
+    with session_scope() as session:
+        fam = FamilyService(session)
+        p = {name: _person(session, name).id for name in (
+            "WifeFather", "WifeMother", "HusbFather", "HusbMother",
+            "Wife", "Husb", "Kid", "KidSpouse", "Grandkid", "HusbSibling",
+        )}
+        fam.add_spouse(p["WifeFather"], p["WifeMother"])
+        fam.add_parent_child(p["WifeFather"], p["Wife"])  # mother not linked
+        fam.add_spouse(p["HusbFather"], p["HusbMother"])
+        fam.add_parent_child(p["HusbMother"], p["Husb"])
+        fam.add_parent_child(p["HusbMother"], p["HusbSibling"])
+        fam.add_spouse(p["Wife"], p["Husb"])
+        fam.add_parent_child(p["Wife"], p["Kid"])  # only one parent linked
+        fam.add_spouse(p["Kid"], p["KidSpouse"])
+        fam.add_parent_child(p["Kid"], p["Grandkid"])
+        session.flush()
+        tree = FamilyTreeService(session)
+
+        on_husb = set(tree.build_lineage(p["Husb"]).nodes)
+        # Descendants of the husband via the wife-only links.
+        assert {p["Kid"], p["KidSpouse"], p["Grandkid"]} <= on_husb
+        # Both sides' ancestors, and every ancestor's spouse.
+        assert {p["WifeFather"], p["WifeMother"], p["HusbFather"], p["HusbMother"]} <= on_husb
+        assert p["HusbSibling"] not in on_husb  # collateral still excluded
+
+        on_grandkid = set(tree.build_lineage(p["Grandkid"]).nodes)
+        assert {p["Kid"], p["KidSpouse"], p["Wife"], p["Husb"]} <= on_grandkid
+        assert {p["WifeMother"], p["HusbFather"]} <= on_grandkid
+
+        on_ancestor = set(tree.build_lineage(p["HusbMother"]).nodes)
+        assert {p["HusbFather"], p["Husb"], p["HusbSibling"], p["Kid"],
+                p["Grandkid"]} <= on_ancestor
+
+        assert tree.relationship_path(p["Husb"], p["Kid"]).kind == "descendant"
+        assert tree.relationship_path(p["Wife"], p["HusbMother"]).kind == "in_law"
+
+
 def test_node_thumbnail_falls_back_to_face_crop(db):
     from app.db.models import Face, Image
 
