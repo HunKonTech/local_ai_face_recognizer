@@ -76,6 +76,7 @@ from app.workers.deep_pipeline_worker import (
     MODE_DETECT_FACES,
     MODE_REBUILD,
     MODE_REBUILD_MODEL,
+    MODE_REEMBED,
     MODE_RESCAN,
     MODE_TRAIN,
     DeepPipelineWorker,
@@ -799,6 +800,7 @@ class MainWindow(QMainWindow):
             "identity_repair": self._on_identity_repair_scan,
             "cleanup_empty_unknowns": self._on_cleanup_empty_unknown_persons,
             "manage_ignored_faces": self._on_manage_ignored_faces,
+            "reembed_faces": self._on_deep_reembed,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -874,6 +876,20 @@ class MainWindow(QMainWindow):
             return
         self._start_deep_pipeline(MODE_REBUILD_MODEL)
 
+    @Slot()
+    def _on_deep_reembed(self) -> None:
+        if not self._deep_pipeline_guard():
+            return
+        reply = QMessageBox.question(
+            self,
+            t("reembed_confirm_title"),
+            t("reembed_confirm_msg"),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._start_deep_pipeline(MODE_REEMBED)
+
     def _start_deep_pipeline(self, mode: str) -> None:
         """Launch the deep-learning (AI) pipeline as a Task Manager task."""
         drive_active = self._gdrive_session is not None
@@ -921,6 +937,7 @@ class MainWindow(QMainWindow):
             MODE_TRAIN: t("task_deep_train"),
             MODE_DETECT_FACES: t("task_deep_detect"),
             MODE_CLUSTER: t("task_deep_cluster"),
+            MODE_REEMBED: t("task_deep_reembed"),
         }.get(mode, t("task_deep_rescan"))
         self._run_pipeline_task(worker, name)
 

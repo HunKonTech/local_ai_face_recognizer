@@ -11,15 +11,19 @@ database:
 * :meth:`confirm_assignment` / :meth:`correct_assignment` /
   :meth:`revert_assignment` — the review actions of the "automatic
   groupings" tab.  Confirmations become trusted training data; corrections
-  additionally record :class:`FaceCorrection` constraints so the same
-  mistake is not repeated.
+  additionally record :class:`FaceVeto` / :class:`FaceCorrection`
+  judgements so the same mistake is not repeated.
+* near-match suggestions and suspicious-label review — the active-learning
+  side: the engine asks about exactly the faces it is unsure of.
 
 Safety rules
 ------------
 * A face already assigned to a *named* person is never touched — an earlier
   recognition always wins over a newer one.
 * Faces failing the open-set gates (strangers, non-faces) stay unknown.
-* The user's "different person" judgements are hard vetoes.
+* The user's "different person" judgements are hard vetoes, and a photo
+  taken before a person's birth / after their death never gets their name.
+* When reviewed precision drops below the target, every threshold tightens.
 """
 
 from __future__ import annotations
@@ -27,8 +31,9 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -41,17 +46,24 @@ from app.db.models import (
     AUTO_ASSIGN_STATUS_AUTO,
     AUTO_ASSIGN_STATUS_CONFIRMED,
     AUTO_ASSIGN_STATUS_CORRECTED,
+    AUTO_ASSIGN_STATUS_NEAR,
     AUTO_ASSIGN_STATUS_REVERTED,
+    LABEL_REVIEW_KEPT,
+    LABEL_REVIEW_SUSPICIOUS,
     AutoAssignment,
     Face,
     FaceCorrection,
+    FaceVeto,
+    Image,
     Person,
     TrainingRun,
 )
-from app.deep.classifier import DeepFaceClassifier
-from app.deep.dataset import build_training_dataset
+from app.deep.classifier import DeepFaceClassifier, DeepPrediction
+from app.deep.dataset import ProbeMeta, build_training_dataset
+from app.deep.evaluation import evaluate_open_set, feedback_precision
 from app.services._image_dup_geometry import is_same_physical_face
 from app.services._image_dup_geometry import unit as _unit_vec
+from app.utils.fuzzy_date import FuzzyDate, Precision
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +122,36 @@ class DeepRecognitionStats:
     # Per-image identity guard: a weaker auto-recognition incumbent box was
     # deleted in favour of this stronger prediction.
     n_replaced_duplicate_identity: int = 0
+    # Explicit "unknown" output of the network won.
+    n_rejected_unknown_class: int = 0
+    # Nearest training faces disagreed with the winner (k-NN gate).
+    n_rejected_knn: int = 0
+    # Photo date outside the person's lifetime.
+    n_rejected_date: int = 0
+    # Second appearance of the person on one photo without strong evidence.
+    n_rejected_repeat_on_image: int = 0
+    # Unsure faces accepted thanks to their unknown group's vote / same-day event.
+    n_cluster_vote: int = 0
+    n_event_prior: int = 0
+    # Close-but-unsure predictions offered as one-click suggestions.
+    n_near_suggestions: int = 0
+    # Extra assignments made by self-training rounds.
+    n_self_training: int = 0
+    # Threshold tightening applied from review feedback.
+    strictness: float = 0.0
+    measured_precision: Optional[float] = None
+    n_reviewed: int = 0
+
+
+@dataclass
+class _Candidate:
+    """One unknown face with its (possibly revised) prediction."""
+
+    face: Face
+    prediction: DeepPrediction
+    debug_info: object = None
+    origin: str = "model"        # "model" | "cluster_vote" | "event"
+    blocked: bool = False        # candidate person vetoed (user / date)
 
 
 @dataclass(eq=False)
@@ -146,15 +188,50 @@ class AutoAssignmentDTO:
     decision: Optional[Dict] = None
 
 
+_NEAR_ORIGIN_MARKER = '%"origin": "near"%'
+
+
+def _real_assignment_filter():
+    """SQL filter: rows that were real automatic assignments, not near-match
+    suggestions (open or already answered)."""
+    return (AutoAssignment.status != AUTO_ASSIGN_STATUS_NEAR) & (
+        AutoAssignment.decision_json.is_(None)
+        | ~AutoAssignment.decision_json.like(_NEAR_ORIGIN_MARKER)
+    )
+
+
 def _parse_decision_json(raw: Optional[str]) -> Optional[Dict]:
-    """Parse a stored decision JSON, tolerating missing/corrupt values."""
+    """Parse a stored decision JSON, tolerating missing/corrupt values.
+
+    A row that only carries provenance (no gate list, e.g. a near-match
+    suggestion made without the debug view) yields None, so the review tab
+    recomputes the full graph on demand.
+    """
     if not raw:
         return None
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict) or "gates" not in data:
+        return None
+    return data
+
+
+@dataclass
+class SuspiciousLabelDTO:
+    """A labeled face the noise filter thinks belongs to someone else."""
+
+    face_id: int
+    person_id: int
+    person_name: str
+    lookalike_person_id: Optional[int]
+    lookalike_name: Optional[str]
+    own_similarity: Optional[float]
+    other_similarity: Optional[float]
+    crop_path: Optional[str]
+    image_path: Optional[str]
+    bbox: Optional[Tuple[int, int, int, int]]
 
 
 @dataclass
@@ -175,11 +252,16 @@ class DeepRecognitionService:
         config: Optional[DeepRecognitionConfig] = None,
         model_dir: Optional[Path | str] = None,
         identity_guard: Optional[RecognitionIdentityGuardConfig] = None,
+        embedder_id: str = "",
     ) -> None:
         self._session = session
         self._config = config or DeepRecognitionConfig()
         self._identity_guard = identity_guard or RecognitionIdentityGuardConfig()
         self._model_dir = Path(model_dir) if model_dir else Path(self._config.model_dir)
+        # Identifies the embedding model / crop geometry / TTA — part of the
+        # training fingerprint, so a re-embed always retrains the model.
+        self._embedder_id = embedder_id
+        self._image_dates: Dict[int, FuzzyDate] = {}
 
     # ------------------------------------------------------------------
     # Training
@@ -245,7 +327,8 @@ class DeepRecognitionService:
                 return None
             crop_path = str(face.crop_path) if face.crop_path else None
             _pred, info = classifier.predict_debug(
-                embedding, face_id=face.id, crop_path=crop_path
+                embedding, face_id=face.id, crop_path=crop_path,
+                probe=ProbeMeta.from_face(face),
             )
             return info
         except Exception:  # noqa: BLE001
@@ -343,6 +426,7 @@ class DeepRecognitionService:
         mode: str = "rescan",
         progress_cb=None,
         force: bool = False,
+        run: Optional[TrainingRun] = None,
     ) -> Tuple[TrainingRun, DeepTrainStats, DeepFaceClassifier]:
         """Retrain the neural ensemble on every trusted labeled face.
 
@@ -350,17 +434,24 @@ class DeepRecognitionService:
         ready-to-use classifier.  When the labeled data is unchanged since the
         last run and ``skip_unchanged`` is on, the saved model is reused —
         unless ``force`` is set (the explicit "train the model" action must
-        always retrain, e.g. to pick up new engine defaults).
+        always retrain, e.g. to pick up new engine defaults).  *run* re-uses an
+        existing TrainingRun row (self-training rounds of one cycle).
         """
+        cfg = self._config
         dataset = build_training_dataset(
             self._session,
-            auto_min_confidence=self._config.auto_training_min_confidence,
-            use_auto_assignments=self._config.use_auto_assignments_for_training,
-            exclude_low_quality=self._config.strict_quality_filter,
+            auto_min_confidence=cfg.auto_training_min_confidence,
+            use_auto_assignments=cfg.use_auto_assignments_for_training,
+            exclude_low_quality=cfg.strict_quality_filter,
+            embedder_id=self._embedder_id,
+            collect_unknown=cfg.use_unknown_class,
+            unknown_max_similarity=cfg.unknown_class_max_similarity,
+            max_unknown=cfg.max_unknown_examples,
         )
 
-        run = TrainingRun(mode=mode, started_at=_utcnow_naive())
-        self._session.add(run)
+        if run is None:
+            run = TrainingRun(mode=mode, started_at=_utcnow_naive())
+            self._session.add(run)
 
         classifier = DeepFaceClassifier(self._config)
         stats = DeepTrainStats(
@@ -392,6 +483,18 @@ class DeepRecognitionService:
                     classifier.save(self.model_path)
                 except OSError as exc:
                     log.warning("Could not persist deep model: %s", exc)
+            self._flag_suspicious_labels(report)
+            if cfg.evaluate_after_training and classifier.is_trained:
+                try:
+                    evaluation = evaluate_open_set(
+                        dataset, cfg,
+                        n_folds=cfg.calibration_folds,
+                        holdout_fraction=cfg.evaluation_holdout_fraction,
+                        unknown_ratio=cfg.expected_unknown_ratio,
+                    )
+                    report.metrics["evaluation"] = evaluation.to_dict()
+                except Exception:  # noqa: BLE001 — diagnostics never block training
+                    log.warning("Open-set evaluation failed", exc_info=True)
 
         run.finished_at = _utcnow_naive()
         run.n_persons = stats.n_persons
@@ -400,8 +503,36 @@ class DeepRecognitionService:
         run.validation_accuracy = stats.validation_accuracy
         run.data_fingerprint = fingerprint
         run.model_path = str(self.model_path)
+        run.metrics_json = self._metrics_json(classifier.report)
         self._session.commit()
         return run, stats, classifier
+
+    @staticmethod
+    def _metrics_json(report) -> Optional[str]:
+        if report is None:
+            return None
+        data = dict(report.metrics or {})
+        data.update({
+            "mode": report.mode,
+            "n_deduplicated": report.n_deduplicated,
+            "n_negatives": report.n_negatives,
+            "n_unknown": report.n_unknown,
+            "suspicious": [list(row) for row in report.suspicious],
+        })
+        try:
+            return json.dumps(data, ensure_ascii=False, default=float)
+        except (TypeError, ValueError):
+            return None
+
+    def _flag_suspicious_labels(self, report) -> None:
+        """Mark label-noise suspects for review (never re-flag a kept label)."""
+        ids = report.suspicious_face_ids if report is not None else []
+        if not ids:
+            return
+        for face in self._session.query(Face).filter(Face.id.in_(ids)).all():
+            if face.label_review_status != LABEL_REVIEW_KEPT:
+                face.label_review_status = LABEL_REVIEW_SUSPICIOUS
+        log.info("Deep training: %d suspicious label(s) flagged for review", len(ids))
 
     def _model_persons_exist(self, classifier: DeepFaceClassifier) -> bool:
         """False when none of the model's people still exist in the database.
@@ -437,7 +568,14 @@ class DeepRecognitionService:
 
         Faces already assigned to a named person are never candidates — an
         existing recognition always survives a newer run untouched.
+
+        The run has five passes: (1) predict every candidate, (2) apply the
+        user's vetoes and the lifetime check, (3) give unsure faces a second
+        chance when their unknown group or a same-day photo supports the
+        candidate, (4) apply the assignments strongest-first under the
+        per-image guards, (5) offer the close misses as near-match suggestions.
         """
+        cfg = self._config
         stats = DeepRecognitionStats()
         if not classifier.is_trained:
             log.info("Deep recognition skipped: no trained model")
@@ -459,23 +597,20 @@ class DeepRecognitionService:
             )
             return stats
 
+        self._apply_feedback_strictness(classifier, training_run, stats)
+        self._drop_stale_near_suggestions()
+
         candidates = self._load_candidate_faces()
         stats.n_candidates = len(candidates)
         if not candidates:
+            self._session.commit()
             return stats
 
         vetoes = self._load_correction_vetoes(candidates)
-        now = _utcnow_naive()
+        lifespans = self._load_lifespans() if cfg.date_veto_enabled else {}
 
-        # Per-image identity guard: index the faces already attached to a real
-        # named person, keyed by image, so we never label one physical face with
-        # a person who is already placed on that photo.
-        incumbents = (
-            self._load_incumbents_by_image()
-            if self._identity_guard.enabled
-            else {}
-        )
-
+        # --- Pass 1: predict ------------------------------------------------
+        decided: List[_Candidate] = []
         for idx, face in enumerate(candidates):
             if progress_cb is not None:
                 progress_cb(idx + 1, len(candidates), f"face #{face.id}")
@@ -484,39 +619,67 @@ class DeepRecognitionService:
             # face — it may stay in the unknown pool but is never auto-assigned.
             if (
                 face.confidence is not None
-                and face.confidence < self._config.min_face_confidence
+                and face.confidence < cfg.min_face_confidence
             ):
                 stats.n_skipped_low_confidence += 1
                 continue
 
+            probe = ProbeMeta.from_face(face)
             debug_info = None
             if debug_cb is not None:
                 crop_path = str(face.crop_path) if face.crop_path else None
                 prediction, debug_info = classifier.predict_debug(
-                    face.get_embedding(), face_id=face.id, crop_path=crop_path
+                    face.get_embedding(), face_id=face.id, crop_path=crop_path,
+                    probe=probe,
                 )
                 debug_cb(debug_info)
             else:
-                prediction = classifier.predict(face.get_embedding())
+                prediction = classifier.predict(face.get_embedding(), probe)
             if prediction.reason == "no_embedding":
                 stats.n_no_embedding += 1
                 continue
-            if prediction.person_id is None:
-                if prediction.reason == "outlier":
-                    stats.n_rejected_outlier += 1
-                elif prediction.reason == "below_threshold":
-                    stats.n_rejected_threshold += 1
-                elif prediction.reason == "margin":
-                    stats.n_rejected_margin += 1
-                elif prediction.reason == "prototype":
-                    stats.n_rejected_prototype += 1
+            decided.append(_Candidate(face, prediction, debug_info))
+
+        # --- Pass 2: user vetoes + lifetime check ---------------------------
+        for cand in decided:
+            pid = cand.prediction.candidate_id
+            if pid is None:
                 continue
-            if prediction.person_id in vetoes.get(face.id, set()):
-                stats.n_rejected_correction += 1
-                continue
+            if pid in vetoes.get(cand.face.id, set()):
+                cand.blocked = True
+                if cand.prediction.person_id is not None:
+                    stats.n_rejected_correction += 1
+                    cand.prediction = self._rejected(cand.prediction, "correction")
+            elif lifespans and self._outside_lifetime(cand.face, pid, lifespans):
+                cand.blocked = True
+                if cand.prediction.person_id is not None:
+                    stats.n_rejected_date += 1
+                    cand.prediction = self._rejected(cand.prediction, "date")
+
+        # --- Pass 3: context second chance ----------------------------------
+        if cfg.cluster_vote_enabled:
+            stats.n_cluster_vote = self._cluster_vote(classifier, decided)
+        if cfg.event_prior_bonus > 0:
+            stats.n_event_prior = self._event_prior(classifier, decided)
+
+        # --- Pass 4: apply, strongest first ---------------------------------
+        now = _utcnow_naive()
+        # Per-image identity guard: index the faces already attached to a real
+        # named person, keyed by image, so we never label one physical face with
+        # a person who is already placed on that photo.
+        incumbents = self._load_incumbents_by_image()
+        meta_threshold = classifier.meta_threshold
+        assigned_ids: Set[int] = set()
+        order = sorted(
+            (c for c in decided if c.prediction.person_id is not None),
+            key=lambda c: -c.prediction.score,
+        )
+        for cand in order:
+            face, prediction = cand.face, cand.prediction
             # Never attach a face to a person that no longer exists (stale model).
             if prediction.person_id not in valid_person_ids:
                 stats.n_skipped_unknown_person += 1
+                cand.blocked = True
                 continue
 
             # Per-image identity guard: does this person already own an
@@ -528,7 +691,10 @@ class DeepRecognitionService:
                         dup.confidence if dup.confidence is not None else -1.0
                     )
                     if dup.is_human or incumbent_conf >= prediction.score:
+                        # A second box of an already-named face — never a
+                        # suggestion either.
                         stats.n_skipped_duplicate_identity += 1
+                        cand.blocked = True
                         continue
                     # Weaker auto-recognition incumbent — drop its box (its
                     # AutoAssignment row cascades) so the clusterer cannot
@@ -539,6 +705,17 @@ class DeepRecognitionService:
                     )
                     incumbents[face.image_id].remove(dup)
                     stats.n_replaced_duplicate_identity += 1
+
+            # A second, separate appearance of the person on this photo is
+            # usually a lookalike relative — demand stronger evidence.
+            if cfg.repeat_on_image_strict and any(
+                inc.person_id == prediction.person_id
+                for inc in incumbents.get(face.image_id, [])
+            ):
+                if not self._strong_enough_for_repeat(prediction, meta_threshold, classifier):
+                    stats.n_rejected_repeat_on_image += 1
+                    cand.prediction = self._rejected(prediction, "repeat_on_image")
+                    continue
 
             previous_person_id = face.person_id
             previous_person_name = (
@@ -556,9 +733,11 @@ class DeepRecognitionService:
             # per assigned face — roughly halving recognition time on large
             # archives where most runs have the viz off.
             decision_json = (
-                self._serialize_decision(classifier, face, debug_info)
-                if debug_info is not None
-                else None
+                self._serialize_decision(
+                    classifier, face, cand.debug_info, origin=cand.origin
+                )
+                if cand.debug_info is not None
+                else self._origin_json(cand.origin)
             )
 
             self._session.add(
@@ -575,33 +754,354 @@ class DeepRecognitionService:
                 )
             )
             stats.n_assigned += 1
+            assigned_ids.add(face.id)
 
-            if self._identity_guard.enabled:
-                incumbents.setdefault(face.image_id, []).append(
-                    _Incumbent(
-                        face_id=face.id,
-                        person_id=prediction.person_id,
-                        bbox=(face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h),
-                        vec=_unit_vec(face.get_embedding()),
-                        is_human=False,
-                        confidence=prediction.score,
-                    )
+            incumbents.setdefault(face.image_id, []).append(
+                _Incumbent(
+                    face_id=face.id,
+                    person_id=prediction.person_id,
+                    bbox=(face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h),
+                    vec=_unit_vec(face.get_embedding()),
+                    is_human=False,
+                    confidence=prediction.score,
                 )
+            )
+
+        for cand in decided:
+            if cand.face.id in assigned_ids:
+                continue
+            reason = cand.prediction.reason
+            if reason == "outlier":
+                stats.n_rejected_outlier += 1
+            elif reason == "below_threshold":
+                stats.n_rejected_threshold += 1
+            elif reason == "margin":
+                stats.n_rejected_margin += 1
+            elif reason == "prototype":
+                stats.n_rejected_prototype += 1
+            elif reason == "unknown_class":
+                stats.n_rejected_unknown_class += 1
+            elif reason == "knn":
+                stats.n_rejected_knn += 1
+
+        # --- Pass 5: near-match suggestions (active learning) ---------------
+        if cfg.near_suggestions_enabled:
+            stats.n_near_suggestions = self._add_near_suggestions(
+                decided, assigned_ids, valid_person_ids, training_run, now
+            )
 
         self._delete_orphan_auto_persons()
         self._session.commit()
         log.info(
             "Deep recognition: %d/%d assigned (outlier=%d, threshold=%d, margin=%d, "
-            "prototype=%d, correction-veto=%d, low-conf=%d, no-emb=%d, "
-            "unknown-person=%d, dup-identity-skip=%d, dup-identity-replace=%d)",
+            "prototype=%d, unknown=%d, knn=%d, correction-veto=%d, date-veto=%d, "
+            "repeat-on-image=%d, low-conf=%d, no-emb=%d, unknown-person=%d, "
+            "dup-identity-skip=%d, dup-identity-replace=%d, cluster-vote=%d, "
+            "event=%d, near=%d, strictness=%.3f)",
             stats.n_assigned, stats.n_candidates,
             stats.n_rejected_outlier, stats.n_rejected_threshold,
             stats.n_rejected_margin, stats.n_rejected_prototype,
-            stats.n_rejected_correction, stats.n_skipped_low_confidence,
+            stats.n_rejected_unknown_class, stats.n_rejected_knn,
+            stats.n_rejected_correction, stats.n_rejected_date,
+            stats.n_rejected_repeat_on_image, stats.n_skipped_low_confidence,
             stats.n_no_embedding, stats.n_skipped_unknown_person,
             stats.n_skipped_duplicate_identity, stats.n_replaced_duplicate_identity,
+            stats.n_cluster_vote, stats.n_event_prior, stats.n_near_suggestions,
+            stats.strictness,
         )
         return stats
+
+    # ------------------------------------------------------------------
+    # Recognition context helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rejected(prediction: DeepPrediction, reason: str) -> DeepPrediction:
+        """Copy of *prediction* turned into a rejection (candidate kept)."""
+        from dataclasses import replace
+
+        return replace(prediction, person_id=None, reason=reason)
+
+    def _apply_feedback_strictness(
+        self,
+        classifier: DeepFaceClassifier,
+        training_run: TrainingRun,
+        stats: DeepRecognitionStats,
+    ) -> None:
+        """Tighten every threshold when reviewed precision is below target."""
+        cfg = self._config
+        precision, n = feedback_precision(self._session, cfg.feedback_window)
+        stats.measured_precision, stats.n_reviewed = precision, n
+        training_run.measured_precision = precision
+        training_run.n_reviewed = n
+        strictness = 0.0
+        if (
+            precision is not None
+            and n >= cfg.feedback_min_reviewed
+            and precision < cfg.target_precision
+        ):
+            strictness = min(
+                cfg.max_strictness,
+                (cfg.target_precision - precision) * cfg.feedback_tighten_gain,
+            )
+            log.info(
+                "Deep recognition: reviewed precision %.3f < target %.3f over %d "
+                "decisions — tightening thresholds by %.3f",
+                precision, cfg.target_precision, n, strictness,
+            )
+        classifier.set_strictness(max(classifier.strictness, strictness))
+        stats.strictness = classifier.strictness
+
+    def _strong_enough_for_repeat(
+        self,
+        prediction: DeepPrediction,
+        meta_threshold: Optional[float],
+        classifier: DeepFaceClassifier,
+    ) -> bool:
+        cfg = self._config
+        if prediction.knn_agreement < 0.999:
+            return False
+        if prediction.sim_margin < 2.0 * cfg.min_sim_margin:
+            return False
+        if prediction.p_correct is not None and meta_threshold is not None:
+            needed = min(
+                0.995,
+                meta_threshold + classifier.strictness + cfg.repeat_extra_confidence,
+            )
+            return prediction.p_correct >= needed
+        return True
+
+    def _image_date(self, face: Face) -> Optional[FuzzyDate]:
+        image_id = face.image_id
+        if image_id not in self._image_dates:
+            image = face.image
+            raw = (image.photo_date or image.estimated_date) if image is not None else None
+            self._image_dates[image_id] = FuzzyDate.parse(raw)
+        parsed = self._image_dates[image_id]
+        return parsed if parsed.is_known else None
+
+    def _load_lifespans(self) -> Dict[int, Tuple[Optional[int], Optional[int]]]:
+        """person id → (earliest birth year, latest death year) when known."""
+        spans: Dict[int, Tuple[Optional[int], Optional[int]]] = {}
+        rows = (
+            self._session.query(Person.id, Person.birth_date, Person.death_date)
+            .filter(or_(Person.birth_date.isnot(None), Person.death_date.isnot(None)))
+            .all()
+        )
+        for pid, birth_raw, death_raw in rows:
+            birth = FuzzyDate.parse(birth_raw)
+            death = FuzzyDate.parse(death_raw)
+            born = birth.earliest.year if birth.earliest is not None else None
+            died = death.latest.year if death.latest is not None else None
+            if born is not None or died is not None:
+                spans[int(pid)] = (born, died)
+        return spans
+
+    def _outside_lifetime(
+        self,
+        face: Face,
+        person_id: int,
+        lifespans: Dict[int, Tuple[Optional[int], Optional[int]]],
+    ) -> bool:
+        """True when the photo was certainly taken before birth / after death."""
+        span = lifespans.get(int(person_id))
+        if span is None:
+            return False
+        taken = self._image_date(face)
+        if taken is None:
+            return False
+        tol = int(self._config.date_veto_tolerance_years)
+        born, died = span
+        if born is not None and taken.latest is not None and taken.latest.year < born - tol:
+            return True
+        if died is not None and taken.earliest is not None and taken.earliest.year > died + tol:
+            return True
+        return False
+
+    def _cluster_vote(
+        self, classifier: DeepFaceClassifier, decided: List[_Candidate]
+    ) -> int:
+        """Unsure members of an unknown group follow the group's clear majority.
+
+        A group whose decided members overwhelmingly went to one person is
+        most likely that person; its unsure members (only threshold-unsure —
+        every other gate must still pass) are re-evaluated with a relaxed
+        calibrated threshold.  Mixed groups never propagate a name.
+        """
+        cfg = self._config
+        groups: Dict[int, List[_Candidate]] = {}
+        for cand in decided:
+            person = cand.face.person
+            if person is not None and person.is_auto_named:
+                groups.setdefault(person.id, []).append(cand)
+
+        accepted = 0
+        for members in groups.values():
+            if len(members) < cfg.cluster_vote_min_size:
+                continue
+            votes = Counter(
+                c.prediction.person_id
+                for c in members
+                if c.prediction.person_id is not None
+            )
+            if not votes:
+                continue
+            winner, n_winner = votes.most_common(1)[0]
+            if (
+                n_winner < cfg.cluster_vote_min_assigned
+                or n_winner / float(sum(votes.values())) < cfg.cluster_vote_min_purity
+            ):
+                continue
+            for cand in members:
+                pred = cand.prediction
+                if (
+                    pred.person_id is not None
+                    or cand.blocked
+                    or pred.candidate_id != winner
+                    or pred.reason != "below_threshold"
+                    or pred.similarity < cfg.cluster_vote_min_similarity
+                ):
+                    continue
+                retry = classifier.predict(
+                    cand.face.get_embedding(),
+                    ProbeMeta.from_face(cand.face),
+                    relief=cfg.cluster_vote_relief,
+                )
+                if retry.person_id == winner:
+                    cand.prediction = retry
+                    cand.origin = "cluster_vote"
+                    accepted += 1
+        return accepted
+
+    def _event_prior(
+        self, classifier: DeepFaceClassifier, decided: List[_Candidate]
+    ) -> int:
+        """A person confirmed on another photo of the same day lowers the bar.
+
+        Only exact-day photo dates count, only human-confirmed appearances,
+        and the relief is small (``event_prior_bonus``) — the face must still
+        pass every other gate.
+        """
+        unsure = [
+            c for c in decided
+            if c.prediction.person_id is None
+            and not c.blocked
+            and c.prediction.reason == "below_threshold"
+            and c.prediction.candidate_id is not None
+        ]
+        if not unsure:
+            return 0
+        day_persons = self._confirmed_persons_by_day()
+        if not day_persons:
+            return 0
+        accepted = 0
+        for cand in unsure:
+            taken = self._image_date(cand.face)
+            if taken is None or taken.precision is not Precision.EXACT:
+                continue
+            day = taken.earliest
+            others = day_persons.get(day, {})
+            pid = cand.prediction.candidate_id
+            # The supporting appearance must be on a *different* photo.
+            if not (others.get(pid, set()) - {cand.face.image_id}):
+                continue
+            retry = classifier.predict(
+                cand.face.get_embedding(),
+                ProbeMeta.from_face(cand.face),
+                relief=self._config.event_prior_bonus,
+            )
+            if retry.person_id == pid:
+                cand.prediction = retry
+                cand.origin = "event"
+                accepted += 1
+        return accepted
+
+    def _confirmed_persons_by_day(self) -> Dict[date, Dict[int, Set[int]]]:
+        """day → person id → image ids where a human confirmed that person."""
+        rows = (
+            self._session.query(Face.person_id, Face.image_id, Image.photo_date)
+            .join(Image, Face.image_id == Image.id)
+            .join(Person, Face.person_id == Person.id)
+            .filter(Person.is_auto_named == False)  # noqa: E712
+            .filter(Person.is_protected == False)  # noqa: E712
+            .filter(Face.is_excluded == False)  # noqa: E712
+            .filter(Image.photo_date.isnot(None))
+            .filter(
+                or_(
+                    Face.assignment_source.is_(None),
+                    Face.assignment_source.in_(_HUMAN_ASSIGNMENT_SOURCES),
+                )
+            )
+            .all()
+        )
+        by_day: Dict[date, Dict[int, Set[int]]] = {}
+        for pid, image_id, raw in rows:
+            parsed = FuzzyDate.parse(raw)
+            if parsed.precision is not Precision.EXACT or parsed.earliest is None:
+                continue
+            by_day.setdefault(parsed.earliest, {}).setdefault(int(pid), set()).add(
+                int(image_id)
+            )
+        return by_day
+
+    def _add_near_suggestions(
+        self,
+        decided: List[_Candidate],
+        assigned_ids: Set[int],
+        valid_person_ids: Set[int],
+        training_run: TrainingRun,
+        now: datetime,
+    ) -> int:
+        """Store the most informative close misses as one-click suggestions."""
+        cfg = self._config
+        near: List[_Candidate] = []
+        for cand in decided:
+            pred = cand.prediction
+            if (
+                cand.face.id in assigned_ids
+                or cand.blocked
+                or pred.candidate_id is None
+                or pred.candidate_id not in valid_person_ids
+                or pred.reason in ("outlier", "no_embedding", "untrained")
+                or pred.similarity < cfg.near_min_similarity
+                or pred.score < cfg.near_min_score
+            ):
+                continue
+            near.append(cand)
+        near.sort(key=lambda c: -c.prediction.score)
+        for cand in near[: max(0, int(cfg.max_near_suggestions))]:
+            face, pred = cand.face, cand.prediction
+            self._session.add(
+                AutoAssignment(
+                    training_run=training_run,
+                    face_id=face.id,
+                    person_id=pred.candidate_id,
+                    previous_person_id=face.person_id,
+                    previous_person_name=(
+                        face.person.name if face.person is not None else None
+                    ),
+                    score=pred.score,
+                    status=AUTO_ASSIGN_STATUS_NEAR,
+                    decision_json=json.dumps(
+                        {"origin": "near", "reason": pred.reason}, ensure_ascii=False
+                    ),
+                    created_at=now,
+                )
+            )
+        return min(len(near), max(0, int(cfg.max_near_suggestions)))
+
+    def _drop_stale_near_suggestions(self) -> None:
+        """Unanswered near suggestions of older runs are superseded."""
+        self._session.query(AutoAssignment).filter(
+            AutoAssignment.status == AUTO_ASSIGN_STATUS_NEAR
+        ).delete(synchronize_session="fetch")
+
+    @staticmethod
+    def _origin_json(origin: str) -> Optional[str]:
+        """Provenance marker for assignments made via context (no graph)."""
+        if origin == "model":
+            return None
+        return json.dumps({"origin": origin}, ensure_ascii=False)
 
     # ------------------------------------------------------------------
     # Per-image identity guard
@@ -676,7 +1176,7 @@ class DeepRecognitionService:
 
     @staticmethod
     def _serialize_decision(
-        classifier: DeepFaceClassifier, face, debug_info
+        classifier: DeepFaceClassifier, face, debug_info, origin: str = "model"
     ) -> Optional[str]:
         """JSON for *face*'s assignment decision graph, or None on failure.
 
@@ -690,9 +1190,13 @@ class DeepRecognitionService:
             if not isinstance(debug_info, DeepDebugInfo):
                 crop_path = str(face.crop_path) if face.crop_path else None
                 _pred, debug_info = classifier.predict_debug(
-                    face.get_embedding(), face_id=face.id, crop_path=crop_path
+                    face.get_embedding(), face_id=face.id, crop_path=crop_path,
+                    probe=ProbeMeta.from_face(face),
                 )
-            return json.dumps(decision_to_dict(debug_info), ensure_ascii=False)
+            decision = decision_to_dict(debug_info)
+            if origin != "model":
+                decision["origin"] = origin
+            return json.dumps(decision, ensure_ascii=False)
         except Exception:  # noqa: BLE001
             log.warning("Could not serialize decision graph for face %s", face.id)
             return None
@@ -722,6 +1226,26 @@ class DeepRecognitionService:
             progress_cb=recognize_progress_cb,
             debug_cb=debug_cb,
         )
+
+        # Self-training: this run's most confident assignments (score ≥
+        # auto_training_min_confidence) are now trusted training data — a
+        # retrained model may recognise more of the remaining faces.  Stops as
+        # soon as a round adds nothing or the data did not change.
+        rec = result.recognition
+        for _round in range(max(0, int(self._config.self_training_rounds))):
+            if rec.n_assigned == 0:
+                break
+            _, round_stats, round_clf = self.train(
+                mode=mode, progress_cb=train_progress_cb, run=run
+            )
+            if round_stats.reused_existing_model:
+                break
+            round_clf.set_strictness(classifier.strictness)
+            rec = self.recognize(round_clf, run, progress_cb=recognize_progress_cb)
+            result.recognition.n_assigned += rec.n_assigned
+            result.recognition.n_self_training += rec.n_assigned
+            result.recognition.n_near_suggestions = rec.n_near_suggestions
+            result.train = round_stats
         return result
 
     # ------------------------------------------------------------------
@@ -744,6 +1268,7 @@ class DeepRecognitionService:
         """
         row = (
             self._session.query(AutoAssignment.training_run_id)
+            .filter(_real_assignment_filter())
             .order_by(AutoAssignment.training_run_id.desc())
             .first()
         )
@@ -763,6 +1288,7 @@ class DeepRecognitionService:
         query = (
             self._session.query(AutoAssignment)
             .filter(AutoAssignment.training_run_id == run_id)
+            .filter(_real_assignment_filter())
         )
         if only_open:
             query = query.filter(AutoAssignment.status == AUTO_ASSIGN_STATUS_AUTO)
@@ -813,7 +1339,11 @@ class DeepRecognitionService:
         """Already-reviewed assignments (any run), newest decision first."""
         rows = (
             self._session.query(AutoAssignment)
-            .filter(AutoAssignment.status != AUTO_ASSIGN_STATUS_AUTO)
+            .filter(
+                AutoAssignment.status.notin_(
+                    (AUTO_ASSIGN_STATUS_AUTO, AUTO_ASSIGN_STATUS_NEAR)
+                )
+            )
             .order_by(AutoAssignment.decided_at.desc(), AutoAssignment.id.desc())
             .limit(limit)
             .all()
@@ -879,16 +1409,32 @@ class DeepRecognitionService:
         )
 
     def confirm_assignment(self, assignment_id: int) -> AutoAssignment:
-        """User says the grouping is right → becomes trusted training data."""
+        """User says the grouping is right → becomes trusted training data.
+
+        For a near-match suggestion this is where the face actually moves to
+        the suggested person.
+        """
         assignment = self._require_assignment(assignment_id)
+        self._confirm_one(assignment)
+        self._delete_orphan_auto_persons()
+        self._session.commit()
+        return assignment
+
+    def _confirm_one(self, assignment: AutoAssignment) -> None:
+        """Shared confirm core; caller commits."""
         face = assignment.face
+        if face is not None and assignment.status == AUTO_ASSIGN_STATUS_NEAR:
+            # Only move a face that is still unknown / in an auto group — the
+            # user may have named it elsewhere meanwhile.
+            person = face.person
+            if person is None or person.is_auto_named or person.is_protected:
+                face.person_id = assignment.person_id
+                face.assigned_at = _utcnow_naive()
         if face is not None and face.person_id == assignment.person_id:
             face.assignment_source = DEEP_CONFIRMED_SOURCE
             face.assignment_confidence = 1.0
         assignment.status = AUTO_ASSIGN_STATUS_CONFIRMED
         assignment.decided_at = _utcnow_naive()
-        self._session.commit()
-        return assignment
 
     def confirm_assignments(self, assignment_ids: List[int]) -> int:
         """Confirm many groupings in one transaction. Returns the count confirmed.
@@ -901,13 +1447,9 @@ class DeepRecognitionService:
             assignment = self._session.get(AutoAssignment, assignment_id)
             if assignment is None:
                 continue
-            face = assignment.face
-            if face is not None and face.person_id == assignment.person_id:
-                face.assignment_source = DEEP_CONFIRMED_SOURCE
-                face.assignment_confidence = 1.0
-            assignment.status = AUTO_ASSIGN_STATUS_CONFIRMED
-            assignment.decided_at = _utcnow_naive()
+            self._confirm_one(assignment)
             confirmed += 1
+        self._delete_orphan_auto_persons()
         self._session.commit()
         log.info("Deep recognition: batch-confirmed %d assignments", confirmed)
         return confirmed
@@ -995,6 +1537,9 @@ class DeepRecognitionService:
 
         self._record_correction_pair(face, wrong_person_id, same_person=False)
         self._record_correction_pair(face, new_person_id, same_person=True)
+        if wrong_person_id != new_person_id:
+            self._add_veto(face.id, wrong_person_id, "correct")
+        self._remove_veto(face.id, new_person_id)
 
         assignment.status = AUTO_ASSIGN_STATUS_CORRECTED
         assignment.corrected_person_id = new_person_id
@@ -1051,9 +1596,16 @@ class DeepRecognitionService:
         return len(open_assignments)
 
     def _revert_one(self, assignment: AutoAssignment) -> None:
-        """Shared revert core; caller commits."""
+        """Shared revert core; caller commits.
+
+        A rejected near-match suggestion leaves the face where it is and only
+        records the "not this person" judgement.
+        """
         face = assignment.face
-        if face is not None and face.person_id == assignment.person_id:
+        if face is not None and assignment.status == AUTO_ASSIGN_STATUS_NEAR:
+            self._record_correction_pair(face, assignment.person_id, same_person=False)
+            self._add_veto(face.id, assignment.person_id, "near_reject")
+        elif face is not None and face.person_id == assignment.person_id:
             previous = (
                 self._session.get(Person, assignment.previous_person_id)
                 if assignment.previous_person_id is not None
@@ -1066,8 +1618,143 @@ class DeepRecognitionService:
             self._record_correction_pair(
                 face, assignment.person_id, same_person=False
             )
+            self._add_veto(face.id, assignment.person_id, "revert")
         assignment.status = AUTO_ASSIGN_STATUS_REVERTED
         assignment.decided_at = _utcnow_naive()
+
+    # ------------------------------------------------------------------
+    # Active learning: near-match suggestions
+    # ------------------------------------------------------------------
+
+    def list_near_suggestions(self, limit: int = 200) -> List[AutoAssignmentDTO]:
+        """Open near-match suggestions, most promising first.
+
+        A suggestion goes stale (hidden) once the face got a named person
+        some other way.
+        """
+        rows = (
+            self._session.query(AutoAssignment)
+            .filter(AutoAssignment.status == AUTO_ASSIGN_STATUS_NEAR)
+            .order_by(AutoAssignment.score.desc(), AutoAssignment.id)
+            .limit(limit)
+            .all()
+        )
+        dtos: List[AutoAssignmentDTO] = []
+        for assignment in rows:
+            face = assignment.face
+            if face is None:
+                continue
+            owner = face.person
+            if owner is not None and not owner.is_auto_named and not owner.is_protected:
+                continue
+            person = assignment.person
+            dtos.append(
+                AutoAssignmentDTO(
+                    assignment_id=assignment.id,
+                    face_id=face.id,
+                    person_id=assignment.person_id,
+                    person_name=person.name if person else "?",
+                    previous_person_name=assignment.previous_person_name,
+                    score=assignment.score,
+                    status=assignment.status,
+                    crop_path=face.crop_path,
+                    image_path=face.image.file_path if face.image else None,
+                    bbox=(face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h),
+                    run_id=assignment.training_run_id,
+                    run_finished_at=(
+                        assignment.training_run.finished_at
+                        if assignment.training_run
+                        else None
+                    ),
+                    decision=None,
+                )
+            )
+        return dtos
+
+    # ------------------------------------------------------------------
+    # Training-data hygiene: suspicious label review
+    # ------------------------------------------------------------------
+
+    def list_suspicious_labels(self) -> List[SuspiciousLabelDTO]:
+        """Labeled faces the noise filter flagged, with the lookalike person."""
+        faces: List[Face] = (
+            self._session.query(Face)
+            .filter(Face.label_review_status == LABEL_REVIEW_SUSPICIOUS)
+            .filter(Face.person_id.isnot(None))
+            .order_by(Face.id)
+            .all()
+        )
+        if not faces:
+            return []
+        details: Dict[int, Tuple[int, float, float]] = {}
+        for run in (
+            self._session.query(TrainingRun)
+            .filter(TrainingRun.metrics_json.isnot(None))
+            .order_by(TrainingRun.id.desc())
+            .limit(20)
+            .all()
+        ):
+            try:
+                rows = json.loads(run.metrics_json).get("suspicious") or []
+            except (ValueError, TypeError, AttributeError):
+                continue
+            for row in rows:
+                if len(row) >= 5 and int(row[0]) not in details:
+                    details[int(row[0])] = (int(row[2]), float(row[3]), float(row[4]))
+        names = dict(self._session.query(Person.id, Person.name).all())
+        result: List[SuspiciousLabelDTO] = []
+        for face in faces:
+            other_id, own_sim, other_sim = details.get(face.id, (None, None, None))
+            result.append(
+                SuspiciousLabelDTO(
+                    face_id=face.id,
+                    person_id=face.person_id,
+                    person_name=names.get(face.person_id, "?"),
+                    lookalike_person_id=other_id,
+                    lookalike_name=names.get(other_id) if other_id is not None else None,
+                    own_similarity=own_sim,
+                    other_similarity=other_sim,
+                    crop_path=face.crop_path,
+                    image_path=face.image.file_path if face.image else None,
+                    bbox=(face.bbox_x, face.bbox_y, face.bbox_w, face.bbox_h),
+                )
+            )
+        return result
+
+    def count_suspicious_labels(self) -> int:
+        return (
+            self._session.query(Face)
+            .filter(Face.label_review_status == LABEL_REVIEW_SUSPICIOUS)
+            .filter(Face.person_id.isnot(None))
+            .count()
+        )
+
+    def keep_label(self, face_id: int) -> None:
+        """The label is right after all — train on it and never flag it again."""
+        face = self._session.get(Face, face_id)
+        if face is None:
+            raise ValueError(f"Face id={face_id} not found")
+        face.label_review_status = LABEL_REVIEW_KEPT
+        self._session.commit()
+
+    def remove_label(self, face_id: int) -> None:
+        """The label is wrong — the face returns to the unknown pool.
+
+        A veto keeps the engine from putting it back onto the same person.
+        """
+        face = self._session.get(Face, face_id)
+        if face is None:
+            raise ValueError(f"Face id={face_id} not found")
+        wrong_person_id = face.person_id
+        if wrong_person_id is not None:
+            self._record_correction_pair(face, wrong_person_id, same_person=False)
+            self._add_veto(face.id, wrong_person_id, "label_review")
+        face.person_id = None
+        face.assignment_source = None
+        face.assignment_confidence = None
+        face.assigned_at = None
+        face.label_review_status = None
+        self._session.commit()
 
     # ------------------------------------------------------------------
     # Internals
@@ -1078,6 +1765,27 @@ class DeepRecognitionService:
         if assignment is None:
             raise ValueError(f"AutoAssignment id={assignment_id} not found")
         return assignment
+
+    def _add_veto(self, face_id: int, person_id: Optional[int], source: str) -> None:
+        """Record "face is NOT person" (idempotent)."""
+        if person_id is None:
+            return
+        exists = (
+            self._session.query(FaceVeto.id)
+            .filter(FaceVeto.face_id == face_id, FaceVeto.person_id == person_id)
+            .first()
+        )
+        if exists is None:
+            self._session.add(
+                FaceVeto(face_id=face_id, person_id=person_id, source=source)
+            )
+            self._session.flush()
+
+    def _remove_veto(self, face_id: int, person_id: int) -> None:
+        """The user now says the face IS this person — drop an old veto."""
+        self._session.query(FaceVeto).filter(
+            FaceVeto.face_id == face_id, FaceVeto.person_id == person_id
+        ).delete(synchronize_session="fetch")
 
     def _record_correction_pair(
         self, face: Face, person_id: int, *, same_person: bool
@@ -1131,10 +1839,24 @@ class DeepRecognitionService:
     def _load_correction_vetoes(
         self, candidates: List[Face]
     ) -> Dict[int, Set[int]]:
-        """Map candidate face id → person ids vetoed by 'different' judgements."""
+        """Map candidate face id → person ids vetoed by 'different' judgements.
+
+        Union of the durable :class:`FaceVeto` rows and the legacy pair-based
+        judgements (face ↔ the partner face's current person).
+        """
         candidate_ids = {face.id for face in candidates}
         if not candidate_ids:
             return {}
+
+        vetoes: Dict[int, Set[int]] = {}
+        id_list = list(candidate_ids)
+        for start in range(0, len(id_list), 900):
+            for face_id, person_id in (
+                self._session.query(FaceVeto.face_id, FaceVeto.person_id)
+                .filter(FaceVeto.face_id.in_(id_list[start:start + 900]))
+                .all()
+            ):
+                vetoes.setdefault(int(face_id), set()).add(int(person_id))
 
         corrections: List[FaceCorrection] = (
             self._session.query(FaceCorrection)
@@ -1148,7 +1870,7 @@ class DeepRecognitionService:
             .all()
         )
         if not corrections:
-            return {}
+            return vetoes
 
         other_ids: Set[int] = set()
         for corr in corrections:
@@ -1164,7 +1886,6 @@ class DeepRecognitionService:
             .all()
         }
 
-        vetoes: Dict[int, Set[int]] = {}
         for corr in corrections:
             if corr.face_id_a in candidate_ids:
                 target = person_of.get(corr.face_id_b)

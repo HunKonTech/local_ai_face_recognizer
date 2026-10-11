@@ -233,6 +233,11 @@ class EmbeddingConfig:
     # a full re-detect + re-embed is required for results to stay comparable.
     crop_mode: str = "legacy"
 
+    # Test-time augmentation: embed the crop AND its mirror image and average
+    # the two vectors (same vector space, less noise).  The agreement of the
+    # two halves is stored per face as an embedding-reliability signal.
+    flip_tta: bool = True
+
     # Number of face crops embedded together in one batched model invocation.
     # Batching amortises the per-call overhead of the TFLite interpreter and
     # lets BLAS work on a whole matrix at once — the single biggest embedding
@@ -525,10 +530,135 @@ class DeepRecognitionConfig:
     # Reuse very confident automatic assignments as extra training data.
     use_auto_assignments_for_training: bool = True
     # Confidence floor for an automatic assignment to count as training data.
-    auto_training_min_confidence: float = 0.92
+    # Scores are calibrated P(correct) values when the meta-classifier is
+    # active, so this is a real probability.
+    auto_training_min_confidence: float = 0.97
 
     # Use the slower high-accuracy detector pass in the deep pipeline.
     high_accuracy_detection: bool = False
+
+    # --- Calibration (accuracy plan, phase 1) ---
+    # Target precision of automatic assignments: the meta-classifier threshold
+    # is chosen so the cross-validated precision reaches this value.
+    target_precision: float = 0.98
+    # Assumed share of strangers among the unknown faces of an archive — weighs
+    # the simulated open-set impostors during calibration.
+    expected_unknown_ratio: float = 0.5
+    # Per-person probability thresholds are shrunk towards the global value
+    # with this many pseudo-examples (few faces → mostly the global value).
+    threshold_shrinkage: float = 5.0
+
+    # --- Robust prototype matching (phase 1) ---
+    # Of the winner's k nearest training examples (k = min(this, its examples))
+    # at least ``min_knn_agreement`` of the global k nearest must be the winner.
+    knn_k: int = 5
+    min_knn_agreement: float = 0.5
+
+    # --- Calibrated meta-classifier (phase 2) ---
+    use_meta_classifier: bool = True
+    # Minimum out-of-fold rows (and rows per label) to fit the meta-classifier.
+    meta_min_rows: int = 30
+    # Clamp of the precision-derived decision threshold.
+    meta_min_threshold: float = 0.5
+    meta_max_threshold: float = 0.97
+
+    # --- Learning from mistakes / training data hygiene (phase 3) ---
+    # Real "not this person" judgements weigh this much in the meta-classifier.
+    hard_negative_weight: float = 2.0
+    # Train an explicit "unknown" output from faces that resemble nobody known.
+    use_unknown_class: bool = True
+    # An unlabeled face counts as "unknown" background below this similarity
+    # to every labeled face.
+    unknown_class_max_similarity: float = 0.40
+    min_unknown_examples: int = 10
+    max_unknown_examples: int = 400
+    # Label-noise filter: a labeled face is "suspicious" when it resembles
+    # another person at least this much (absolute) …
+    label_noise_min_other_similarity: float = 0.55
+    # … and by this much more than its own person.
+    label_noise_margin: float = 0.15
+    # Never flag more than this share of one person's faces.
+    label_noise_max_fraction: float = 0.2
+    # Near-identical faces of one person (burst shots) collapse to one example.
+    dedup_similarity: float = 0.97
+    # Per-person sub-centers (age / look clusters) — one per this many faces.
+    faces_per_sub_center: int = 8
+    max_sub_centers: int = 4
+
+    # --- Context (phase 4) ---
+    # A person normally appears once per photo.  Candidates are decided in
+    # descending confidence; a face that would be the person's *second*
+    # appearance on the same photo (mirror, collage, or — far more often — a
+    # lookalike relative) must pass stricter evidence: full k-NN agreement,
+    # double similarity margin and this much extra calibrated confidence.
+    repeat_on_image_strict: bool = True
+    repeat_extra_confidence: float = 0.10
+    # Photo date before birth / after death (with this tolerance) → veto.
+    date_veto_enabled: bool = True
+    date_veto_tolerance_years: int = 1
+    # Unknown-cluster voting: when most decided members of an "Unknown N"
+    # group go to one person, the group's unsure members follow.
+    cluster_vote_enabled: bool = True
+    cluster_vote_min_size: int = 3
+    cluster_vote_min_assigned: int = 2
+    cluster_vote_min_purity: float = 0.8
+    cluster_vote_min_similarity: float = 0.45
+    # How much the calibrated / probability threshold is relaxed for those
+    # unsure members (every other gate still applies).
+    cluster_vote_relief: float = 0.20
+    # Same-day event prior: an unsure face whose candidate is already
+    # confirmed on another photo of the same day may pass with this much lower
+    # calibrated confidence.
+    event_prior_bonus: float = 0.05
+    # Run clustering of new unknown faces before recognition (enables voting).
+    cluster_before_recognition: bool = True
+
+    # --- Active learning / feedback (phase 6) ---
+    # Rejected but close predictions are offered as "near" suggestions.
+    near_suggestions_enabled: bool = True
+    near_min_score: float = 0.30
+    near_min_similarity: float = 0.45
+    max_near_suggestions: int = 200
+    # Review outcomes tighten the engine when the measured precision falls
+    # below target_precision.
+    feedback_window: int = 300
+    feedback_min_reviewed: int = 20
+    feedback_tighten_gain: float = 1.0
+    max_strictness: float = 0.15
+    # Extra train + recognize rounds that learn from this run's own most
+    # confident assignments (score ≥ auto_training_min_confidence).
+    self_training_rounds: int = 0
+
+    # --- Evaluation (phase 0) ---
+    # Run the (slow) open-set evaluation after every training run and store
+    # the metrics on the TrainingRun row.
+    evaluate_after_training: bool = False
+    evaluation_holdout_fraction: float = 0.2
+
+
+# DeepRecognitionConfig fields added by the accuracy plan (#136); load_config
+# copies them from YAML generically instead of one keyword argument each.
+_DEEP_ACCURACY_FIELDS = (
+    "target_precision", "expected_unknown_ratio", "threshold_shrinkage",
+    "knn_k", "min_knn_agreement",
+    "use_meta_classifier", "meta_min_rows", "meta_min_threshold",
+    "meta_max_threshold",
+    "hard_negative_weight", "use_unknown_class", "unknown_class_max_similarity",
+    "min_unknown_examples", "max_unknown_examples",
+    "label_noise_min_other_similarity", "label_noise_margin",
+    "label_noise_max_fraction", "dedup_similarity", "faces_per_sub_center",
+    "max_sub_centers",
+    "repeat_on_image_strict", "repeat_extra_confidence",
+    "date_veto_enabled", "date_veto_tolerance_years",
+    "cluster_vote_enabled", "cluster_vote_min_size", "cluster_vote_min_assigned",
+    "cluster_vote_min_purity", "cluster_vote_min_similarity",
+    "cluster_vote_relief", "event_prior_bonus",
+    "cluster_before_recognition",
+    "near_suggestions_enabled", "near_min_score", "near_min_similarity",
+    "max_near_suggestions", "feedback_window", "feedback_min_reviewed",
+    "feedback_tighten_gain", "max_strictness", "self_training_rounds",
+    "evaluate_after_training", "evaluation_holdout_fraction",
+)
 
 
 @dataclass
@@ -1002,6 +1132,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             input_size=tuple(emb.get("input_size", list(cfg.embedding.input_size))),
             embedding_dim=emb.get("embedding_dim", cfg.embedding.embedding_dim),
             crop_mode=emb.get("crop_mode", cfg.embedding.crop_mode),
+            flip_tta=emb.get("flip_tta", cfg.embedding.flip_tta),
             batch_size=emb.get("batch_size", cfg.embedding.batch_size),
             loader_workers=emb.get("loader_workers", cfg.embedding.loader_workers),
             coreml_model_path=emb.get("coreml_model_path", cfg.embedding.coreml_model_path),
@@ -1211,6 +1342,10 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
                 cfg.deep_recognition.high_accuracy_detection,
             ),
         )
+        # Accuracy-plan knobs: plain scalars, copied verbatim when present.
+        for name in _DEEP_ACCURACY_FIELDS:
+            if name in deep:
+                setattr(cfg.deep_recognition, name, deep[name])
 
         aifd = raw.get("ai_face_detection", {})
         cfg.ai_face_detection = AiFaceDetectionConfig(

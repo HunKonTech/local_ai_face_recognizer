@@ -11,7 +11,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 from sqlalchemy import or_
@@ -121,11 +121,12 @@ class EmbeddingService:
                     if img is not None
                 ]
                 if loaded:
-                    vectors = self._embed_loaded(loaded)
-                    for (face, _img), vec in zip(loaded, vectors):
+                    results = self._embed_loaded(loaded)
+                    for (face, _img), (vec, consistency) in zip(loaded, results):
                         if vec is None:
                             continue
                         face.set_embedding(vec)
+                        face.embedding_consistency = consistency
                         embedded += 1
 
                 for face in chunk:
@@ -137,30 +138,41 @@ class EmbeddingService:
         log.info("Embedding complete: %d / %d face(s) embedded", embedded, total)
         return embedded
 
-    def _embed_loaded(self, loaded) -> List[Optional[np.ndarray]]:
+    def _embed_loaded(
+        self, loaded
+    ) -> List[Tuple[Optional[np.ndarray], Optional[float]]]:
         """Embed a batch of already-loaded crops, degrading gracefully.
 
         Tries the embedder's batched path first; if it fails (e.g. one bad
         crop poisons the whole batch) it falls back to per-crop embedding so a
-        single failure never loses the rest of the batch.  Returns one vector
-        per input (``None`` for a crop that could not be embedded).
+        single failure never loses the rest of the batch.  Returns one
+        ``(vector, consistency)`` pair per input — vector ``None`` for a crop
+        that could not be embedded, consistency ``None`` without flip-TTA.
         """
         imgs = [img for _face, img in loaded]
+        with_consistency = hasattr(self._embedder, "embed_batch_with_consistency")
         try:
-            return list(self._embedder.embed_batch(imgs))
+            if with_consistency:
+                return list(self._embedder.embed_batch_with_consistency(imgs))
+            return [(vec, None) for vec in self._embedder.embed_batch(imgs)]
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "Batched embedding failed (%s) — falling back to per-crop", exc
             )
 
-        vectors: List[Optional[np.ndarray]] = []
+        results: List[Tuple[Optional[np.ndarray], Optional[float]]] = []
         for (face, img) in loaded:
             try:
-                vectors.append(self._embedder.embed(img))
+                results.append(self._embed_one(img))
             except Exception as exc:  # noqa: BLE001
                 log.warning("Embedding failed for face id=%d: %s", face.id, exc)
-                vectors.append(None)
-        return vectors
+                results.append((None, None))
+        return results
+
+    def _embed_one(self, img) -> Tuple[np.ndarray, Optional[float]]:
+        if hasattr(self._embedder, "embed_with_consistency"):
+            return self._embedder.embed_with_consistency(img)
+        return self._embedder.embed(img), None
 
     @staticmethod
     def _load_crop_from_path(crop_path: Optional[str]) -> "Optional[np.ndarray]":
@@ -231,6 +243,9 @@ class EmbeddingService:
             .filter(FaceBlob.embedding.isnot(None))
             .update({FaceBlob.embedding: None}, synchronize_session=False)
         )
+        self._session.query(Face).update(
+            {Face.embedding_consistency: None}, synchronize_session=False
+        )
         self._session.commit()
         self._session.expire_all()  # drop stale blob state cached on Face rows
         log.info("Re-embed: cleared %d existing embedding(s)", cleared)
@@ -247,8 +262,9 @@ class EmbeddingService:
             log.debug("Cannot read crop for face id=%d: %s", face.id, face.crop_path)
             return False
 
-        embedding = self._embedder.embed(img_bgr)
+        embedding, consistency = self._embed_one(img_bgr)
         face.set_embedding(embedding)
+        face.embedding_consistency = consistency
 
         # Marking the parent image as embedding-done is handled lazily by
         # later pipeline stages.
@@ -277,7 +293,32 @@ def build_embedder(config: AppConfig) -> FaceEmbedder:
     person's faces are always embedded with the exact same model/geometry.  If
     the ArcFace backend cannot be loaded (missing package/model) it falls back
     to the TFLite embedder so embedding never hard-fails.
+
+    With ``embedding.flip_tta`` the chosen backend is wrapped in
+    :class:`~app.embeddings.tta.FlipTTAEmbedder` (crop + mirror averaged).
     """
+    base = _build_base_embedder(config)
+    if getattr(config.embedding, "flip_tta", False):
+        from app.embeddings.tta import FlipTTAEmbedder
+
+        return FlipTTAEmbedder(base)
+    return base
+
+
+def embedder_identity(config: AppConfig) -> str:
+    """Stable id of the embedding model + crop geometry + TTA setting.
+
+    Part of the deep engine's training fingerprint: any change here changes
+    every embedding, so the model must be retrained.
+    """
+    emb = config.embedding
+    return "|".join(
+        str(getattr(emb, name, ""))
+        for name in ("backend", "model_path", "embedding_dim", "crop_mode", "flip_tta")
+    )
+
+
+def _build_base_embedder(config: AppConfig) -> FaceEmbedder:
     if config.embedding.backend == "arcface":
         try:
             from app.embeddings.insightface_embedder import InsightFaceEmbedder
@@ -326,6 +367,7 @@ def _embedder_config_key(config: AppConfig) -> tuple:
         str(getattr(emb, "model_path", "")),
         str(getattr(emb, "embedding_dim", "")),
         str(getattr(emb, "input_size", "")),
+        str(getattr(emb, "flip_tta", "")),
     )
 
 

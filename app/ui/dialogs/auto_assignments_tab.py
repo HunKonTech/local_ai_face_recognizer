@@ -8,6 +8,11 @@ The user can:
 * **correct** — pick the right person (or create a new one); the engine
   records the mistake as a correction and learns from it;
 * **revert** — send the face back to where it was before the run.
+
+Active learning lives here too: **near matches** (faces the AI was close on
+but did not assign — one click confirms or rejects) and **suspicious labels**
+(labeled faces that look much more like someone else; kept out of training
+until the user decides).
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -35,10 +41,12 @@ from app.db.models import (
     AUTO_ASSIGN_STATUS_REVERTED,
     AutoAssignment,
     Person,
+    TrainingRun,
 )
 from app.services.deep_recognition_service import (
     AutoAssignmentDTO,
     DeepRecognitionService,
+    SuspiciousLabelDTO,
 )
 from app.ui.i18n import t
 
@@ -177,6 +185,7 @@ class _AutoAssignmentRow(QFrame):
         dto: AutoAssignmentDTO,
         parent: Optional[QWidget] = None,
         deep_config=None,
+        near: bool = False,
     ) -> None:
         super().__init__(parent)
         self._dto = dto
@@ -188,10 +197,12 @@ class _AutoAssignmentRow(QFrame):
         row.setContentsMargins(8, 8, 8, 8)
         row.setSpacing(8)
 
-        # Per-row tick for batch confirm ("Accept selected").
+        # Per-row tick for batch confirm ("Accept selected").  Near-match
+        # suggestions are answered one by one.
         self._check = QCheckBox()
         self._check.setToolTip(t("autoAssign.accept_selected_tooltip"))
         self._check.toggled.connect(lambda _on: self.selection_changed.emit())
+        self._check.setVisible(not near)
         row.addWidget(self._check, alignment=Qt.AlignVCenter)
 
         # Reuse the suggestion dialog's clickable crop (hover zoom + full image).
@@ -242,9 +253,10 @@ class _AutoAssignmentRow(QFrame):
         )
         row.addWidget(graph_btn)
 
-        confirm_btn = QPushButton(t("autoAssign.confirm"))
+        confirm_key = "autoAssign.near_confirm" if near else "autoAssign.confirm"
+        confirm_btn = QPushButton(t(confirm_key))
         confirm_btn.setStyleSheet("QPushButton { color: #88ee88; }")
-        confirm_btn.setToolTip(t("autoAssign.confirm_tooltip"))
+        confirm_btn.setToolTip(t(f"{confirm_key}_tooltip"))
         confirm_btn.clicked.connect(lambda: self.confirmed.emit(dto.assignment_id))
         row.addWidget(confirm_btn)
 
@@ -254,9 +266,10 @@ class _AutoAssignmentRow(QFrame):
         correct_btn.clicked.connect(lambda: self.corrected.emit(dto.assignment_id))
         row.addWidget(correct_btn)
 
-        revert_btn = QPushButton(t("autoAssign.revert"))
+        revert_key = "autoAssign.near_reject" if near else "autoAssign.revert"
+        revert_btn = QPushButton(t(revert_key))
         revert_btn.setStyleSheet("QPushButton { color: #ff8888; }")
-        revert_btn.setToolTip(t("autoAssign.revert_tooltip"))
+        revert_btn.setToolTip(t(f"{revert_key}_tooltip"))
         revert_btn.clicked.connect(lambda: self.reverted.emit(dto.assignment_id))
         row.addWidget(revert_btn)
 
@@ -271,6 +284,67 @@ class _AutoAssignmentRow(QFrame):
 
     def set_selected(self, value: bool) -> None:
         self._check.setChecked(value)
+
+
+class _SuspiciousLabelRow(QFrame):
+    """A labeled face that looks much more like another person."""
+
+    kept = Signal(int)      # face_id
+    removed = Signal(int)   # face_id
+
+    def __init__(self, dto: SuspiciousLabelDTO, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet(_ROW_STYLE)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(8)
+
+        from app.ui.dialogs.suggestion_dialog import _ClickableCrop
+
+        row.addWidget(
+            _ClickableCrop(dto.crop_path, dto.image_path, dto.bbox, dto.face_id)
+        )
+        text = (
+            t(
+                "autoAssign.suspicious_lookalike",
+                name=dto.person_name,
+                other=dto.lookalike_name,
+            )
+            if dto.lookalike_name
+            else dto.person_name
+        )
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet("color: #eee; border: none;")
+        if dto.own_similarity is not None and dto.other_similarity is not None:
+            label.setToolTip(
+                f"{dto.person_name}: {dto.own_similarity:.2f} · "
+                f"{dto.lookalike_name or '?'}: {dto.other_similarity:.2f}"
+            )
+        row.addWidget(label, stretch=1)
+
+        keep_btn = QPushButton(t("autoAssign.suspicious_keep"))
+        keep_btn.setStyleSheet("QPushButton { color: #88ee88; }")
+        keep_btn.setToolTip(t("autoAssign.suspicious_keep_tooltip"))
+        keep_btn.clicked.connect(lambda: self.kept.emit(dto.face_id))
+        row.addWidget(keep_btn)
+
+        remove_btn = QPushButton(t("autoAssign.suspicious_remove"))
+        remove_btn.setStyleSheet("QPushButton { color: #ff8888; }")
+        remove_btn.setToolTip(t("autoAssign.suspicious_remove_tooltip"))
+        remove_btn.clicked.connect(lambda: self.removed.emit(dto.face_id))
+        row.addWidget(remove_btn)
+
+
+def _clear_layout(layout: QVBoxLayout) -> None:
+    """Remove every row widget, keeping the trailing stretch."""
+    while layout.count() > 1:
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget:
+            widget.deleteLater()
 
 
 class AutoAssignmentsTab(QWidget):
@@ -307,11 +381,25 @@ class AutoAssignmentsTab(QWidget):
         intro.setStyleSheet("color: #aaa;")
         root.addWidget(intro)
 
+        self._metrics_label = QLabel("")
+        self._metrics_label.setWordWrap(True)
+        self._metrics_label.setStyleSheet("color: #888; font-size: 11px;")
+        self._metrics_label.setVisible(False)
+        root.addWidget(self._metrics_label)
+
         header = QHBoxLayout()
         self._run_label = QLabel("")
         self._run_label.setStyleSheet("color: #888;")
         header.addWidget(self._run_label)
         header.addStretch()
+        header.addWidget(QLabel(t("autoAssign.sort_label")))
+        # Least-certain first by default: those reviews teach the AI the most.
+        self._sort_combo = QComboBox()
+        self._sort_combo.addItem(t("autoAssign.sort_uncertain"), "uncertain")
+        self._sort_combo.addItem(t("autoAssign.sort_certain"), "certain")
+        self._sort_combo.setToolTip(t("autoAssign.sort_tooltip"))
+        self._sort_combo.currentIndexChanged.connect(lambda _i: self.reload())
+        header.addWidget(self._sort_combo)
         self._count_label = QLabel("")
         self._count_label.setStyleSheet("color: #88aaff; font-weight: bold;")
         header.addWidget(self._count_label)
@@ -377,9 +465,23 @@ class AutoAssignmentsTab(QWidget):
         )
         root.addWidget(self._empty_label)
 
-        # ── "Already reviewed" history (collapsed by default) ─────────────
         from app.ui.widgets.collapsible_section import CollapsibleSection
 
+        # ── Near matches (active learning, collapsed by default) ──────────
+        self._near_section, self._near_layout = self._make_section(
+            CollapsibleSection, t("autoAssign.near_header", n=0),
+            t("autoAssign.near_intro"),
+        )
+        root.addWidget(self._near_section)
+
+        # ── Suspicious labels (training-data hygiene) ─────────────────────
+        self._suspicious_section, self._suspicious_layout = self._make_section(
+            CollapsibleSection, t("autoAssign.suspicious_header", n=0),
+            t("autoAssign.suspicious_intro"),
+        )
+        root.addWidget(self._suspicious_section)
+
+        # ── "Already reviewed" history (collapsed by default) ─────────────
         decided_scroll = QScrollArea()
         decided_scroll.setWidgetResizable(True)
         decided_scroll.setMaximumHeight(240)
@@ -396,6 +498,27 @@ class AutoAssignmentsTab(QWidget):
         self._decided_loaded = False
         root.addWidget(self._decided_section)
 
+    @staticmethod
+    def _make_section(section_cls, title: str, intro_text: str):
+        """A collapsible, scrollable list with an explanatory intro line."""
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        intro = QLabel(intro_text)
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #888; font-size: 11px;")
+        body_layout.addWidget(intro)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(260)
+        inner = QWidget()
+        rows = QVBoxLayout(inner)
+        rows.setSpacing(4)
+        rows.addStretch()
+        scroll.setWidget(inner)
+        body_layout.addWidget(scroll)
+        return section_cls(title, body), rows
+
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
@@ -408,20 +531,29 @@ class AutoAssignmentsTab(QWidget):
     def reload(self) -> None:
         self._loaded = True
         dtos: List[AutoAssignmentDTO] = []
+        near: List[AutoAssignmentDTO] = []
+        suspicious: List[SuspiciousLabelDTO] = []
+        latest_run = None
         try:
             with session_scope() as session:
                 svc = DeepRecognitionService(session, self._deep_config)
                 dtos = svc.list_auto_assignments()
+                near = svc.list_near_suggestions()
+                suspicious = svc.list_suspicious_labels()
+                latest_run = (
+                    session.query(TrainingRun)
+                    .filter(TrainingRun.finished_at.isnot(None))
+                    .order_by(TrainingRun.id.desc())
+                    .first()
+                )
         except Exception as exc:  # noqa: BLE001
             log.exception("Failed to load automatic groupings")
             QMessageBox.critical(self, t("error"), str(exc))
 
-        # Clear old rows (keep trailing stretch).
-        while self._list_layout.count() > 1:
-            item = self._list_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
+        uncertain_first = self._sort_combo.currentData() != "certain"
+        dtos.sort(key=lambda d: d.score, reverse=not uncertain_first)
+
+        _clear_layout(self._list_layout)
         self._rows = []
 
         for dto in dtos:
@@ -445,17 +577,80 @@ class AutoAssignmentsTab(QWidget):
         self._select_bar.setVisible(bool(dtos))
         self._update_selection_ui()
         self.count_changed.emit(len(dtos))
+        self._fill_near(near)
+        self._fill_suspicious(suspicious)
+        self._show_metrics(latest_run)
         self._refresh_decided()
+
+    def _fill_near(self, near: List[AutoAssignmentDTO]) -> None:
+        _clear_layout(self._near_layout)
+        self._near_section.set_title(t("autoAssign.near_header", n=len(near)))
+        if not near:
+            empty = QLabel(t("autoAssign.near_empty"))
+            empty.setStyleSheet("color: #666; font-style: italic; border: none;")
+            self._near_layout.insertWidget(0, empty)
+        for i, dto in enumerate(near):
+            row = _AutoAssignmentRow(dto, deep_config=self._deep_config, near=True)
+            row.confirmed.connect(self._on_confirm)
+            row.corrected.connect(self._on_correct)
+            row.reverted.connect(self._on_revert)
+            self._near_layout.insertWidget(i, row)
+
+    def _fill_suspicious(self, items: List[SuspiciousLabelDTO]) -> None:
+        _clear_layout(self._suspicious_layout)
+        self._suspicious_section.set_title(
+            t("autoAssign.suspicious_header", n=len(items))
+        )
+        if not items:
+            empty = QLabel(t("autoAssign.suspicious_empty"))
+            empty.setStyleSheet("color: #666; font-style: italic; border: none;")
+            self._suspicious_layout.insertWidget(0, empty)
+        for i, dto in enumerate(items):
+            row = _SuspiciousLabelRow(dto)
+            row.kept.connect(
+                lambda fid: self._run_action(lambda svc: svc.keep_label(fid), "keep_label")
+            )
+            row.removed.connect(
+                lambda fid: self._run_action(lambda svc: svc.remove_label(fid), "remove_label")
+            )
+            self._suspicious_layout.insertWidget(i, row)
+
+    def _show_metrics(self, run: Optional[TrainingRun]) -> None:
+        """One line: target precision vs. the precision your reviews measured."""
+        if run is None or self._deep_config is None:
+            self._metrics_label.setVisible(False)
+            return
+        target = getattr(self._deep_config, "target_precision", None)
+        measured = run.measured_precision
+        if target is None or measured is None:
+            self._metrics_label.setVisible(False)
+            return
+        self._metrics_label.setText(
+            t(
+                "autoAssign.metrics",
+                target=f"{target * 100:.0f}%",
+                measured=f"{measured * 100:.0f}% ({run.n_reviewed or 0})",
+            )
+        )
+        self._metrics_label.setVisible(True)
 
     def _refresh_decided(self) -> None:
         """Update the "already reviewed" header; reload its rows if open."""
-        from app.db.models import AUTO_ASSIGN_STATUS_AUTO, AutoAssignment
+        from app.db.models import (
+            AUTO_ASSIGN_STATUS_AUTO,
+            AUTO_ASSIGN_STATUS_NEAR,
+            AutoAssignment,
+        )
 
         try:
             with session_scope() as session:
                 count = (
                     session.query(AutoAssignment)
-                    .filter(AutoAssignment.status != AUTO_ASSIGN_STATUS_AUTO)
+                    .filter(
+                        AutoAssignment.status.notin_(
+                            (AUTO_ASSIGN_STATUS_AUTO, AUTO_ASSIGN_STATUS_NEAR)
+                        )
+                    )
                     .count()
                 )
                 decided = (
