@@ -109,6 +109,33 @@ class _PendingActionBar(QFrame):
         self.adjustSize()
 
 
+class _EdgeResizeGrip(QWidget):
+    """Thin strip on the editor's right edge; dragging it changes the width."""
+
+    def __init__(self, editor: "_InlineFaceEditor") -> None:
+        super().__init__(editor)
+        self._editor = editor
+        self._start_x: Optional[int] = None
+        self._start_w = 0
+        self.setCursor(Qt.SizeHorCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._start_x = event.globalPosition().toPoint().x()
+            self._start_w = self._editor.width()
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._start_x is not None:
+            dx = event.globalPosition().toPoint().x() - self._start_x
+            self._editor.set_user_width(self._start_w + dx)
+            event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._start_x = None
+        event.accept()
+
+
 class _InlineFaceEditor(QFrame):
     assign_requested = Signal(int)   # person_id
     create_requested = Signal(str)   # new person name
@@ -121,7 +148,11 @@ class _InlineFaceEditor(QFrame):
             "_InlineFaceEditor { background: #252525; border: 1px solid #666;"
             " border-radius: 4px; }"
         )
-        self.setFixedWidth(230)
+        # Width chosen by the user via the right-edge grip (None = default).
+        self._custom_width: Optional[int] = None
+        self._grip = _EdgeResizeGrip(self)
+        self.setMinimumWidth(230)
+        self.resize(230, self.height())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 6)
@@ -174,6 +205,22 @@ class _InlineFaceEditor(QFrame):
         # header strip (anything above the person search) so it never has to
         # cover the face the user is trying to look at.
         self._drag_origin: Optional[QPoint] = None
+
+    def adjustSize(self) -> None:
+        super().adjustSize()
+        if self._custom_width:
+            self.resize(self._custom_width, self.height())
+
+    def set_user_width(self, width: int) -> None:
+        parent = self.parentWidget()
+        max_w = max(230, parent.width() - self.x() - 4) if parent else 2000
+        self._custom_width = max(230, min(width, max_w))
+        self.resize(self._custom_width, self.height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._grip.setGeometry(self.width() - 6, 0, 6, self.height())
+        self._grip.raise_()
 
     def retranslate(self) -> None:
         self._assign_btn.setText(t("ibp_assign_btn"))
