@@ -340,14 +340,29 @@ class ObjectFeatureService:
 
     Mutating methods ``flush()`` but never commit — the caller owns the
     transaction via ``session_scope`` — matching the house style of
-    :class:`~app.services.object_service.ObjectService`.
+    :class:`~app.services.object_service.ObjectService`.  A long background
+    run passes ``incremental_commit=True`` instead: every finished batch is
+    committed so SQLite's write lock is released and the UI can keep saving
+    faces and objects meanwhile (#189).  The cache rows are idempotent, so a
+    partial commit is always safe.
     """
 
     def __init__(
-        self, session: Session, config: Optional[ObjectMatchingConfig] = None
+        self,
+        session: Session,
+        config: Optional[ObjectMatchingConfig] = None,
+        incremental_commit: bool = False,
     ) -> None:
         self.session = session
         self.config = config or ObjectMatchingConfig()
+        self.incremental_commit = incremental_commit
+
+    def checkpoint(self) -> None:
+        """Persist pending writes — committed when running incrementally."""
+        if self.incremental_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
 
     # -- images ----------------------------------------------------------
 
@@ -425,7 +440,7 @@ class ObjectFeatureService:
                         continue
                     self._store_image_row(image_id, fs, wanted)
                     stats.processed += 1
-                self.session.flush()
+                self.checkpoint()
                 if progress_cb:
                     progress_cb(done, total)
         return stats

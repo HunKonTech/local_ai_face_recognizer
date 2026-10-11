@@ -96,7 +96,11 @@ class ObjectsMixin:
             image_ids = self._current_folder_image_ids()
             if not image_ids:
                 image_ids = None
-        self._start_object_search(object_id=object_id, image_ids=image_ids)
+        # "auto" = the search the image browser starts right after tagging:
+        # background work, so it yields the machine to the user (#189).
+        self._start_object_search(
+            object_id=object_id, image_ids=image_ids, background=(scope == "auto")
+        )
 
     def _current_folder_image_ids(self) -> Optional[List[int]]:
         """Image ids of the folder open in the browser, when it can tell us."""
@@ -143,6 +147,7 @@ class ObjectsMixin:
         object_id: Optional[int],
         image_ids: Optional[List[int]] = None,
         post_scan: bool = False,
+        background: bool = False,
     ) -> None:
         """Run an object search in the background and offer the hits for review.
 
@@ -150,7 +155,10 @@ class ObjectsMixin:
         only offered once the run finishes, so tagging can continue meanwhile.
         A *post_scan* run covers the images a scan just added: it runs at low
         priority, re-reads their features (the files may have changed), and
-        stays silent when another search is already running.
+        stays silent when another search is already running.  Any other
+        request arriving while a search runs is queued and started once the
+        current one ends, so tagging the next object is never blocked (#189).
+        *background* runs it at low priority (the search after tagging).
         """
         from app.tasks import TaskPriority, get_task_manager
         from app.workers.object_match_worker import ObjectMatchWorker
@@ -168,8 +176,12 @@ class ObjectsMixin:
         ):
             if post_scan:
                 log.info("Object search already running; post-scan search skipped")
-            else:
-                QMessageBox.information(self, t("busy_title"), t("busy_msg"))
+                return
+            request = (object_id, tuple(image_ids) if image_ids else None, background)
+            queue = self._object_search_queue
+            if request not in queue:
+                queue.append(request)
+            self.statusBar().showMessage(t("object_match_queued"), 5000)
             return
 
         worker = ObjectMatchWorker(
@@ -186,7 +198,9 @@ class ObjectsMixin:
             t("object_match_running"),
             work,
             supports_pause=True,
-            priority=TaskPriority.LOW if post_scan else TaskPriority.NORMAL,
+            priority=(
+                TaskPriority.LOW if (post_scan or background) else TaskPriority.NORMAL
+            ),
             on_done=lambda result: self._on_object_search_done(
                 object_id, result, post_scan=post_scan
             ),
@@ -226,10 +240,29 @@ class ObjectsMixin:
             min_inliers=int(round(20 - 12 * fraction)),
         )
 
+    def _start_next_queued_object_search(self) -> None:
+        """Start the oldest search that was requested while another ran."""
+        if not self._object_search_queue:
+            return
+        object_id, image_ids, background = self._object_search_queue.pop(0)
+        self._start_object_search(
+            object_id=object_id,
+            image_ids=list(image_ids) if image_ids else None,
+            background=background,
+        )
+
     def _on_object_search_done(
         self, object_id: Optional[int], result: object, post_scan: bool = False
     ) -> None:
         self._object_search_task = None
+        try:
+            self._report_object_search_result(object_id, result, post_scan)
+        finally:
+            self._start_next_queued_object_search()
+
+    def _report_object_search_result(
+        self, object_id: Optional[int], result: object, post_scan: bool
+    ) -> None:
         found = int(getattr(result, "suggestions_created", 0) or 0)
         auto = int(getattr(result, "auto_accepted", 0) or 0)
         skipped = int(getattr(result, "skipped_no_reference", 0) or 0)
@@ -294,10 +327,12 @@ class ObjectsMixin:
         self._status_label.setText(t("ready"))
         log.error("Object matching failed: %s", message)
         QMessageBox.warning(self, t("object_match_review_title"), str(message))
+        self._start_next_queued_object_search()
 
     def _on_object_search_cancelled(self) -> None:
         self._object_search_task = None
         self._status_label.setText(t("ready"))
+        self._start_next_queued_object_search()
 
     @Slot(int, int, int)
     def _on_cluster_face_right_clicked(self, face_id: int, gx: int, gy: int) -> None:

@@ -264,15 +264,23 @@ class ObjectMatchingService:
     """Runs object searches and owns the suggestion review queue.
 
     Mutating methods ``flush()`` but never commit; the caller owns the
-    transaction via ``session_scope``.
+    transaction via ``session_scope``.  With ``incremental_commit=True`` (the
+    background worker) each indexing batch and each searched object's
+    suggestions are committed, so the write lock is never held for the whole
+    run (#189).
     """
 
     def __init__(
-        self, session: Session, config: Optional[ObjectMatchingConfig] = None
+        self,
+        session: Session,
+        config: Optional[ObjectMatchingConfig] = None,
+        incremental_commit: bool = False,
     ) -> None:
         self.session = session
         self.config = config or ObjectMatchingConfig()
-        self.features = ObjectFeatureService(session, self.config)
+        self.features = ObjectFeatureService(
+            session, self.config, incremental_commit=incremental_commit
+        )
         self.objects = ObjectService(session)
 
     # -- searching -------------------------------------------------------
@@ -340,6 +348,8 @@ class ObjectMatchingService:
             stats.skipped_no_reference += 1
             return
         patches = self.features.ensure_patch_features(references)
+        # Release the write lock before the long indexing/matching phase.
+        self.features.checkpoint()
         if not patches:
             stats.skipped_no_reference += 1
             return
@@ -402,7 +412,7 @@ class ObjectMatchingService:
                 stats.auto_accepted += 1
             elif created:
                 stats.suggestions_created += 1
-        self.session.flush()
+        self.features.checkpoint()
 
     def _target_image_ids(
         self,

@@ -74,6 +74,38 @@ def test_worker_reports_progress_and_finds_the_copy(library):
     assert [p.image_id for p in pending] == [collage_id]
 
 
+class _WritingContext(_FakeContext):
+    """Saves an object marking from another session at every checkpoint."""
+
+    def __init__(self, object_id: int, image_id: int) -> None:
+        super().__init__()
+        self._object_id = object_id
+        self._image_id = image_id
+        self.writes = 0
+
+    def checkpoint(self) -> None:
+        super().checkpoint()
+        from sqlalchemy import text
+
+        with session_scope() as session:
+            # Fail fast instead of the app's 5 s wait if the lock is held.
+            session.execute(text("PRAGMA busy_timeout=100"))
+            ObjectService(session).add_occurrence_bbox(
+                self._object_id, self._image_id, 1, 1, 5, 5
+            )
+        self.writes += 1
+
+
+def test_worker_does_not_hold_the_write_lock(library):
+    """The UI can save markings while a search runs (#189)."""
+    _directory, (object_id, _source, _collage, other_id), _box = library
+    ctx = _WritingContext(object_id, other_id)
+
+    ObjectMatchWorker(object_id=object_id, config=REVIEW_ONLY).run_in_task(ctx)
+
+    assert ctx.writes == ctx.checkpoints > 0
+
+
 def test_worker_stops_when_the_task_is_cancelled(library):
     _directory, (object_id, *_rest), _box = library
     ctx = _FakeContext(cancelled=True)

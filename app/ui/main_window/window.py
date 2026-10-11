@@ -45,6 +45,8 @@ class MainWindow(UiBuildMixin, FoldersMixin, PipelineMixin, MaintenanceMixin, GD
         # live task handle and its worker (kept alive while it runs).
         self._active_pipeline_task = None
         self._object_search_task = None
+        # (object_id, image_ids, background) requested while a search ran.
+        self._object_search_queue: list = []
         self._active_pipeline_worker = None
         self._current_person_id: Optional[int] = None
         self._current_face_id: Optional[int] = None

@@ -392,7 +392,8 @@ class InteractionMixin:
         ).lower() in ("1", "true", "yes")
         if not enabled:
             return
-        self.object_search_requested.emit(int(object_id), "library")
+        # "auto" → whole library, low priority, queued behind a running search.
+        self.object_search_requested.emit(int(object_id), "auto")
 
     def refresh_object_markers(self) -> None:
         """Public redraw of the object overlay (after an external change)."""

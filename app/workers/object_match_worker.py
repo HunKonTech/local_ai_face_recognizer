@@ -54,9 +54,15 @@ class ObjectMatchWorker:
     def run_in_task(self, ctx) -> MatchStats:
         """TaskManager entry point; returns the run's :class:`MatchStats`."""
         with session_scope() as session:
-            service = ObjectMatchingService(session, self._config)
+            # Commit as it goes: one transaction for the whole run would hold
+            # SQLite's write lock for minutes and make every save in the UI
+            # fail with "database is locked" (#189).
+            service = ObjectMatchingService(
+                session, self._config, incremental_commit=True
+            )
             if self._invalidate_ids:
                 service.features.invalidate_images(self._invalidate_ids)
+                service.features.checkpoint()
 
             def progress(done: int, total: int, stage: str) -> None:
                 # checkpoint() is what makes cancel responsive and lets the

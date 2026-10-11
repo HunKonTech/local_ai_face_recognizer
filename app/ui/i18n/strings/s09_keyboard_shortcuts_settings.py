@@ -194,6 +194,7 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "object_match_review_question": {"en": "Review them now?",
                              "hu": "Átnézed most őket?"},
     "object_match_running":  {"en": "Searching for object …", "hu": "Objektum keresése …"},
+    "object_match_queued":   {"en": "Object search queued — it starts when the current one ends", "hu": "Objektumkeresés sorba állítva — az aktuális után indul"},
     "object_match_no_reference": {
         "en": "This object has no frame yet. Draw a rectangle around it on an "
               "image first, then the search has something to look for.",
