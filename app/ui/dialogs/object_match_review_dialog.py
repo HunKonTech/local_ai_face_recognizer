@@ -1,9 +1,13 @@
 """Review dialog for object-matching hits (#164).
 
-A hit is never turned into an object marking on its own — the user sees the
-target image with the proposed frame drawn on it and decides.  Accepting marks
-the object there and gives the matcher another reference sample; rejecting is
-remembered so the same pairing is never proposed again.
+An ordinary hit is never turned into an object marking on its own — the user
+sees the target image with the proposed frame drawn on it and decides.
+Accepting marks the object there and gives the matcher another reference
+sample; rejecting is remembered so the same pairing is never proposed again.
+
+Hits that scored above ``auto_accept_score`` were already tagged by the search.
+They are listed first, under their own heading, with OK (confirm, which makes
+them reference samples) and Undo (delete the marking and remember the "no").
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.db.database import session_scope
+from app.db.models import OBJECT_MATCH_AUTO
 from app.services.object_matching_service import ObjectMatchingService, SuggestionInfo
 from app.ui.i18n import t
 from app.ui.widgets.object_gallery_widget import crop_pixmap_full_with_frame
@@ -78,9 +83,17 @@ class _SuggestionCard(QFrame):
     def info(self) -> SuggestionInfo:
         return self._info
 
+    @property
+    def is_auto(self) -> bool:
+        return self._info.status == OBJECT_MATCH_AUTO
+
     def retranslate(self) -> None:
-        self._accept_btn.setText(t("object_match_accept"))
-        self._reject_btn.setText(t("object_match_reject"))
+        if self.is_auto:
+            self._accept_btn.setText(t("object_match_auto_confirm"))
+            self._reject_btn.setText(t("object_match_auto_revert"))
+        else:
+            self._accept_btn.setText(t("object_match_accept"))
+            self._reject_btn.setText(t("object_match_reject"))
         self._caption.setText(
             f"<b>{self._info.object_name}</b><br>"
             f"{t('object_match_score')}: {round(self._info.score * 100)}% &nbsp;·&nbsp; "
@@ -95,11 +108,11 @@ class _SuggestionCard(QFrame):
 
 
 class ObjectMatchReviewDialog(QDialog):
-    """Grid of pending hits with per-item and bulk verdicts.
+    """Automatic tags and pending hits with per-item and bulk verdicts.
 
     Args:
         object_id: Limit the review to one object; ``None`` reviews everything
-            pending, which is what the library-wide batch mode produces.
+            outstanding, which is what the library-wide batch mode produces.
         run_id: Limit the review to one search run.
     """
 
@@ -112,6 +125,7 @@ class ObjectMatchReviewDialog(QDialog):
         super().__init__(parent)
         self._object_id = object_id
         self._run_id = run_id
+        # Confirmed automatic tags count as accepted, undone ones as rejected.
         self.accepted_count = 0
         self.rejected_count = 0
         self._cards: List[_SuggestionCard] = []
@@ -134,6 +148,11 @@ class ObjectMatchReviewDialog(QDialog):
         self._grid_host = QWidget()
         self._grid = QVBoxLayout(self._grid_host)
         self._grid.setAlignment(Qt.AlignTop)
+        # Section headings; reload() places the cards right after each.
+        self._auto_header = QLabel()
+        self._pending_header = QLabel()
+        self._grid.addWidget(self._auto_header)
+        self._grid.addWidget(self._pending_header)
         self._scroll.setWidget(self._grid_host)
         layout.addWidget(self._scroll, 1)
 
@@ -145,6 +164,9 @@ class ObjectMatchReviewDialog(QDialog):
         # Bulk row: the threshold and its action sit together, so the slider is
         # the confirmation and no extra prompt is needed.
         bulk = QHBoxLayout()
+        self._confirm_all_btn = QPushButton()
+        self._confirm_all_btn.clicked.connect(self._on_confirm_all_auto)
+        bulk.addWidget(self._confirm_all_btn)
         self._threshold_label = QLabel()
         self._threshold = QSlider(Qt.Horizontal)
         self._threshold.setRange(0, 100)
@@ -169,6 +191,9 @@ class ObjectMatchReviewDialog(QDialog):
         self.setWindowTitle(t("object_match_review_title"))
         self._intro.setText(t("object_match_review_intro"))
         self._empty.setText(t("object_match_empty"))
+        self._auto_header.setText(f"<b>{t('object_match_auto_section')}</b>")
+        self._pending_header.setText(f"<b>{t('object_match_pending_section')}</b>")
+        self._confirm_all_btn.setText(t("object_match_auto_confirm_all"))
         close = self._buttons.button(QDialogButtonBox.Close)
         if close is not None:
             close.setText(t("close"))
@@ -185,32 +210,58 @@ class ObjectMatchReviewDialog(QDialog):
     # -- data ------------------------------------------------------------
 
     def reload(self) -> None:
-        """Rebuild the card list from the pending suggestions."""
+        """Rebuild the card list: automatic tags first, then pending hits."""
         for card in self._cards:
             card.setParent(None)
             card.deleteLater()
         self._cards = []
 
         with session_scope() as session:
-            pending = ObjectMatchingService(session).list_pending(
+            service = ObjectMatchingService(session)
+            auto = service.list_auto(object_id=self._object_id, run_id=self._run_id)
+            pending = service.list_pending(
                 object_id=self._object_id, run_id=self._run_id
             )
+        for info in auto:
+            card = _SuggestionCard(info, self)
+            self._grid.insertWidget(self._grid.indexOf(self._pending_header), card)
+            self._cards.append(card)
         for info in pending:
             card = _SuggestionCard(info, self)
             self._grid.addWidget(card)
             self._cards.append(card)
+        self._update_visibility()
 
-        has_items = bool(self._cards)
+    def _update_visibility(self) -> None:
+        has_auto = any(card.is_auto for card in self._cards)
+        has_pending = any(not card.is_auto for card in self._cards)
+        has_items = has_auto or has_pending
         self._scroll.setVisible(has_items)
         self._empty.setVisible(not has_items)
-        self._accept_above_btn.setEnabled(has_items)
+        # Headings only earn their place when both kinds are listed.
+        self._auto_header.setVisible(has_auto and has_pending)
+        self._pending_header.setVisible(has_auto and has_pending)
+        self._confirm_all_btn.setVisible(has_auto)
+        self._accept_above_btn.setEnabled(has_pending)
 
     def decide(self, suggestion_id: int, accept: bool) -> None:
-        """Record one verdict and drop its card."""
+        """Record one verdict and drop its card.
+
+        For an automatic tag, *accept* confirms it and ``False`` undoes it.
+        """
+        is_auto = any(
+            card.is_auto
+            for card in self._cards
+            if card.info.suggestion_id == suggestion_id
+        )
         try:
             with session_scope() as session:
                 service = ObjectMatchingService(session)
-                if accept:
+                if is_auto and accept:
+                    service.confirm_auto(suggestion_id)
+                elif is_auto:
+                    service.revert_auto(suggestion_id)
+                elif accept:
                     service.accept_suggestion(suggestion_id)
                 else:
                     service.reject_suggestion(suggestion_id)
@@ -232,10 +283,15 @@ class ObjectMatchReviewDialog(QDialog):
             self._cards.remove(card)
             card.setParent(None)
             card.deleteLater()
-        has_items = bool(self._cards)
-        self._scroll.setVisible(has_items)
-        self._empty.setVisible(not has_items)
-        self._accept_above_btn.setEnabled(has_items)
+        self._update_visibility()
+
+    def _on_confirm_all_auto(self) -> None:
+        with session_scope() as session:
+            confirmed = ObjectMatchingService(session).confirm_all_auto(
+                object_id=self._object_id
+            )
+        self.accepted_count += confirmed
+        self.reload()
 
     def _on_accept_above(self) -> None:
         threshold = self._threshold.value() / 100.0

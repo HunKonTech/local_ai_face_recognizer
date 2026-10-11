@@ -391,6 +391,13 @@ object_matching:
   max_scale: 8.0
   # Minimum normalised score for a hit to be offered for review.
   min_score: 0.35
+  # Hits scoring at least auto_accept_score are tagged without review.  They
+  # are listed as "automatically tagged" in the review dialog and can be
+  # confirmed or undone there; until confirmed they are not reference samples.
+  auto_accept: true
+  auto_accept_score: 0.85
+  # After a scan, search every tagged object on the new / changed images.
+  search_new_images: true
   # Hard cap on extraction threads; the resource governor may lower it further
   # while the machine is busy with other work.
   max_workers: 4

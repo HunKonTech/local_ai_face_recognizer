@@ -127,6 +127,9 @@ class MainWindow(QMainWindow):
         self._load_recording_prefs()
         self._connect_display_events()
         self._pending_auto_assignment_count: int = 0
+        # New / changed images of the last scan, searched for tagged objects
+        # once the pipeline finishes (#164).
+        self._pending_object_scan_ids: List[int] = []
         self._db_path: str = str(config.db_path_resolved)
         self._pending_release = None
 
@@ -457,7 +460,9 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._persons_panel, t("tab_persons"))
 
         # --- Tab 5: Objektumok ---
-        self._objects_panel = ObjectsPanel()
+        self._objects_panel = ObjectsPanel(
+            matching_config=getattr(self._config, "object_matching", None)
+        )
         self._objects_panel.object_data_changed.connect(
             self._refresh_preview_object_markers
         )
@@ -986,6 +991,7 @@ class MainWindow(QMainWindow):
         self._active_pipeline_task = None
         self._active_pipeline_worker = None
         self._pending_auto_assignment_count = getattr(result, "n_auto_assignments", 0)
+        self._pending_object_scan_ids = list(getattr(result, "new_image_ids", None) or [])
         self._on_pipeline_finished(
             getattr(result, "success", True), getattr(result, "summary", "")
         )
@@ -2586,9 +2592,13 @@ class MainWindow(QMainWindow):
         self._locations_panel.refresh()
         self._persons_panel.refresh()
         self._objects_panel.refresh()
+        new_image_ids = self._pending_object_scan_ids
+        self._pending_object_scan_ids = []
         if not success:
             QMessageBox.warning(self, t("warning"), summary)
             return
+
+        self._maybe_search_objects_after_scan(new_image_ids)
 
         if self._pending_auto_assignment_count > 0:
             reply = QMessageBox.question(
@@ -2768,28 +2778,73 @@ class MainWindow(QMainWindow):
             log.debug("Could not resolve the current folder's images", exc_info=True)
             return None
 
+    def _maybe_search_objects_after_scan(self, image_ids: List[int]) -> None:
+        """Look for every tagged object on the images a scan just added (#164).
+
+        Runs quietly in the background at low priority; nothing happens when
+        the scan found nothing new, the feature is switched off, or no object
+        has a framed reference marking yet.
+        """
+        if not image_ids:
+            return
+        config = self._object_matching_config()
+        if not (config.enabled and config.search_new_images):
+            return
+        try:
+            from app.services.object_matching_service import ObjectMatchingService
+
+            with session_scope() as session:
+                has_reference = bool(
+                    ObjectMatchingService(session, config).matchable_object_ids()
+                )
+        except Exception:
+            log.exception("Could not check for object reference markings")
+            return
+        if not has_reference:
+            return
+        self._start_object_search(
+            object_id=None, image_ids=image_ids, post_scan=True
+        )
+
     def _start_object_search(
         self,
         object_id: Optional[int],
         image_ids: Optional[List[int]] = None,
+        post_scan: bool = False,
     ) -> None:
         """Run an object search in the background and offer the hits for review.
 
         Never blocks: progress shows in the status bar and the review dialog is
         only offered once the run finishes, so tagging can continue meanwhile.
+        A *post_scan* run covers the images a scan just added: it runs at low
+        priority, re-reads their features (the files may have changed), and
+        stays silent when another search is already running.
         """
         from app.tasks import TaskPriority, get_task_manager
         from app.workers.object_match_worker import ObjectMatchWorker
 
+        config = self._object_matching_config()
+        if not config.enabled:
+            if not post_scan:
+                QMessageBox.information(
+                    self, t("object_match_review_title"), t("object_match_disabled_tip")
+                )
+            return
+
         if self._object_search_task is not None and not (
             self._object_search_task.state.is_final
         ):
-            QMessageBox.information(self, t("busy_title"), t("busy_msg"))
+            if post_scan:
+                log.info("Object search already running; post-scan search skipped")
+            else:
+                QMessageBox.information(self, t("busy_title"), t("busy_msg"))
             return
 
-        config = self._object_matching_config()
         worker = ObjectMatchWorker(
-            object_id=object_id, image_ids=image_ids, config=config
+            object_id=object_id,
+            image_ids=image_ids,
+            config=config,
+            invalidate_image_ids=image_ids if post_scan else None,
         )
 
         def work(ctx):
@@ -2799,8 +2854,10 @@ class MainWindow(QMainWindow):
             t("object_match_running"),
             work,
             supports_pause=True,
-            priority=TaskPriority.NORMAL,
-            on_done=lambda result: self._on_object_search_done(object_id, result),
+            priority=TaskPriority.LOW if post_scan else TaskPriority.NORMAL,
+            on_done=lambda result: self._on_object_search_done(
+                object_id, result, post_scan=post_scan
+            ),
             on_error=self._on_object_search_error,
             on_cancelled=self._on_object_search_cancelled,
         )
@@ -2809,16 +2866,20 @@ class MainWindow(QMainWindow):
         self._status_label.setText(t("object_match_running"))
 
     def _object_matching_config(self):
-        """Matching parameters, with the panel's sensitivity slider applied.
+        """Matching parameters, with the Objects tab's choices applied.
 
-        The slider moves the two gates that actually decide how permissive a run
-        is — the score floor and the required inlier count — between a strict
-        and a loose end of the range.
+        The sensitivity slider moves the two gates that actually decide how
+        permissive a run is — the score floor and the required inlier count —
+        between a strict and a loose end of the range.  The auto-tag and
+        post-scan checkboxes override the ``config.yaml`` defaults.
         """
         from app.app_settings import app_qsettings
         from app.config import ObjectMatchingConfig
+        from app.ui.panels.objects_panel import matching_preferences
 
-        base = getattr(self._config, "object_matching", None) or ObjectMatchingConfig()
+        base = matching_preferences(
+            getattr(self._config, "object_matching", None) or ObjectMatchingConfig()
+        )
         sensitivity = 50
         try:
             sensitivity = int(
@@ -2833,33 +2894,62 @@ class MainWindow(QMainWindow):
             min_inliers=int(round(20 - 12 * fraction)),
         )
 
-    def _on_object_search_done(self, object_id: Optional[int], result: object) -> None:
+    def _on_object_search_done(
+        self, object_id: Optional[int], result: object, post_scan: bool = False
+    ) -> None:
         self._object_search_task = None
         found = int(getattr(result, "suggestions_created", 0) or 0)
+        auto = int(getattr(result, "auto_accepted", 0) or 0)
         skipped = int(getattr(result, "skipped_no_reference", 0) or 0)
         searched = int(getattr(result, "objects_searched", 0) or 0)
+        run_id = getattr(result, "run_id", None) or None
         self._status_label.setText(t("ready"))
+
+        if auto:
+            # The new markings already exist; show them right away.
+            self._refresh_object_views()
+
+        if post_scan:
+            if not (found or auto):
+                return
+            message = t("object_match_auto_done").format(auto=auto, pending=found)
+            self.statusBar().showMessage(message, 8000)
+            reply = QMessageBox.question(
+                self,
+                t("object_match_review_title"),
+                f"{message}\n\n{t('object_match_review_question')}",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._open_object_match_review(None, run_id=run_id)
+            return
 
         if skipped and skipped == searched:
             QMessageBox.information(
                 self, t("object_match_review_title"), t("object_match_no_reference")
             )
             return
-        if not found:
+        if not (found or auto):
             self.statusBar().showMessage(t("object_match_none_found"), 5000)
             return
         self._open_object_match_review(object_id)
 
-    def _open_object_match_review(self, object_id: Optional[int]) -> None:
+    def _refresh_object_views(self) -> None:
+        """Redraw object markers everywhere after markings changed."""
+        self._refresh_preview_object_markers()
+        if hasattr(self, "_objects_panel"):
+            self._objects_panel.refresh()
+        self._image_browser.refresh_object_markers()
+
+    def _open_object_match_review(
+        self, object_id: Optional[int], run_id: Optional[str] = None
+    ) -> None:
         from app.ui.dialogs.object_match_review_dialog import ObjectMatchReviewDialog
 
-        dialog = ObjectMatchReviewDialog(self, object_id=object_id)
+        dialog = ObjectMatchReviewDialog(self, object_id=object_id, run_id=run_id)
         dialog.exec()
         if dialog.accepted_count or dialog.rejected_count:
-            self._refresh_preview_object_markers()
-            if hasattr(self, "_objects_panel"):
-                self._objects_panel.refresh()
-            self._image_browser.refresh_object_markers()
+            self._refresh_object_views()
             self.statusBar().showMessage(
                 t("object_match_done").format(
                     accepted=dialog.accepted_count, rejected=dialog.rejected_count

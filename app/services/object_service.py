@@ -22,10 +22,13 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     OBJECT_GEOMETRY_BBOX,
+    OBJECT_MATCH_PENDING,
     OBJECT_ROLES,
     Image,
     ObjectAlias,
+    ObjectMatchSuggestion,
     ObjectOccurrence,
+    ObjectPatchFeatures,
     ObjectPersonLink,
     Person,
     TaggedObject,
@@ -797,6 +800,8 @@ class ObjectService:
                 self._session.delete(link)
                 target_link_keys.add(key)
 
+        self._merge_matching_history(ids, target.id, keep_occ_ids)
+
         if name is not None and name.strip():
             target.name = name.strip()
         if target.description is None and source_descriptions:
@@ -818,6 +823,54 @@ class ObjectService:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _merge_matching_history(
+        self, source_ids: List[int], target_id: int, moved_occ_ids: List[int]
+    ) -> None:
+        """Carry the sources' object-matching state over to the target (#164).
+
+        Without this, deleting the sources would cascade away their match
+        suggestions — and with them every rejection, so a wrong pairing the
+        user already turned down would be proposed again.  A source row that
+        clashes with the target's own history is dropped: the target's verdict
+        wins, and a pending source hit on an image the target already decided
+        is moot.
+        """
+        target_rows = (
+            self._session.query(ObjectMatchSuggestion)
+            .filter(ObjectMatchSuggestion.object_id == target_id)
+            .all()
+        )
+        keys = {(r.image_id, r.bbox_x, r.bbox_y) for r in target_rows}
+        decided = {
+            r.image_id for r in target_rows if r.status != OBJECT_MATCH_PENDING
+        }
+        for row in (
+            self._session.query(ObjectMatchSuggestion)
+            .filter(ObjectMatchSuggestion.object_id.in_(source_ids))
+            .order_by(ObjectMatchSuggestion.id)
+            .all()
+        ):
+            key = (row.image_id, row.bbox_x, row.bbox_y)
+            if key in keys or (
+                row.status == OBJECT_MATCH_PENDING and row.image_id in decided
+            ):
+                self._session.delete(row)
+                continue
+            row.object_id = target_id
+            keys.add(key)
+            if row.status != OBJECT_MATCH_PENDING:
+                decided.add(row.image_id)
+
+        # Cached crop features follow their (re-pointed) occurrence.
+        if moved_occ_ids:
+            self._session.query(ObjectPatchFeatures).filter(
+                ObjectPatchFeatures.occurrence_id.in_(moved_occ_ids)
+            ).update(
+                {ObjectPatchFeatures.object_id: target_id},
+                synchronize_session=False,
+            )
+        self._session.flush()
 
     def _require_object(self, object_id: int) -> TaggedObject:
         obj = self._session.get(TaggedObject, object_id)

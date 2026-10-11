@@ -32,6 +32,9 @@ class ObjectMatchWorker:
         image_ids: Restrict the search to these images; ``None`` is the whole
             library.
         config: Matching parameters; defaults are used when omitted.
+        invalidate_image_ids: Images whose files changed since their features
+            were cached (the post-scan run passes the rescanned ones); their
+            cached features are dropped before searching.
     """
 
     def __init__(
@@ -39,17 +42,21 @@ class ObjectMatchWorker:
         object_id: Optional[int] = None,
         image_ids: Optional[Sequence[int]] = None,
         config: Optional[ObjectMatchingConfig] = None,
+        invalidate_image_ids: Optional[Sequence[int]] = None,
     ) -> None:
         self._object_id = object_id
         self._image_ids: Optional[List[int]] = (
             [int(i) for i in image_ids] if image_ids is not None else None
         )
         self._config = config
+        self._invalidate_ids: List[int] = [int(i) for i in invalidate_image_ids or ()]
 
     def run_in_task(self, ctx) -> MatchStats:
         """TaskManager entry point; returns the run's :class:`MatchStats`."""
         with session_scope() as session:
             service = ObjectMatchingService(session, self._config)
+            if self._invalidate_ids:
+                service.features.invalidate_images(self._invalidate_ids)
 
             def progress(done: int, total: int, stage: str) -> None:
                 # checkpoint() is what makes cancel responsive and lets the
@@ -76,11 +83,13 @@ class ObjectMatchWorker:
                 )
             ctx.report(100, "")
             log.info(
-                "Object match run %s: %d objects, %d images, %d suggestions%s",
+                "Object match run %s: %d objects, %d images, %d suggestions, "
+                "%d auto-tagged%s",
                 stats.run_id,
                 stats.objects_searched,
                 stats.images_scanned,
                 stats.suggestions_created,
+                stats.auto_accepted,
                 " (cancelled)" if stats.cancelled else "",
             )
             return stats

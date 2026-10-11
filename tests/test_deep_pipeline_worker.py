@@ -143,6 +143,27 @@ def test_reembed_mode_recomputes_then_retrains(tmp_db, monkeypatch):
     assert calls == ["reembed"]
 
 
+def test_pipeline_result_carries_the_scanned_image_ids(tmp_db, monkeypatch):
+    """The UI searches tagged objects on exactly these images afterwards (#164)."""
+    worker = DeepPipelineWorker(
+        root_folders=["/x"], config=AppConfig(), mode=MODE_RESCAN
+    )
+    for name in (
+        "_run_detection", "_run_ai_face_detection", "_run_embedding",
+        "_run_overlap_resolution", "_run_multistage_cleanup",
+        "_run_ignored_filter", "_run_deep_train_and_recognize",
+        "_run_clustering", "_run_intra_image_consistency", "_run_suggestions",
+    ):
+        monkeypatch.setattr(worker, name, lambda *_a, **_k: _Zero())
+    monkeypatch.setattr(worker, "_run_scan", lambda: [3, 7])
+    monkeypatch.setattr(worker, "_get_pending_detection_ids", lambda: [])
+    monkeypatch.setattr(worker, "_checkpoint", lambda: None)
+
+    result = worker._run_pipeline()
+
+    assert result.new_image_ids == [3, 7]
+
+
 def test_invalid_mode_raises():
     with pytest.raises(ValueError):
         DeepPipelineWorker(root_folders=["/x"], config=AppConfig(), mode="bogus")

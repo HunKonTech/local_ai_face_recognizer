@@ -19,12 +19,13 @@ How a single comparison works:
 4. The reference rectangle is projected through the transform, giving the
    proposed box in the target image.
 
-Nothing here writes an object marking directly.  Hits land in
-``object_match_suggestions`` for review; only an explicit accept creates an
-:class:`~app.db.models.ObjectOccurrence`.  That accepted occurrence then becomes
-another reference sample, which is how the matcher learns an object over time,
-and a rejected suggestion is kept forever so the same wrong pairing is never
-proposed again.
+Hits land in ``object_match_suggestions``.  An ordinary hit waits for review and
+only an explicit accept creates an :class:`~app.db.models.ObjectOccurrence`.  A
+hit scoring at least ``auto_accept_score`` is tagged at once but kept as status
+``auto``: the review dialog lists it so the user can confirm or undo it.  A
+confirmed occurrence becomes another reference sample, which is how the matcher
+learns an object over time, and a rejected (or undone) suggestion is kept
+forever so the same wrong pairing is never proposed again.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from app.config import ObjectMatchingConfig
 from app.db.models import (
     OBJECT_GEOMETRY_BBOX,
     OBJECT_MATCH_ACCEPTED,
+    OBJECT_MATCH_AUTO,
     OBJECT_MATCH_PENDING,
     OBJECT_MATCH_REJECTED,
     Image,
@@ -107,6 +109,9 @@ class MatchStats:
     images_scanned: int = 0
     images_indexed: int = 0
     suggestions_created: int = 0
+    # Hits tagged without review (status ``auto``); not counted as created
+    # suggestions.
+    auto_accepted: int = 0
     skipped_no_reference: int = 0
     cancelled: bool = False
     object_ids: List[int] = field(default_factory=list)
@@ -385,8 +390,17 @@ class ObjectMatchingService:
             if progress_cb:
                 progress_cb(done, total, "match")
 
+        auto_score = (
+            float(self.config.auto_accept_score) if self.config.auto_accept else None
+        )
         for image_id, (result, occ_id) in best_per_image.items():
-            if self._store_suggestion(object_id, image_id, result, occ_id, stats.run_id):
+            row, created = self._store_suggestion(
+                object_id, image_id, result, occ_id, stats.run_id
+            )
+            if auto_score is not None and row.score >= auto_score:
+                self._apply_auto(row)
+                stats.auto_accepted += 1
+            elif created:
                 stats.suggestions_created += 1
         self.session.flush()
 
@@ -410,12 +424,13 @@ class ObjectMatchingService:
         # Images holding a reference sample are already tagged with this object.
         skip = {int(occ.image_id) for occ in references}
         # A pairing the user already reviewed is never proposed again — that is
-        # the negative half of the learning.
+        # the negative half of the learning.  An automatic tag counts as
+        # decided too: it is either still standing or the user deleted it.
         decided = self.session.execute(
             select(ObjectMatchSuggestion.image_id).where(
                 ObjectMatchSuggestion.object_id == object_id,
                 ObjectMatchSuggestion.status.in_(
-                    (OBJECT_MATCH_REJECTED, OBJECT_MATCH_ACCEPTED)
+                    (OBJECT_MATCH_REJECTED, OBJECT_MATCH_ACCEPTED, OBJECT_MATCH_AUTO)
                 ),
             )
         ).scalars()
@@ -450,8 +465,12 @@ class ObjectMatchingService:
         result: MatchResult,
         source_occurrence_id: int,
         run_id: str,
-    ) -> bool:
-        """Insert or refresh a pending suggestion; ``True`` if one was created."""
+    ) -> Tuple[ObjectMatchSuggestion, bool]:
+        """Insert or refresh a pending suggestion.
+
+        Returns the row and whether it was newly created (``False`` when the
+        hit was merged into an overlapping pending one).
+        """
         pending = (
             self.session.execute(
                 select(ObjectMatchSuggestion).where(
@@ -474,25 +493,24 @@ class ObjectMatchingService:
                     row.source_occurrence_id = source_occurrence_id
                     row.run_id = run_id
                     row.created_at = datetime.utcnow()
-                return False
+                return row, False
 
-        self.session.add(
-            ObjectMatchSuggestion(
-                object_id=object_id,
-                image_id=image_id,
-                bbox_x=result.bbox[0],
-                bbox_y=result.bbox[1],
-                bbox_w=result.bbox[2],
-                bbox_h=result.bbox[3],
-                score=result.score,
-                inliers=result.inliers,
-                scale=result.scale,
-                source_occurrence_id=source_occurrence_id,
-                status=OBJECT_MATCH_PENDING,
-                run_id=run_id,
-            )
+        row = ObjectMatchSuggestion(
+            object_id=object_id,
+            image_id=image_id,
+            bbox_x=result.bbox[0],
+            bbox_y=result.bbox[1],
+            bbox_w=result.bbox[2],
+            bbox_h=result.bbox[3],
+            score=result.score,
+            inliers=result.inliers,
+            scale=result.scale,
+            source_occurrence_id=source_occurrence_id,
+            status=OBJECT_MATCH_PENDING,
+            run_id=run_id,
         )
-        return True
+        self.session.add(row)
+        return row, True
 
     # -- review queue ----------------------------------------------------
 
@@ -500,6 +518,21 @@ class ObjectMatchingService:
         self, object_id: Optional[int] = None, run_id: Optional[str] = None
     ) -> List[SuggestionInfo]:
         """Pending suggestions, best score first."""
+        return self._list_by_status(OBJECT_MATCH_PENDING, object_id, run_id)
+
+    def list_auto(
+        self, object_id: Optional[int] = None, run_id: Optional[str] = None
+    ) -> List[SuggestionInfo]:
+        """Automatic tags not yet confirmed or undone, best score first.
+
+        An automatic tag whose occurrence the user already deleted by hand is
+        left out: there is nothing left to confirm or undo.
+        """
+        return self._list_by_status(OBJECT_MATCH_AUTO, object_id, run_id)
+
+    def _list_by_status(
+        self, status: str, object_id: Optional[int], run_id: Optional[str]
+    ) -> List[SuggestionInfo]:
         stmt = (
             select(
                 ObjectMatchSuggestion,
@@ -508,9 +541,11 @@ class ObjectMatchingService:
             )
             .join(TaggedObject, TaggedObject.id == ObjectMatchSuggestion.object_id)
             .join(Image, Image.id == ObjectMatchSuggestion.image_id)
-            .where(ObjectMatchSuggestion.status == OBJECT_MATCH_PENDING)
+            .where(ObjectMatchSuggestion.status == status)
             .order_by(ObjectMatchSuggestion.score.desc(), ObjectMatchSuggestion.id)
         )
+        if status == OBJECT_MATCH_AUTO:
+            stmt = stmt.where(ObjectMatchSuggestion.created_occurrence_id.isnot(None))
         if object_id is not None:
             stmt = stmt.where(ObjectMatchSuggestion.object_id == object_id)
         if run_id:
@@ -548,18 +583,8 @@ class ObjectMatchingService:
         search — this is where the model learns from a confirmation.
         """
         row = self._require_suggestion(suggestion_id)
-        occurrence = self.objects.add_occurrence_bbox(
-            object_id=row.object_id,
-            image_id=row.image_id,
-            x=row.bbox_x,
-            y=row.bbox_y,
-            w=row.bbox_w,
-            h=row.bbox_h,
-        )
-        occurrence.detection_source = "ai"
-        occurrence.confidence = float(row.score)
+        occurrence = self._create_occurrence(row)
         row.status = OBJECT_MATCH_ACCEPTED
-        row.created_occurrence_id = occurrence.id
         row.reviewed_at = datetime.utcnow()
         self.session.flush()
         return occurrence
@@ -570,6 +595,43 @@ class ObjectMatchingService:
         row.status = OBJECT_MATCH_REJECTED
         row.reviewed_at = datetime.utcnow()
         self.session.flush()
+
+    def confirm_auto(self, suggestion_id: int) -> None:
+        """Confirm an automatic tag; from now on it is a reference sample."""
+        row = self._require_suggestion(suggestion_id)
+        if row.status != OBJECT_MATCH_AUTO:
+            raise ValueError(f"Object match suggestion {suggestion_id} is not automatic")
+        row.status = OBJECT_MATCH_ACCEPTED
+        row.reviewed_at = datetime.utcnow()
+        self.session.flush()
+
+    def revert_auto(self, suggestion_id: int) -> None:
+        """Undo an automatic tag: delete its marking and remember the "no".
+
+        The suggestion ends up rejected, so the same pairing is never proposed
+        or tagged again.
+        """
+        row = self._require_suggestion(suggestion_id)
+        if row.status != OBJECT_MATCH_AUTO:
+            raise ValueError(f"Object match suggestion {suggestion_id} is not automatic")
+        occurrence_id = row.created_occurrence_id
+        if occurrence_id is not None:
+            self.features.invalidate_patch(occurrence_id)
+            try:
+                self.objects.remove_occurrence(occurrence_id)
+            except ValueError:
+                log.debug("Auto-tag occurrence %s already gone", occurrence_id)
+        row.created_occurrence_id = None
+        row.status = OBJECT_MATCH_REJECTED
+        row.reviewed_at = datetime.utcnow()
+        self.session.flush()
+
+    def confirm_all_auto(self, object_id: Optional[int] = None) -> int:
+        """Confirm every outstanding automatic tag (of one object)."""
+        rows = self._list_by_status(OBJECT_MATCH_AUTO, object_id, None)
+        for info in rows:
+            self.confirm_auto(info.suggestion_id)
+        return len(rows)
 
     def accept_above(self, score: float, object_id: Optional[int] = None) -> int:
         """Accept every pending suggestion scoring at or above *score*."""
@@ -598,6 +660,29 @@ class ObjectMatchingService:
         return len(rows)
 
     # -- internals -------------------------------------------------------
+
+    def _create_occurrence(self, row: ObjectMatchSuggestion) -> ObjectOccurrence:
+        """Create the object marking a suggestion describes."""
+        occurrence = self.objects.add_occurrence_bbox(
+            object_id=row.object_id,
+            image_id=row.image_id,
+            x=row.bbox_x,
+            y=row.bbox_y,
+            w=row.bbox_w,
+            h=row.bbox_h,
+        )
+        occurrence.detection_source = "ai"
+        occurrence.confidence = float(row.score)
+        row.created_occurrence_id = occurrence.id
+        return occurrence
+
+    def _apply_auto(self, row: ObjectMatchSuggestion) -> ObjectOccurrence:
+        """Tag a high-scoring hit without review, keeping it revertible."""
+        self.session.flush()
+        occurrence = self._create_occurrence(row)
+        row.status = OBJECT_MATCH_AUTO
+        self.session.flush()
+        return occurrence
 
     def _require_suggestion(self, suggestion_id: int) -> ObjectMatchSuggestion:
         row = self.session.get(ObjectMatchSuggestion, suggestion_id)

@@ -4064,6 +4064,32 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "object_match_auto_after_tag": {
         "en": "Search automatically after tagging a new object frame",
         "hu": "Új objektum-keret bejelölése után automatikusan keressen"},
+    "object_match_auto_accept": {
+        "en": "Tag automatically above {score}% match",
+        "hu": "{score}% egyezés fölött automatikus jelölés"},
+    "object_match_auto_accept_tip": {
+        "en": "Very confident hits are tagged without asking. They stay listed "
+              "in the review window, where you can confirm or undo them.",
+        "hu": "A nagyon biztos találatokat kérdés nélkül megjelöli. Az áttekintő "
+              "ablakban továbbra is látszanak, ott jóváhagyhatod vagy visszavonhatod."},
+    "object_match_search_new_images": {
+        "en": "Search tagged objects on new images after a scan",
+        "hu": "Beolvasás után keresse a jelölt objektumokat az új képeken"},
+    "object_match_search_new_images_tip": {
+        "en": "Runs in the background after each scan, only on the images the "
+              "scan found new or changed.",
+        "hu": "Minden beolvasás után a háttérben fut, csak az újonnan talált "
+              "vagy módosult képeken."},
+    "object_match_disabled_tip": {
+        "en": "Object matching is switched off (object_matching.enabled in config.yaml).",
+        "hu": "Az objektum-felismerés ki van kapcsolva (object_matching.enabled a config.yaml-ban)."},
+    "object_match_auto_done": {
+        "en": "Objects on the new images: {auto} tagged automatically, "
+              "{pending} hit(s) waiting for review.",
+        "hu": "Objektumok az új képeken: {auto} automatikusan megjelölve, "
+              "{pending} találat vár áttekintésre."},
+    "object_match_review_question": {"en": "Review them now?",
+                             "hu": "Átnézed most őket?"},
     "object_match_running":  {"en": "Searching for object …", "hu": "Objektum keresése …"},
     "object_match_no_reference": {
         "en": "This object has no frame yet. Draw a rectangle around it on an "
@@ -4087,6 +4113,14 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "object_match_accept":   {"en": "✔ Accept",              "hu": "✔ Elfogadás"},
     "object_match_reject":   {"en": "✘ Reject",              "hu": "✘ Elutasítás"},
     "object_match_accept_above": {"en": "Accept all above",  "hu": "Összes elfogadása efölött"},
+    "object_match_auto_section": {"en": "Tagged automatically",
+                             "hu": "Automatikusan megjelölve"},
+    "object_match_pending_section": {"en": "Waiting for review",
+                             "hu": "Áttekintésre vár"},
+    "object_match_auto_confirm": {"en": "✔ OK",              "hu": "✔ Rendben"},
+    "object_match_auto_revert": {"en": "↶ Undo",             "hu": "↶ Visszavonás"},
+    "object_match_auto_confirm_all": {"en": "✔ Confirm all automatic tags",
+                             "hu": "✔ Minden automatikus jelölés jóváhagyása"},
     "object_match_score":    {"en": "Match",                 "hu": "Egyezés"},
     "object_match_size":     {"en": "Size",                  "hu": "Méret"},
     "object_match_empty":    {"en": "Nothing left to review.",

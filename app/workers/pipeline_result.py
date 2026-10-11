@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 
 @dataclass
@@ -18,3 +19,6 @@ class PipelineResult:
     summary: str
     n_suggestions: int = 0
     n_auto_assignments: int = 0
+    # Images the scan found new or changed; the UI searches tagged objects on
+    # them afterwards (#164).  Empty for modes that do not scan.
+    new_image_ids: List[int] = field(default_factory=list)

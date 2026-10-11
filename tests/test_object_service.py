@@ -9,10 +9,15 @@ import pytest
 
 from app.db.database import init_db, session_scope
 from app.db.models import (
+    OBJECT_MATCH_ACCEPTED,
+    OBJECT_MATCH_PENDING,
+    OBJECT_MATCH_REJECTED,
     OBJECT_ROLE_DRIVER,
     OBJECT_ROLE_OWNER,
     Image,
+    ObjectMatchSuggestion,
     ObjectOccurrence,
+    ObjectPatchFeatures,
     Person,
     TaggedObject,
 )
@@ -335,6 +340,51 @@ def test_merge_dedups_duplicate_occurrence(db):
         svc.add_occurrence(source.id, img.id, 5, 5)  # same point -> dup on merge
         svc.merge_objects([source.id], target.id)
         assert s.query(ObjectOccurrence).count() == 1
+
+
+def _suggestion(s, object_id, image_id, status, x=10, y=10):
+    row = ObjectMatchSuggestion(
+        object_id=object_id, image_id=image_id,
+        bbox_x=x, bbox_y=y, bbox_w=50, bbox_h=40,
+        score=0.5, status=status, run_id="r",
+    )
+    s.add(row)
+    s.flush()
+    return row
+
+
+def test_merge_keeps_object_matching_history(db):
+    """Rejections of a merged-away object must survive (#164)."""
+    with session_scope() as s:
+        svc = ObjectService(s)
+        target = svc.create_object("Asztal")
+        source = svc.create_object("Szemesi asztal")
+        img1 = _make_image(s, "/1.jpg")
+        img2 = _make_image(s, "/2.jpg")
+        img3 = _make_image(s, "/3.jpg")
+        moved_occ = svc.add_occurrence_bbox(source.id, img1.id, 5, 5, 60, 40)
+        s.add(ObjectPatchFeatures(
+            occurrence_id=moved_occ.id, object_id=source.id, n_features=0
+        ))
+        rejected = _suggestion(s, source.id, img2.id, OBJECT_MATCH_REJECTED)
+        # The target already decided img3, so the source's pending hit is moot.
+        _suggestion(s, target.id, img3.id, OBJECT_MATCH_REJECTED)
+        moot = _suggestion(s, source.id, img3.id, OBJECT_MATCH_PENDING, x=99)
+        # Same key as a target row: dropped, the target's verdict wins.
+        _suggestion(s, target.id, img2.id, OBJECT_MATCH_PENDING, x=300)
+        dup = _suggestion(s, source.id, img2.id, OBJECT_MATCH_ACCEPTED, x=300)
+        rejected_id, moot_id, dup_id = rejected.id, moot.id, dup.id
+
+        svc.merge_objects([source.id], target.id)
+        s.expire_all()
+
+        assert s.get(ObjectMatchSuggestion, rejected_id).object_id == target.id
+        assert s.get(ObjectMatchSuggestion, moot_id) is None
+        assert s.get(ObjectMatchSuggestion, dup_id) is None
+        assert s.get(ObjectPatchFeatures, moved_occ.id).object_id == target.id
+        assert s.query(ObjectMatchSuggestion).filter_by(
+            object_id=target.id
+        ).count() == 3
 
 
 def test_merge_self_is_noop(db):

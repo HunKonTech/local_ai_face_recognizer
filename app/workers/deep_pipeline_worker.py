@@ -434,6 +434,7 @@ class DeepPipelineWorker(QThread):
             True, summary,
             n_suggestions=n_suggestions,
             n_auto_assignments=rec.n_assigned,
+            new_image_ids=[int(i) for i in new_ids],
         )
 
     # ------------------------------------------------------------------
