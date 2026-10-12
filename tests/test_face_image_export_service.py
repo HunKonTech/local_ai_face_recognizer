@@ -191,6 +191,7 @@ def test_unknown_faces_can_be_excluded(tmp_path):
             _image_ids(session), options
         )
     assert result.written == 1
+    assert result.skipped == 1  # the filtered unknown face is reported
 
 
 def test_only_face_ids_restricts_the_export_to_one_face(tmp_path):
@@ -204,6 +205,7 @@ def test_only_face_ids_restricts_the_export_to_one_face(tmp_path):
             image_ids, options
         )
     assert result.written == 1
+    assert result.skipped == 0  # faces not asked for are not "skipped"
     assert Path(result.files[0]).name == f"{face_id}.jpg"
 
 
@@ -218,6 +220,7 @@ def test_excluded_and_low_quality_faces_are_skipped(tmp_path):
             _image_ids(session), options
         )
     assert result.written == 1
+    assert result.skipped == 1
 
 
 def test_each_image_is_decoded_only_once(tmp_path, monkeypatch):

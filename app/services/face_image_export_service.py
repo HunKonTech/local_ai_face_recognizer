@@ -163,12 +163,15 @@ class FaceImageExportService:
         dest = Path(options.target_dir)
         dest.mkdir(parents=True, exist_ok=True)
 
-        faces = self._load_faces(
+        faces, filtered_out = self._load_faces_counted(
             image_ids,
             include_unknown=options.include_unknown,
             skip_excluded=options.skip_excluded,
             only_face_ids=options.only_face_ids,
         )
+        # Faces dropped by the unknown / excluded filters are still marked on
+        # the photo, so the summary must report them as skipped.
+        result.skipped += filtered_out
         if not faces:
             return result
 
@@ -230,9 +233,26 @@ class FaceImageExportService:
         only_face_ids: Optional[Sequence[int]] = None,
     ) -> List[Face]:
         """Faces of *image_ids* in (image_id, bbox_x) order, eager-loaded."""
+        return self._load_faces_counted(
+            image_ids,
+            include_unknown=include_unknown,
+            skip_excluded=skip_excluded,
+            only_face_ids=only_face_ids,
+        )[0]
+
+    def _load_faces_counted(
+        self,
+        image_ids: Sequence[int],
+        *,
+        include_unknown: bool,
+        skip_excluded: bool,
+        only_face_ids: Optional[Sequence[int]] = None,
+    ) -> Tuple[List[Face], int]:
+        """Like :meth:`_load_faces`, plus how many requested faces the
+        unknown / excluded filters dropped."""
         ids = [int(i) for i in dict.fromkeys(image_ids)]
         if not ids:
-            return []
+            return [], 0
         faces: List[Face] = []
         for chunk in in_chunks(ids):
             query = (
@@ -245,6 +265,7 @@ class FaceImageExportService:
         if only_face_ids:
             wanted = {int(f) for f in only_face_ids}
             faces = [f for f in faces if f.id in wanted]
+        requested = len(faces)
 
         if skip_excluded:
             faces = [
@@ -258,7 +279,7 @@ class FaceImageExportService:
 
         # Stable, human-meaningful order: by image, then left-to-right.
         faces.sort(key=lambda f: (f.image_id, f.bbox_x or 0, f.id))
-        return faces
+        return faces, requested - len(faces)
 
     @staticmethod
     def _with_indices(faces: Sequence[Face]) -> List[Tuple[Face, int]]:
