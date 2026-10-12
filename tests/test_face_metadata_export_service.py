@@ -346,6 +346,32 @@ def test_missing_file_on_disk_returns_failed(db):
     assert result.write_mode == meta.WRITE_MODE_FAILED
 
 
+def test_stale_external_relative_path_falls_back_to_file_path(db, monkeypatch):
+    """#111 — a .facepack ``_external/…`` relative path re-rooted at the
+    original picture folder must not send the write to a doubled path."""
+    import app.services.image_library_service as lib
+
+    monkeypatch.setattr(lib, "_service", None)
+    root = db / "pictures"
+    real_dir = root / "album"
+    real_dir.mkdir(parents=True)
+    jpg = real_dir / "photo.jpg"
+    _write_jpeg(jpg)
+    lib.init_image_library(db / "test_face_meta.db").set_library_root(root)
+
+    with session_scope() as session:
+        alice = _make_person(session, "Alice")
+        img = _make_image(
+            session, jpg, relative_path="_external/pictures/album/photo.jpg"
+        )
+        _make_face(session, img, alice)
+        result = FaceMetadataExportService(session).export_image(img.id)
+
+    assert result.success, result.error_message
+    assert Path(result.image_path) == jpg
+    assert meta.read_face_metadata(jpg) is not None
+
+
 # ---------------------------------------------------------------------------
 # Batch summary + do-not-overwrite
 # ---------------------------------------------------------------------------

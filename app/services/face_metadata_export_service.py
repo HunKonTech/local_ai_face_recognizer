@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Face, Image, Person
 from app.jobs.cancellation import CancellationToken
-from app.services.image_library_service import resolve_image_path
+from app.services.image_library_service import resolve_existing_image_path
 from app.utils import image_metadata as meta
 
 log = logging.getLogger(__name__)
@@ -230,7 +230,7 @@ class FaceMetadataExportService:
             image = self._session.get(Image, image_id)
             current_name = None
             if image is not None:
-                abs_path = resolve_image_path(image)
+                abs_path = resolve_existing_image_path(image)
                 current_name = (
                     Path(abs_path).name if abs_path
                     else (Path(image.file_path).name if image.file_path else None)
@@ -312,7 +312,7 @@ class FaceMetadataExportService:
         image: Image,
         options: FaceMetadataExportOptions,
     ) -> FaceMetadataExportResult:
-        abs_path = resolve_image_path(image)
+        abs_path = resolve_existing_image_path(image)
         path_str = str(abs_path) if abs_path else (image.file_path or None)
 
         payload = self.build_payload(image, options)
@@ -377,7 +377,7 @@ class FaceMetadataExportService:
         try:
             from app.utils.image_utils import get_exif_orientation
 
-            abs_path = resolve_image_path(image)
+            abs_path = resolve_existing_image_path(image)
             if abs_path is not None and Path(abs_path).exists():
                 return int(get_exif_orientation(str(abs_path)))
         except Exception:  # noqa: BLE001

@@ -356,7 +356,7 @@ class ImageLoadingMixin:
             return
 
         from app.services.face_metadata_export_service import FaceMetadataExportService
-        from app.services.image_library_service import resolve_image_path
+        from app.services.image_library_service import resolve_existing_image_path
         from app.utils.exif import parse_flexible_date, write_exif_date, write_exif_gps
 
         gps_written = 0
@@ -370,7 +370,7 @@ class ImageLoadingMixin:
                 img = session.get(Image, image_id)
                 if img is None:
                     continue
-                abs_path = resolve_image_path(img)
+                abs_path = resolve_existing_image_path(img)
                 if abs_path is None or not Path(abs_path).exists():
                     continue
                 path_str = str(abs_path)
