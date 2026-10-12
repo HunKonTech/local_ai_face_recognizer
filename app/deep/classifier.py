@@ -235,6 +235,28 @@ def _sub_centers(rows: np.ndarray, faces_per_center: int, max_centers: int) -> n
     return (center / norms).astype(np.float32)
 
 
+def _rebuild_ndarray(dtype: str, shape: Tuple[int, ...], data: bytes) -> np.ndarray:
+    return np.frombuffer(data, dtype=np.dtype(dtype)).reshape(shape).copy()
+
+
+class _NumpyFreePickler(pickle.Pickler):
+    """Pickler that never references numpy's internal modules (#197).
+
+    numpy scalars/arrays normally pickle via ``numpy._core.multiarray`` (2.x)
+    or ``numpy.core.multiarray`` (1.x); pickle re-imports that module by name
+    and fails on broken/mixed installs. Scalars become plain Python values and
+    plain arrays are rebuilt from raw bytes, which also keeps the model file
+    loadable across numpy 1.x ↔ 2.x.
+    """
+
+    def reducer_override(self, obj):
+        if isinstance(obj, (np.number, np.bool_)):
+            return type(obj.item()), (obj.item(),)
+        if type(obj) is np.ndarray and not obj.dtype.hasobject and obj.dtype.fields is None:
+            return _rebuild_ndarray, (obj.dtype.str, obj.shape, np.ascontiguousarray(obj).tobytes())
+        return NotImplemented
+
+
 @dataclass
 class _TrainedState:
     """Everything predict() needs, picklable as one unit."""
@@ -843,8 +865,15 @@ class DeepFaceClassifier:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"version": _MODEL_FILE_VERSION, "state": self._state}
-        with open(path, "wb") as fh:
-            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        # Write to a temp file first: a failed dump must not wipe the old model.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "wb") as fh:
+                _NumpyFreePickler(fh, protocol=pickle.HIGHEST_PROTOCOL).dump(payload)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         log.info("Deep model saved: %s", path)
 
     def load(self, path: Path | str) -> bool:

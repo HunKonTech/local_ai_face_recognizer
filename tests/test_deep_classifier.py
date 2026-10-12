@@ -204,6 +204,53 @@ class TestPersistence:
         assert loaded.fingerprint == trained.fingerprint
         assert loaded.predict(_person_vec(20, seed=5)).person_id == 2
 
+    def test_saved_file_has_no_numpy_internal_refs(self, trained, tmp_path):
+        """#197: pickle must not depend on importing numpy(._)core.multiarray."""
+        path = tmp_path / "model.pkl"
+        trained.save(path)
+        data = path.read_bytes()
+        assert b"multiarray" not in data
+        assert b"numpy._core" not in data and b"numpy.core" not in data
+
+        loaded = DeepFaceClassifier(StubConfig())
+        assert loaded.load(path)
+        np.testing.assert_array_equal(loaded._state.train_matrix, trained._state.train_matrix)
+        assert loaded._state.train_matrix.dtype == trained._state.train_matrix.dtype
+
+    def test_numpy_values_roundtrip(self):
+        import io
+        import pickle
+
+        from app.deep.classifier import _NumpyFreePickler
+
+        obj = {
+            "f": np.float64(1.5), "i": np.int64(7), "b": np.bool_(True),
+            "m": np.arange(6, dtype=np.float32).reshape(2, 3).T,
+            "e": np.zeros((0, 4), np.int64),
+        }
+        buf = io.BytesIO()
+        _NumpyFreePickler(buf, protocol=pickle.HIGHEST_PROTOCOL).dump(obj)
+        out = pickle.loads(buf.getvalue())
+        assert out["f"] == 1.5 and out["i"] == 7 and out["b"] is True
+        np.testing.assert_array_equal(out["m"], obj["m"])
+        assert out["m"].dtype == np.float32 and out["e"].shape == (0, 4)
+
+    def test_failed_save_keeps_previous_model(self, trained, tmp_path, monkeypatch):
+        import app.deep.classifier as mod
+
+        path = tmp_path / "model.pkl"
+        path.write_bytes(b"old model")
+
+        def boom(self, obj):
+            raise pickle.PicklingError("boom")
+
+        import pickle
+        monkeypatch.setattr(mod._NumpyFreePickler, "dump", boom)
+        with pytest.raises(pickle.PicklingError):
+            trained.save(path)
+        assert path.read_bytes() == b"old model"
+        assert list(tmp_path.iterdir()) == [path]
+
     def test_load_missing_file_returns_false(self, tmp_path):
         clf = DeepFaceClassifier(StubConfig())
         assert not clf.load(tmp_path / "nope.pkl")
