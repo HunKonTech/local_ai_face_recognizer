@@ -97,6 +97,7 @@ STRINGS: Dict[str, Dict[str, str]] = {
                                        "fekete-fehér változat látszik."},
     "ibp_deol_left":            {"en": "Left:",                "hu": "Bal:"},
     "ibp_deol_right":           {"en": "Right:",               "hu": "Jobb:"},
+    "ibp_deol_variant":         {"en": "Variant:",             "hu": "Változat:"},
     "ibp_deol_bw_label":        {"en": "Black & white",        "hu": "Fekete-fehér"},
     "ibp_deol_variant_missing": {"en": "Colorized version file is missing; showing black & white.",
                                  "hu": "A színezett változat fájlja hiányzik; a fekete-fehér nézet látható."},

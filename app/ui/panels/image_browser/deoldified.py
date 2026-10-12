@@ -135,13 +135,35 @@ class DeoldifiedMixin:
         self._deol_update_combo_visibility()
 
     def _deol_update_combo_visibility(self) -> None:
-        """Show the left/right pickers only in compare mode with 3+ members."""
-        show = self._deol_compare and len(self._deol_group) >= 3
-        for w in (
-            self._deol_left_lbl, self._deol_left_combo,
-            self._deol_right_lbl, self._deol_right_combo,
-        ):
-            w.setVisible(show)
+        """Show the pickers where a choice exists.
+
+        Compare mode with 3+ members shows both left/right pickers.  The single
+        colorized view shows the right picker alone (as a variant picker) when
+        there are 2+ colorized variants to choose from.
+        """
+        group = self._deol_group
+        show_compare = self._deol_compare and len(group) >= 3
+        n_color = sum(1 for m in group if not m.is_bw)
+        show_variant = (
+            not self._deol_compare and self._deol_viewing_color and n_color >= 2
+        )
+        self._deol_left_lbl.setVisible(show_compare)
+        self._deol_left_combo.setVisible(show_compare)
+        self._deol_right_lbl.setText(
+            t("ibp_deol_variant") if show_variant else t("ibp_deol_right")
+        )
+        self._deol_right_lbl.setVisible(show_compare or show_variant)
+        self._deol_right_combo.setVisible(show_compare or show_variant)
+        if show_variant:
+            # The right side may be B&W after a compare session; display the
+            # colorized variant that is actually on screen.
+            for i, m in enumerate(group):
+                if not m.is_bw and m.file_path == self._deol_pair_color_path:
+                    if self._deol_right_combo.currentIndex() != i:
+                        self._deol_right_combo.blockSignals(True)
+                        self._deol_right_combo.setCurrentIndex(i)
+                        self._deol_right_combo.blockSignals(False)
+                    break
 
     def _on_deol_left_changed(self, idx: int) -> None:
         """Left picker changed → reload both cached sides and recompose."""
@@ -163,7 +185,13 @@ class DeoldifiedMixin:
         if not member.is_bw:
             self._deol_pair_color_path = member.file_path
         self._update_deol_sync_partner(self._current_image_id)
-        self._deol_recompose_compare()
+        if self._deol_compare:
+            self._deol_recompose_compare()
+        elif self._deol_viewing_color:
+            # Variant picker in the single colorized view; picking the B&W
+            # entry simply switches to the B&W view.
+            self._deol_mode = "bw" if member.is_bw else "color"
+            self._apply_single_view(not member.is_bw, reset_zoom=False)
 
     def _deol_recompose_compare(self) -> None:
         """Re-render the compare composite after a picker change."""
@@ -221,8 +249,8 @@ class DeoldifiedMixin:
         self._deol_compare = False
         self._image_label.set_compare_mode(False)
         self._btn_view_compare.setChecked(False)
-        self._deol_update_combo_visibility()
         self._deol_viewing_color = show_colorized
+        self._deol_update_combo_visibility()
         self._btn_view_bw.setChecked(not show_colorized)
         self._btn_view_color.setChecked(show_colorized)
         self._orig_img_bgr = img_bgr

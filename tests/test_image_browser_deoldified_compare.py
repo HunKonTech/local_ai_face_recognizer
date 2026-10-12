@@ -128,6 +128,49 @@ def test_combos_visible_only_in_compare_with_three_members(db, qtbot, tmp_path):
     assert panel._deol_left_combo.isVisibleTo(bar) is False
 
 
+def test_variant_picker_in_single_colorized_view(db, qtbot, tmp_path):
+    """#182: the colorized view offers the variants, not only compare mode."""
+    bw_path = tmp_path / "bw.jpg"
+    artistic = tmp_path / "art.jpg"
+    stable = tmp_path / "stable.jpg"
+    save_image_bgr(bw_path, np.zeros((10, 20, 3), dtype=np.uint8))
+    save_image_bgr(artistic, np.full((10, 20, 3), 128, dtype=np.uint8))
+    save_image_bgr(stable, np.full((10, 20, 3), 255, dtype=np.uint8))
+
+    panel = ImageBrowserPanel(config=None)
+    qtbot.addWidget(panel)
+    panel._deol_group = [
+        ComparisonMember(1, str(bw_path), "", True),
+        ComparisonMember(2, str(artistic), "(artistic)", False),
+        ComparisonMember(3, str(stable), "(stable)", False),
+    ]
+    panel._deol_bw_path = str(bw_path)
+    panel._deol_pair_color_path = str(artistic)
+    panel._deol_left_idx, panel._deol_right_idx = 0, 1
+    panel._populate_deol_combos()
+    bar = panel._deoldified_bar
+
+    panel._apply_single_view(True, reset_zoom=False)
+    assert panel._deol_right_combo.isVisibleTo(bar) is True
+    assert panel._deol_left_combo.isVisibleTo(bar) is False
+    assert (panel._orig_img_bgr == 128).all()
+
+    # Picking another variant swaps the displayed colorized image.
+    panel._deol_right_combo.setCurrentIndex(2)
+    assert panel._deol_viewing_color is True
+    assert (panel._orig_img_bgr == 255).all()
+
+    # B&W view hides the picker.
+    panel._apply_single_view(False, reset_zoom=False)
+    assert panel._deol_right_combo.isVisibleTo(bar) is False
+
+    # A single colorized variant needs no picker.
+    panel._deol_group = panel._deol_group[:2]
+    panel._deol_pair_color_path = str(artistic)
+    panel._apply_single_view(True, reset_zoom=False)
+    assert panel._deol_right_combo.isVisibleTo(bar) is False
+
+
 def test_clear_for_new_image_keeps_remembered_mode_and_split(db, qtbot):
     """Switching images drops cached pixels but remembers the chosen mode."""
     panel = ImageBrowserPanel(config=None)
