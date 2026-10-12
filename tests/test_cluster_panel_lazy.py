@@ -47,3 +47,30 @@ def test_widgets_without_loader_are_skipped(panel):
     panel._ordered_thumbs = [_Loader(), object(), _Loader()]
     panel._load_visible_thumbs()        # should not raise
     assert panel._ordered_thumbs[0].loaded is True
+
+
+def _fake_face(i, person):
+    from types import SimpleNamespace as NS
+
+    return NS(
+        id=i, crop_path=None, is_low_quality=False, auto_merge_review_status=None,
+        is_uncertain_identification=False, person=person, person_id=1,
+        identification_note=None, confidence=0.9, detector_backend="x",
+        image=NS(file_path=f"/x/{i}.jpg", id=i), quality_score=0.5,
+        bbox_x=0, bbox_y=0, bbox_w=10, bbox_h=10,
+    )
+
+
+def test_reflow_keeps_grid_and_tiles_visible(panel, qtbot):
+    """#186: reflow runs with the container hidden — it must come back shown."""
+    from types import SimpleNamespace as NS
+
+    person = NS(name="P")
+    panel.show_person("P", [_fake_face(i, person) for i in range(300)])
+    assert panel._grid_widget.isVisible()
+    assert all(not w.isHidden() for w in panel._ordered_thumbs)
+
+    panel.resize(900, 300)        # different column count → reflow
+    qtbot.wait(10)
+    assert panel._grid_widget.isVisible()
+    assert all(not w.isHidden() for w in panel._ordered_thumbs)

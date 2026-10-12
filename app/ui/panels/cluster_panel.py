@@ -888,15 +888,27 @@ class ClusterPanel(QWidget):
     def _reflow(self, cols: int) -> None:
         """Arrange the existing thumbnails into *cols* columns."""
         self._cur_cols = cols
-        # Detach without deleting — the thumbnails are reused.
-        for thumb in self._ordered_thumbs:
-            self._grid.removeWidget(thumb)
-        for i, thumb in enumerate(self._ordered_thumbs):
-            row, col = divmod(i, cols)
-            self._grid.addWidget(thumb, row, col)
-            # setParent(None) (used to hide stale tiles) also hides the widget;
-            # ensure anything we re-add to the grid is visible again.
-            thumb.show()
+        # Re-lay out while the container is hidden: show()-ing a child of a
+        # visible container re-activates the grid layout every time, which made
+        # this O(n²) — thousands of faces took many seconds (#186).
+        container = self._grid_widget
+        was_visible = container.isVisible()
+        if was_visible:
+            container.hide()
+        try:
+            # Detach without deleting — the thumbnails are reused.
+            for thumb in self._ordered_thumbs:
+                self._grid.removeWidget(thumb)
+            for i, thumb in enumerate(self._ordered_thumbs):
+                row, col = divmod(i, cols)
+                self._grid.addWidget(thumb, row, col)
+                # setParent(None) (used to hide stale tiles) also hides the
+                # widget; ensure anything we re-add to the grid is visible again.
+                if thumb.isHidden():
+                    thumb.show()
+        finally:
+            if was_visible:
+                container.show()
         # Decode the crops that are (or are about to be) on screen.
         self._load_visible_thumbs()
 
