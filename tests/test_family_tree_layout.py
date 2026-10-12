@@ -108,3 +108,28 @@ def test_married_in_spouse_parents_sit_directly_above():
     gen = assign_generations({1, 2, 3, 4, 5}, parents, spouses)
     assert gen[3] == gen[5] == 2
     assert gen[4] == 1  # not left floating in the top band
+
+
+def test_married_in_spouse_parents_take_siblings_along():
+    """#194: a married-in spouse's sibling must not hold their parents up."""
+    #   1                 great-grandparent
+    #   2                 grandparent
+    #   3                 parent
+    #   4 == 7            couple; 7's parents 5 == 6, 7's sibling 8
+    parents = {2: {1}, 3: {2}, 4: {3}, 7: {5, 6}, 8: {5, 6}}
+    spouses = {4: {7}, 7: {4}, 5: {6}, 6: {5}}
+    gen = assign_generations(set(range(1, 9)), parents, spouses)
+    assert gen[4] == gen[7] == gen[8] == 3
+    assert gen[5] == gen[6] == 2
+    assert gen[1] == 0
+
+
+def test_married_in_spouse_parents_drag_sibling_family_down():
+    """The sibling's own children move down with the sibling."""
+    parents = {3: {9}, 4: {3}, 5: {4}, 6: {1, 2}, 7: {1, 2}, 8: {7}}
+    spouses = {1: {2}, 2: {1}, 5: {6}, 6: {5}}
+    #   9 -> 3 -> 4 -> 5 == 6 ; 6 and 7 are children of 1 == 2 ; 8 is 7's child
+    gen = assign_generations({1, 2, 3, 4, 5, 6, 7, 8, 9}, parents, spouses)
+    assert gen[5] == gen[6] == gen[7] == 3
+    assert gen[1] == gen[2] == 2
+    assert gen[8] == 4

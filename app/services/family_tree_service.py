@@ -188,16 +188,44 @@ def assign_generations(
                     stack.append(spouse)
         clusters.append(comp)
 
-    for _ in range(limit):
+    cluster_of = {m: i for i, comp in enumerate(clusters) for m in comp}
+    kid_clusters: dict[int, set[int]] = defaultdict(set)
+    for i, comp in enumerate(clusters):
+        for m in comp:
+            for c in children.get(m, ()):
+                kid_clusters[i].add(cluster_of[c])
+
+    def _sink(start: int) -> Optional[set[int]]:
+        """Clusters that must move when ``start`` drops one band, if it pays off.
+
+        A child cluster only one band below a moving cluster is dragged along
+        (so a married-in spouse's parents take their other children — the
+        spouse's siblings — with them). The move is accepted when it shortens
+        more parent→child lines than it stretches.
+        """
+        moved, stack = {start}, [start]
+        while stack:
+            cur = stack.pop()
+            for k in kid_clusters.get(cur, ()):
+                if k not in moved and gen[clusters[k][0]] <= gen[clusters[cur][0]] + 1:
+                    moved.add(k)
+                    stack.append(k)
+        delta = 0
+        for i in moved:
+            for m in clusters[i]:
+                delta += sum(1 for p in parents.get(m, ()) if p in gen and cluster_of[p] not in moved)
+                delta -= sum(1 for c in children.get(m, ()) if cluster_of[c] not in moved)
+        return moved if delta < 0 else None
+
+    # Each accepted move strictly shortens the total line length, so it ends.
+    for _ in range(limit * limit):
         changed = False
-        for comp in clusters:
-            kid_gens = [gen[c] for m in comp for c in children.get(m, ())]
-            if not kid_gens:
-                continue
-            target = min(kid_gens) - 1
-            if any(gen[m] < target for m in comp):
-                for m in comp:
-                    gen[m] = max(gen[m], target)
+        for i in range(len(clusters)):
+            moved = _sink(i)
+            if moved:
+                for k in moved:
+                    for m in clusters[k]:
+                        gen[m] += 1
                 changed = True
         if not changed:
             break
