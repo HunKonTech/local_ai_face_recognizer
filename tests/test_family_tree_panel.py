@@ -370,6 +370,59 @@ def test_panel_focus_shows_lineage_only(db, qtbot):
     assert panel._relation_row.isVisible() or panel._relation_lbl is not None
 
 
+@pytest.mark.parametrize("start_focus", [None, "C1"])
+def test_panel_context_menu_focuses_person(db, qtbot, monkeypatch, start_focus):
+    """Right-click → "Focus on this person" works from whole-tree and focus view."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QContextMenuEvent
+
+    import app.ui.panels.family_tree_panel as ftp
+    from app.ui.i18n import t
+
+    class _FakeAction:
+        def __init__(self, text):
+            self.text, self.enabled = text, True
+
+        def setEnabled(self, on):
+            self.enabled = on
+
+    class _FakeMenu:
+        """Stands in for QMenu: "clicks" the focus action instead of blocking."""
+
+        def __init__(self, *_a):
+            self.acts = []
+
+        def addAction(self, text):
+            self.acts.append(_FakeAction(text))
+            return self.acts[-1]
+
+        def exec(self, *_a):
+            act = next(a for a in self.acts if a.text == t("ft_ctx_focus"))
+            assert act.enabled
+            return act
+
+    with session_scope() as session:
+        ids = _seed(session)  # GpA - P1 - C1, C2
+
+    panel = FamilyTreePanel()
+    qtbot.addWidget(panel)
+    if start_focus is not None:
+        panel._focus_on(ids[start_focus])
+
+    monkeypatch.setattr(ftp, "QMenu", _FakeMenu)
+
+    view = panel._tree
+    group = view._node_items[ids["P1"]]
+    scene_pt = group.pos() + QPoint(view.BOX_W // 2, view.BOX_H // 2)
+    view_pt = view.mapFromScene(scene_pt)
+    view.contextMenuEvent(
+        QContextMenuEvent(QContextMenuEvent.Mouse, view_pt, view.mapToGlobal(view_pt))
+    )
+
+    assert panel._root_id == ids["P1"]
+    assert ids["GpA"] in _rendered_ids(panel)
+
+
 def test_panel_selection_populates_detail(db, qtbot):
     with session_scope() as session:
         man = _coded_gendered(session, "Detail Guy", "C8", "male")

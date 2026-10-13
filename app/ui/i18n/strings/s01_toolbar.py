@@ -189,7 +189,8 @@ STRINGS: Dict[str, Dict[str, str]] = {
     # ── Family tree panel ──────────────────────────────────────────────────────
     "ft_root":              {"en": "Root:", "hu": "Gyökér:"},
     "ft_choose_root":       {"en": "Focus on person …", "hu": "Személyre fókuszál …"},
-    "ft_no_root":           {"en": "(no root selected)", "hu": "(nincs gyökér kiválasztva)"},
+    "ft_ctx_focus":         {"en": "Focus on this person", "hu": "Személyre fókuszál"},
+    "ft_no_root":        {"en": "(no root selected)", "hu": "(nincs gyökér kiválasztva)"},
     "ft_whole_tree":        {"en": "Whole family tree", "hu": "Teljes családfa"},
     "ft_show_whole":        {"en": "Whole tree", "hu": "Teljes fa"},
     "ft_regenerate":        {"en": "Regenerate from codes", "hu": "Újragenerálás kódból"},

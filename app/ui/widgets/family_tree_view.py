@@ -18,7 +18,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsItemGroup,
@@ -59,6 +59,8 @@ class FamilyTreeView(QGraphicsView):
 
     person_selected = Signal(int)
     person_activated = Signal(int)
+    # Right-click on a person box: (person id, global screen position).
+    person_context_menu = Signal(int, QPoint)
 
     BOX_W = 168
     BOX_H = 86
@@ -737,6 +739,14 @@ class FamilyTreeView(QGraphicsView):
             self.person_activated.emit(pid)
             return
         super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        pid = self._pid_at(event.pos())
+        if pid is not None:
+            self.person_context_menu.emit(pid, event.globalPos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def wheelEvent(self, event) -> None:
         # Wheel zooms toward the cursor; drag (or scrollbars) pans. Shift+wheel

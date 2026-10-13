@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -132,6 +133,7 @@ class FamilyTreePanel(QWidget):
         self._zoom_reset_btn.clicked.connect(self._tree.reset_zoom)
         self._tree.person_selected.connect(self._on_node_selected)
         self._tree.person_activated.connect(self._on_node_activated)
+        self._tree.person_context_menu.connect(self._on_node_context_menu)
         splitter.addWidget(self._tree)
 
         # --- Detail panel ---
@@ -291,13 +293,31 @@ class FamilyTreePanel(QWidget):
         chosen = dialog.selected_person_id()
         if chosen is None:
             return
-        self._root_id = chosen
-        self._selected_id = chosen
+        self._focus_on(chosen)
+
+    def _focus_on(self, person_id: int) -> None:
+        """Switch to focus mode centred on *person_id*."""
+        self._root_id = person_id
+        self._selected_id = person_id
         with session_scope() as session:
             FamilyTreeService(session).update_settings(
-                default_root_person_id=chosen
+                default_root_person_id=person_id
             )
         self.refresh()
+
+    def _on_node_context_menu(self, person_id: int, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        focus_act = menu.addAction(t("ft_ctx_focus"))
+        # Already the focus person → nothing to change.
+        focus_act.setEnabled(person_id != self._root_id)
+        whole_act = None
+        if self._root_id is not None:
+            whole_act = menu.addAction(t("ft_show_whole"))
+        chosen = menu.exec(global_pos)
+        if chosen is focus_act:
+            self._focus_on(int(person_id))
+        elif whole_act is not None and chosen is whole_act:
+            self._on_show_whole_tree()
 
     def _on_show_whole_tree(self) -> None:
         """Clear the focus person and show the entire family forest."""
