@@ -6,6 +6,9 @@ Responsibilities
 * Compute a SHA-256 hash for each file.
 * Insert new records into the ``images`` table.
 * Skip files whose path + hash + mtime haven't changed (resume support).
+* Re-link records whose file was moved and/or renamed: a "new" file whose
+  SHA-256 equals that of a record with no file behind it takes over that
+  record, so faces, names and metadata survive the move.
 * Return a list of :class:`~app.db.models.Image` IDs ready for detection.
 """
 
@@ -20,7 +23,7 @@ from typing import Callable, Generator, List, Optional, Union
 from sqlalchemy.orm import Session
 
 from app.config import ScanConfig
-from app.db.models import Image
+from app.db.models import Image, RemoteImage
 from app.services.image_library_service import ImageLibraryService
 from app.services.place_service import PlaceService
 from app.utils.exif import read_exif_gps
@@ -228,6 +231,10 @@ class ScanService:
             log.debug("Content changed — requeued: %s", path.name)
             return existing.id
         else:
+            relinked = self._relink_moved(path, file_hash, mtime, relative_path)
+            if relinked is not None:
+                return None if relinked.detection_done else relinked.id
+
             # New file.
             image = Image(
                 file_path=str(path),
@@ -240,6 +247,52 @@ class ScanService:
             self._apply_exif_gps(image, path)
             log.debug("Indexed new file: %s (id=%d)", path.name, image.id)
             return image.id
+
+    def _relink_moved(
+        self,
+        path: Path,
+        file_hash: str,
+        mtime: float,
+        relative_path: Optional[str],
+    ) -> Optional[Image]:
+        """Point a record whose file disappeared at *path* when the content matches.
+
+        A file moved to another folder and/or renamed keeps its bytes, so the
+        SHA-256 recorded at index time identifies it.  Only records with no
+        file at their stored location are taken over — when the original is
+        still on disk, *path* is a genuine copy and gets its own record.
+        Drive-sourced records are skipped (their local mirror is optional).
+
+        Returns:
+            The re-linked :class:`Image`, or ``None`` when nothing matched.
+        """
+        candidates = (
+            self._session.query(Image)
+            .outerjoin(RemoteImage, RemoteImage.image_id == Image.id)
+            .filter(Image.file_hash == file_hash, RemoteImage.id.is_(None))
+            .order_by(Image.id)
+            .all()
+        )
+        for image in candidates:
+            if _record_file_exists(image):
+                continue
+            from app.services.image_path_matcher import ImagePathMatcher
+
+            old_path = image.file_path
+            library_root = (
+                self._library_svc.library_root if self._library_svc else None
+            )
+            result = ImagePathMatcher.apply(
+                self._session, {image.id: str(path)}, library_root=library_root
+            )
+            if not result.updated:
+                continue
+            if relative_path is not None:
+                image.relative_path = relative_path
+            image.file_mtime = mtime
+            log.info("Re-linked moved/renamed image %d: %s → %s", image.id, old_path, path)
+            return image
+        return None
 
     def _apply_exif_gps(self, image: Image, path: Path) -> None:
         """Read EXIF GPS and link an anonymous/nearby Place without aborting scan."""
@@ -268,3 +321,27 @@ class ScanService:
                 image.exif_longitude = longitude
         except Exception as exc:  # noqa: BLE001
             log.info("EXIF GPS processing skipped for %s: %s", path, exc)
+
+
+def _record_file_exists(image: Image) -> bool:
+    """True when *image* still has a file at its stored or resolved location.
+
+    Deliberately bypasses the cached existence check: the point is to notice
+    files that vanished during this session.
+    """
+    from app.services.image_library_service import resolve_image_path
+
+    paths = {image.file_path}
+    try:
+        resolved = resolve_image_path(image)
+    except Exception:  # noqa: BLE001
+        resolved = None
+    if resolved is not None:
+        paths.add(str(resolved))
+    for p in paths:
+        try:
+            if p and Path(p).exists():
+                return True
+        except OSError:
+            continue
+    return False

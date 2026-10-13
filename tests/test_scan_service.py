@@ -103,3 +103,39 @@ class TestScanService:
             ids = svc.scan(str(image_folder))
 
         assert len(ids) == 1
+
+
+class TestMovedFiles:
+    """#196 — a moved and renamed file keeps its existing record."""
+
+    def test_moved_and_renamed_file_relinks_record(self, tmp_db, image_folder):
+        target = image_folder / "a.jpg"
+        target.write_bytes(b"\xff\xd8\xff" + b"\x07" * 300)
+        with session_scope() as s:
+            ScanService(s, ScanConfig()).scan(str(image_folder))
+        with session_scope() as s:
+            s.query(Image).update({Image.detection_done: True})
+            original_id = s.query(Image.id).filter(Image.file_path == str(target)).scalar()
+
+        moved = image_folder / "sub" / "deeper" / "renamed.jpg"
+        moved.parent.mkdir(parents=True)
+        target.rename(moved)
+
+        with session_scope() as s:
+            ids = ScanService(s, ScanConfig()).scan(str(image_folder))
+        assert ids == []
+        with session_scope() as s:
+            assert s.query(Image).count() == 5
+            assert s.get(Image, original_id).file_path == str(moved)
+
+    def test_copy_with_original_present_gets_own_record(self, tmp_db, image_folder):
+        with session_scope() as s:
+            ScanService(s, ScanConfig()).scan(str(image_folder))
+        with session_scope() as s:
+            s.query(Image).update({Image.detection_done: True})
+        (image_folder / "copy.jpg").write_bytes((image_folder / "a.jpg").read_bytes())
+        with session_scope() as s:
+            ids = ScanService(s, ScanConfig()).scan(str(image_folder))
+        assert len(ids) == 1
+        with session_scope() as s:
+            assert s.query(Image).count() == 6

@@ -22,6 +22,10 @@ This module handles exactly that case:
    * the SHA-256 content hash recorded at index time — an exact hash match is
      proof, not a guess, and marks the candidate as *confident*.
 
+   Records that found no proof that way (typically renamed files) go through
+   :meth:`ImagePathMatcher.match_by_hash`: the files not yet known to the
+   database are hashed and compared with the recorded SHA-256.
+
 4. :meth:`ImagePathMatcher.apply` writes the accepted choices back, updating both
    ``file_path`` and the portable ``relative_path``.
 
@@ -88,7 +92,8 @@ class Candidate:
 
     path: str
     score: float
-    #: Matching trailing path components, including the file name (≥ 1).
+    #: Matching trailing path components, including the file name (≥ 1;
+    #: 0 for a renamed file found by content hash).
     depth: int
     #: ``True``/``False`` after a content-hash comparison, ``None`` if not checked.
     hash_match: Optional[bool] = None
@@ -403,9 +408,88 @@ class ImagePathMatcher:
         self.build_index(progress_cb=phase(20, 40), checkpoint=checkpoint)
         report.scanned_files = self._scanned_files
         report.proposals = self.match(
-            missing, progress_cb=phase(60, 40), checkpoint=checkpoint
+            missing, progress_cb=phase(60, 20), checkpoint=checkpoint
+        )
+        self.match_by_hash(
+            session, report.proposals,
+            progress_cb=phase(80, 20), checkpoint=checkpoint,
         )
         return report
+
+    def match_by_hash(
+        self,
+        session,
+        proposals: Sequence[MatchProposal],
+        *,
+        progress_cb: Optional[ProgressCb] = None,
+        checkpoint: Optional[Checkpoint] = None,
+    ) -> int:
+        """Find renamed files by content for proposals the name pass did not prove.
+
+        Only indexed files whose path is not already a database record are
+        hashed — a moved *and* renamed file has not been indexed yet, while
+        known files would clash on :meth:`apply` anyway.  Stops as soon as
+        every wanted hash has been found.
+
+        Returns:
+            How many proposals gained a hash-proven candidate.
+        """
+        if not self._verify_hash:
+            return 0
+        wanted: Dict[str, List[MatchProposal]] = {}
+        for prop in proposals:
+            h = prop.missing.file_hash
+            if h and not any(c.is_proof for c in prop.candidates):
+                wanted.setdefault(h, []).append(prop)
+        if not wanted:
+            return 0
+
+        from app.db.models import Image
+
+        known = {
+            (fp or "").lower()
+            for (fp,) in session.query(Image.file_path).all()
+        }
+        files = [
+            path
+            for paths in self._index.values()
+            for path in paths
+            if path.lower() not in known
+        ]
+        found: Dict[str, str] = {}
+        total = len(files)
+        for idx, path in enumerate(files, 1):
+            if checkpoint is not None:
+                checkpoint()
+            digest = self._file_hash(path)
+            if digest in wanted and digest not in found:
+                found[digest] = path
+                if len(found) == len(wanted):
+                    break
+            if progress_cb is not None and idx % 20 == 0:
+                progress_cb(int(idx / total * 100), _basename_any(path))
+
+        gained = 0
+        for digest, path in found.items():
+            # Several records with identical content: only the first can claim
+            # the file, the rest stay unmatched rather than clash on apply.
+            prop = wanted[digest][0]
+            reference = prop.missing.relative_path or prop.missing.file_path
+            _score, depth = _structural_score(reference, path)
+            prop.candidates.insert(
+                0,
+                Candidate(
+                    path=path,
+                    score=_HASH_MATCH_SCORE,
+                    depth=depth,
+                    hash_match=True,
+                ),
+            )
+            gained += 1
+        if progress_cb is not None:
+            progress_cb(100, "")
+        log.info("Path matcher: %d renamed file(s) found by content hash", gained)
+        return gained
 
     # ------------------------------------------------------------------
     # Step 4 — write the accepted matches back

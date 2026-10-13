@@ -195,3 +195,22 @@ def test_apply_refuses_to_point_two_records_at_one_file(library):
     assert result.updated == 1
     assert result.skipped == 1
     assert result.errors
+
+
+# ---------------------------------------------------------------------------
+# match_by_hash — moved *and* renamed (#196)
+# ---------------------------------------------------------------------------
+
+def test_renamed_file_is_found_by_content_hash(library):
+    renamed = library["root"] / "elsewhere" / "IMG_0278-2.jpg"
+    renamed.parent.mkdir(parents=True)
+    library["actual"].rename(renamed)
+    _write_image(library["root"] / "other.jpg", 200)  # unrelated noise
+
+    matcher = ImagePathMatcher([library["root"]])
+    with session_scope() as session:
+        report = matcher.run(session)
+
+    (proposal,) = report.proposals
+    assert proposal.is_confident
+    assert Path(proposal.best.path) == renamed
