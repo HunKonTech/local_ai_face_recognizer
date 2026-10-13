@@ -3,6 +3,9 @@
 Lists every ignored face embedding with its thumbnail (when the crop file
 still exists), the source person name snapshot and the ignore date, and lets
 the user revoke entries so the face can be recognised again on the next run.
+
+"Not a face" marks are listed the same way, followed by the boxes the learned
+non-face filter hid; restoring one of those teaches the filter it is a face.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -27,12 +30,18 @@ from PySide6.QtWidgets import (
 
 from app.config import AppConfig
 from app.db.database import session_scope
+from app.db.models import IGNORED_KIND_NOT_FACE
 from app.services.ignored_face_service import IgnoredFaceService
+from app.services.non_face_service import NonFaceService
 from app.ui.i18n import t
 
 log = logging.getLogger(__name__)
 
 _THUMB_SIZE = 96
+
+# Qt.UserRole payload: (kind, id) — an ignore-list entry or a model-hidden face.
+_ENTRY = "entry"
+_AUTO = "auto"
 
 
 class IgnoredFacesDialog(QDialog):
@@ -96,21 +105,22 @@ class IgnoredFacesDialog(QDialog):
         with session_scope() as session:
             entries = IgnoredFaceService(session).list_ignored()
             for entry in entries:
-                label_parts = [entry.source_person_name or t("ignored_faces_unknown_source")]
+                if entry.kind == IGNORED_KIND_NOT_FACE:
+                    label_parts = [t("ignored_faces_kind_not_face")]
+                else:
+                    label_parts = [
+                        entry.source_person_name or t("ignored_faces_unknown_source")
+                    ]
                 if entry.created_at is not None:
                     label_parts.append(entry.created_at.strftime("%Y-%m-%d %H:%M"))
                 if entry.note:
                     label_parts.append(entry.note)
-                item = QListWidgetItem(" — ".join(label_parts))
-                item.setData(Qt.UserRole, entry.id)
-                if entry.thumbnail_path and Path(entry.thumbnail_path).exists():
-                    pixmap = QPixmap(entry.thumbnail_path)
-                    if not pixmap.isNull():
-                        item.setIcon(QIcon(pixmap.scaled(
-                            _THUMB_SIZE, _THUMB_SIZE,
-                            Qt.KeepAspectRatio, Qt.SmoothTransformation,
-                        )))
-                self._list.addItem(item)
+                self._add_item(" — ".join(label_parts), (_ENTRY, entry.id),
+                               entry.thumbnail_path)
+            for face in NonFaceService(session).list_model_hidden():
+                pct = round(100 * (face.assignment_confidence or 0.0))
+                self._add_item(t("ignored_faces_auto_hidden", p=pct),
+                               (_AUTO, face.id), face.crop_path)
 
         n = self._list.count()
         self._count_lbl.setText(t("ignored_faces_count", n=n))
@@ -120,15 +130,27 @@ class IgnoredFacesDialog(QDialog):
             self._list.addItem(empty)
         self._unignore_btn.setEnabled(False)
 
+    def _add_item(self, text: str, key: tuple, thumbnail_path: Optional[str]) -> None:
+        item = QListWidgetItem(text)
+        item.setData(Qt.UserRole, key)
+        if thumbnail_path and Path(thumbnail_path).exists():
+            pixmap = QPixmap(thumbnail_path)
+            if not pixmap.isNull():
+                item.setIcon(QIcon(pixmap.scaled(
+                    _THUMB_SIZE, _THUMB_SIZE,
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation,
+                )))
+        self._list.addItem(item)
+
     def _on_selection_changed(self) -> None:
         self._unignore_btn.setEnabled(bool(self._selected_ids()))
 
-    def _selected_ids(self) -> list[int]:
+    def _selected_ids(self) -> list[tuple]:
         ids = []
         for item in self._list.selectedItems():
-            entry_id = item.data(Qt.UserRole)
-            if entry_id is not None:
-                ids.append(int(entry_id))
+            key = item.data(Qt.UserRole)
+            if key is not None:
+                ids.append((key[0], int(key[1])))
         return ids
 
     def _on_unignore(self) -> None:
@@ -146,7 +168,12 @@ class IgnoredFacesDialog(QDialog):
 
         with session_scope() as session:
             svc = IgnoredFaceService(session)
-            for entry_id in ids:
-                if svc.unignore(entry_id):
-                    self._changed = True
+            non_face = NonFaceService(session)
+            for kind, item_id in ids:
+                done = (
+                    non_face.confirm_face(item_id)
+                    if kind == _AUTO
+                    else svc.unignore(item_id)
+                )
+                self._changed = self._changed or done
         self._reload()

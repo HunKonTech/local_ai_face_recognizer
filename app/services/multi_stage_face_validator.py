@@ -28,6 +28,14 @@ Decision (config-driven, fail-safe):
 * only technologies that could give an opinion vote;
 * the detection survives when at least
   ``detection.multistage_min_confirmations`` technologies confirm it;
+* *and* at least ``detection.multistage_min_strong_weight`` of that weight comes
+  from the deep detectors (YuNet / Caffe SSD / InsightFace) — the Haar face and
+  eye cascades fire on textures (carpets, wallpaper), so on their own they never
+  keep a box.  Skipped when the available deep detectors cannot reach that
+  weight, so a stripped-down install keeps the legacy vote;
+* InsightFace, when available, can **veto**: a candidate it scores below
+  ``detection.multistage_insightface_veto_threshold`` in its own crop is dropped
+  whatever the others voted;
 * if fewer than ``detection.multistage_min_available`` technologies are actually
   available, we fall back to the legacy single-YuNet verifier — a stripped-down
   install never deletes more aggressively than before.
@@ -56,9 +64,14 @@ log = logging.getLogger(__name__)
 # elsewhere in the generous margin never confirms a non-face.
 _MIN_OVERLAP_IOU = 0.25
 
-# Vote outcomes.
+# Vote outcomes.  VETO is a REJECT strong enough to drop the box on its own.
 CONFIRM = "confirm"
 REJECT = "reject"
+VETO = "veto"
+
+# Deep detectors.  Their CONFIRMs count toward ``multistage_min_strong_weight``;
+# the Haar face / eye cascades fire on textures and only add evidence.
+_STRONG_TECHS = frozenset({"yunet", "caffe_ssd", "insightface"})
 
 
 def _iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:
@@ -143,6 +156,16 @@ class MultiStageFaceValidator:
             return False
         return len(self.active_technologies()) >= self._config.multistage_min_available
 
+    @property
+    def _strong_rule_live(self) -> bool:
+        """True when the deep detectors available can reach the strong weight."""
+        need = int(self._config.multistage_min_strong_weight or 0)
+        if need <= 0:
+            return False
+        avail = 1 if self._verifier.available else 0
+        avail += sum(w for name, w, _ in self._techs if name in _STRONG_TECHS)
+        return avail >= need
+
     # ------------------------------------------------------------------
     # Verify
     # ------------------------------------------------------------------
@@ -202,8 +225,10 @@ class MultiStageFaceValidator:
             return yunet_det
 
         confirm_weight = 1 if yunet_det is not None else 0
+        strong_weight = confirm_weight  # YuNet is a deep detector
         votes = {"yunet": CONFIRM if yunet_det is not None else REJECT}
         errors: dict = {}
+        vetoed_by: Optional[str] = None
         for name, weight, vote_fn in self._techs:
             try:
                 vote = vote_fn(crop, local, min_face)
@@ -215,13 +240,26 @@ class MultiStageFaceValidator:
             votes[name] = vote
             if vote == CONFIRM:
                 confirm_weight += weight
+                if name in _STRONG_TECHS:
+                    strong_weight += weight
+            elif vote == VETO:
+                vetoed_by = name
 
         keep = confirm_weight >= self._config.multistage_min_confirmations
+        drop_reason = None if keep else "quorum"
+        if keep and self._strong_rule_live and (
+            strong_weight < self._config.multistage_min_strong_weight
+        ):
+            keep, drop_reason = False, "no deep-detector quorum"
+        if keep and vetoed_by is not None:
+            keep, drop_reason = False, f"{vetoed_by} veto"
         if not keep:
             log.debug(
-                "MULTISTAGE drop: bbox=(%d,%d,%d,%d) conf=%.2f weight=%d/%d votes=%s",
-                det.x, det.y, det.w, det.h, det.confidence,
-                confirm_weight, self._config.multistage_min_confirmations, votes,
+                "MULTISTAGE drop (%s): bbox=(%d,%d,%d,%d) conf=%.2f weight=%d/%d "
+                "strong=%d votes=%s",
+                drop_reason, det.x, det.y, det.w, det.h, det.confidence,
+                confirm_weight, self._config.multistage_min_confirmations,
+                strong_weight, votes,
             )
 
         if detail_cb:
@@ -231,7 +269,9 @@ class MultiStageFaceValidator:
                 "votes": votes,
                 "errors": errors,
                 "confirm_weight": confirm_weight,
+                "strong_weight": strong_weight,
                 "min_confirmations": self._config.multistage_min_confirmations,
+                "drop_reason": drop_reason,
             })
 
         if not keep:
@@ -416,15 +456,27 @@ class MultiStageFaceValidator:
 
         threshold = self._config.verification_threshold
         weight = max(1, int(self._config.multistage_insightface_weight))
+        veto = max(0.0, float(self._config.multistage_insightface_veto_threshold or 0.0))
+        # One detection pass per variant at the lower of the two thresholds;
+        # the best score on the candidate then decides confirm / reject / veto.
+        probe = min(threshold, veto) if veto > 0 else threshold
 
         def vote(crop, local, min_face) -> str:
+            best = 0.0
             for variant in (crop, apply_clahe(crop)):
                 found = detector.detect(
-                    variant, confidence_threshold=threshold, min_face_size=0
+                    variant,
+                    confidence_threshold=probe,
+                    min_face_size=0,
+                    allow_below_prepared=True,
                 )
-                boxes = [(d.x, d.y, d.w, d.h) for d in found]
-                if _box_confirms(local, boxes):
+                for d in found:
+                    if _box_confirms(local, [(d.x, d.y, d.w, d.h)]):
+                        best = max(best, float(d.confidence))
+                if best >= threshold:
                     return CONFIRM
+            if veto > 0 and best < veto:
+                return VETO
             return REJECT
 
         self._techs.append(("insightface", weight, vote))

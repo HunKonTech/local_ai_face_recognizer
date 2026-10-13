@@ -196,6 +196,23 @@ class FaceActionsMixin:
             self._on_person_selected(self._current_person_id)
         self._image_browser._reload_current_face_data()
 
+    def _on_preview_face_not_a_face(self, face_id: int) -> None:
+        """'Not a face' from the preview / cluster menu — applies to the whole
+        cluster multi-selection when the right-clicked face is part of it."""
+        from app.ui.helpers.not_a_face import mark_not_a_face
+
+        selected = self._cluster_panel.selected_face_ids()
+        face_ids = selected if face_id in selected else [face_id]
+        marked = mark_not_a_face(face_ids, parent=self)
+        if not marked:
+            return
+        self._status_label.setText(t("not_a_face_status", n=marked))
+        self._preview_panel.clear()
+        self._refresh_persons()
+        if self._current_person_id is not None:
+            self._on_person_selected(self._current_person_id)
+        self._image_browser._reload_current_face_data()
+
     @Slot(int, int, int, int, int)
     def _on_preview_face_create(
         self, image_id: int, x: int, y: int, w: int, h: int

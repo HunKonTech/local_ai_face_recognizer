@@ -33,6 +33,14 @@ tflite = [
 coral = [
     "pycoral>=2.0",
 ]
+insightface = [
+    # InsightFace SCRFD: profile-face co-detector and the strongest (vetoing)
+    # technology of the false-positive gate.  1.x ships a pure-Python wheel —
+    # no compiler needed on Windows.  The buffalo_l model pack (~300 MB)
+    # downloads to ~/.insightface on first use.
+    "insightface>=1.0,<2",
+    "onnxruntime>=1.17",
+]
 gdrive = [
     # Google Drive online work mode (online-only, ephemeral cache).
     # The cache layer in app/gdrive/cache.py works without these; only the

@@ -775,6 +775,12 @@ class FaceBlob(Base):
 # IgnoredFace
 # ---------------------------------------------------------------------------
 
+# IgnoredFace.kind values.
+IGNORED_KIND_PERSON = "person"      # a real face the user never wants to see
+IGNORED_KIND_NOT_FACE = "not_face"  # a box that is not a face (pattern, half face)
+IGNORED_KIND_IS_FACE = "is_face"    # counter-example: a box the user restored
+
+
 class IgnoredFace(Base):
     """A face embedding the user permanently excluded from recognition.
 
@@ -785,11 +791,22 @@ class IgnoredFace(Base):
 
     The exclusion is embedding-based on purpose: "Unknown 327"-style names are
     regenerated on every run and cannot serve as a stable identity.
+
+    ``kind == "not_face"`` rows come from the "Not a face" action: besides the
+    same near-duplicate suppression they are the negative examples the
+    non-face classifier (:mod:`app.deep.non_face`) learns from.  ``"is_face"``
+    rows are its counter-examples (boxes the user restored from that filter);
+    they are not part of the ignore list.
     """
 
     __tablename__ = "ignored_faces"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=IGNORED_KIND_PERSON,
+        server_default=IGNORED_KIND_PERSON,
+    )
 
     # Embedding stored as raw bytes (numpy float32 array → tobytes()),
     # same format as Face.embedding.

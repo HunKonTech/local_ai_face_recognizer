@@ -765,7 +765,8 @@ jobs:
         shell: powershell
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install . pyinstaller
+          # [insightface]: the strongest detector of the false-positive gate.
+          python -m pip install ".[insightface]" pyinstaller
           # Verify TFLite backend installed (ai-edge-litert is in base deps, this is a safety check)
           # Use Continue so Python stderr doesn't become a terminating NativeCommandError under $ErrorActionPreference=Stop
           $litert_ok = $false
@@ -817,6 +818,17 @@ jobs:
       - name: Build bundled app
         shell: powershell
         run: python scripts/package_app.py --version "${{ needs.prepare.outputs.package_version }}"
+
+      - name: Self-test bundled detection components
+        shell: powershell
+        run: |
+          # The frozen app must ship the Haar cascades, detector models and
+          # InsightFace — PyInstaller drops them silently otherwise.
+          $report = Join-Path $env:RUNNER_TEMP "face-local-selftest.json"
+          $proc = Start-Process -FilePath "dist\Face-Local\Face-Local.exe" `
+            -ArgumentList @("--self-test", $report) -Wait -PassThru -NoNewWindow
+          if (Test-Path $report) { Get-Content $report | Write-Host }
+          if ($proc.ExitCode -ne 0) { throw "Bundled self-test failed (exit $($proc.ExitCode))" }
 
       - name: Create release directory
         shell: powershell

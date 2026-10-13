@@ -74,6 +74,19 @@ detection:
   # Upscale crops smaller than this many pixels before re-detecting.
   # verification_min_crop: 160
 
+  # Multi-technology vote: the Haar face/eye cascades fire on textures (carpet,
+  # wallpaper), so a box also needs this much CONFIRM weight from the deep
+  # detectors (YuNet 1, Caffe SSD 1, InsightFace 2). 0 = legacy vote.
+  # multistage_min_strong_weight: 2
+  # InsightFace veto: drop a box InsightFace scores below this on its own crop,
+  # whatever the other detectors say. 0 disables the veto.
+  # multistage_insightface_veto_threshold: 0.30
+
+  # Drop half faces cut off by the photo edge: more than this share of the
+  # detector's box lies outside the image, or an eye is outside the image.
+  truncation_filter_enabled: true
+  # truncation_max_outside_fraction: 0.35
+
   # IoU threshold for "Find overlapping ? boxes" cleanup candidates.
   # A question-mark box is listed when it overlaps a real named face by at
   # least this much. Typical range: 0.30 - 0.40.
@@ -434,6 +447,21 @@ ignored_faces:
   # the new face to be suppressed. Deliberately stricter than the recognition
   # auto_assign_threshold (0.72) so genuinely new people are never swallowed.
   ignore_similarity: 0.80
+
+non_face:
+  # Learned "Not a face" filter. Boxes marked "Not a face" (right-click menu)
+  # are negative examples, human-confirmed faces positives; every AI scan
+  # trains a classifier on the embeddings and hides new / Unknown boxes it is
+  # sure are not faces. Named people's faces and manual boxes are never hidden;
+  # hidden boxes are listed (and restorable) under Ignored Faces.
+  enabled: true
+  # Stays off until this many "Not a face" marks / confirmed faces exist.
+  # min_negatives: 5
+  # min_positives: 30
+  # Decision threshold: at least this probability, and high enough that at
+  # most max_positive_fpr of the confirmed faces (held out) would be hidden.
+  # min_probability: 0.90
+  # max_positive_fpr: 0.005
 
 suggestions:
   # Unknown-person name suggestions: compares auto-named ("Unknown N")

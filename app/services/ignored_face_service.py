@@ -26,7 +26,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from app.config import IgnoredFaceConfig
-from app.db.models import Face, IgnoredFace, Person
+from app.db.models import IGNORED_KIND_IS_FACE, Face, IgnoredFace, Person
 
 log = logging.getLogger(__name__)
 
@@ -205,7 +205,8 @@ class IgnoredFaceService:
 
         if entry.source_face_id is not None:
             face = self._session.get(Face, entry.source_face_id)
-            if face is not None and face.assignment_source == "ignored":
+            # "not_face": restored from the "Not a face" action as well.
+            if face is not None and face.assignment_source in ("ignored", "not_face"):
                 face.is_excluded = False
                 face.assignment_source = None
                 face.assignment_confidence = None
@@ -219,13 +220,19 @@ class IgnoredFaceService:
     def list_ignored(self) -> List[IgnoredFace]:
         """Return every ignore-list entry, newest first."""
         return (
-            self._session.query(IgnoredFace)
+            self._ignore_list()
             .order_by(IgnoredFace.created_at.desc(), IgnoredFace.id.desc())
             .all()
         )
 
     def count_ignored(self) -> int:
-        return self._session.query(IgnoredFace).count()
+        return self._ignore_list().count()
+
+    def _ignore_list(self):
+        """Ignore-list rows — not the non-face filter's "is a face" examples."""
+        return self._session.query(IgnoredFace).filter(
+            IgnoredFace.kind != IGNORED_KIND_IS_FACE
+        )
 
     # ------------------------------------------------------------------
     # Pipeline filter
@@ -305,7 +312,7 @@ class IgnoredFaceService:
     def _load_ignored_matrix(self) -> Optional[np.ndarray]:
         """Return all ignored embeddings as one L2-normalised matrix."""
         vectors: List[np.ndarray] = []
-        for entry in self._session.query(IgnoredFace).all():
+        for entry in self._ignore_list().all():
             vec = self._normalise(entry.get_embedding())
             if vec is not None:
                 vectors.append(vec)

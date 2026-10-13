@@ -37,11 +37,23 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override database path (e.g. --db /tmp/test.db)",
     )
+    parser.add_argument(
+        "--self-test",
+        metavar="JSON",
+        default=None,
+        help="Write the detection-component report to JSON and exit "
+        "(exit code 1 when a component is missing; used by the release build)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    if args.self_test:
+        from app.diagnostics import write_self_test
+
+        sys.exit(write_self_test(args.self_test))
 
     # --- Logging (before any other imports that log) ---
     from app.logging_setup import setup_logging

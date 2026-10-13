@@ -27,6 +27,7 @@ from app.config import AppConfig
 from app.db.models import Face, Image
 from app.detectors.base import Detection, FaceDetector
 from app.detectors.cpu_detector import CpuDetector
+from app.detectors.truncation import truncation_reject_reason
 from app.services.detection_run_logger import DetectionRunLogger
 from app.services.face_crop_service import face_debug_state
 from app.services.face_quality_service import FaceQualityEvaluator
@@ -399,12 +400,41 @@ class DetectionService:
                 min_face_size=self._config.detection.min_face_size,
             )
 
+        detections = self._filter_truncated(img_bgr, detections)
         detections = self._filter_verified(img_bgr, detections)
 
         if not detections and self._config.detection.adaptive_escalation:
             detections = self._detect_adaptive(img_bgr)
 
         return detections
+
+    # ------------------------------------------------------------------
+    # Truncated (half) face filter
+    # ------------------------------------------------------------------
+
+    def _filter_truncated(
+        self, img_bgr: np.ndarray, detections: List[Detection]
+    ) -> List[Detection]:
+        """Drop half faces sliced by the photo edge (raw detector output only —
+        must run before the verifier, whose refined boxes are re-clamped)."""
+        det_cfg = self._config.detection
+        if not detections or not det_cfg.truncation_filter_enabled:
+            return detections
+        img_h, img_w = img_bgr.shape[:2]
+        kept: List[Detection] = []
+        for det in detections:
+            reason = truncation_reject_reason(
+                det, img_w, img_h, det_cfg.truncation_max_outside_fraction
+            )
+            if reason is None:
+                kept.append(det)
+            else:
+                diag_log.debug(
+                    "TRUNCATED drop (%s): bbox=(%d,%d,%d,%d) conf=%.2f outside=%.2f",
+                    reason, det.x, det.y, det.w, det.h, det.confidence,
+                    det.truncated_fraction,
+                )
+        return kept
 
     # ------------------------------------------------------------------
     # Verification gate (false-positive filter)
@@ -533,6 +563,7 @@ class DetectionService:
             # The looser the rung, the more junk it pulls in — every rescued
             # box must survive crop-level verification before the rung counts.
             count_raw = len(result)
+            result = self._filter_truncated(img_bgr, result)
             result = self._filter_verified(img_bgr, result)
             count = len(result)
             diag_log.debug(

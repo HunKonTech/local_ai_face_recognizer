@@ -60,11 +60,15 @@ STRINGS: Dict[str, Dict[str, str]] = {
         "en": "Faces on this list are permanently excluded from recognition: any "
               "newly detected face matching one of these signatures is suppressed "
               "automatically. Revoking an entry lets the face be recognised again "
-              "on the next scan.",
+              "on the next scan. Boxes marked “Not a face” and the ones the AI hid "
+              "as similar are listed too; restoring such a box teaches the AI that "
+              "it is a face.",
         "hu": "A listán lévő arcok véglegesen ki vannak zárva a felismerésből: az "
               "ezekhez hasonló újonnan talált arcokat a rendszer automatikusan "
               "elrejti. Egy bejegyzés visszavonása után az arc a következő "
-              "futtatáskor újra felismerhető.",
+              "futtatáskor újra felismerhető. A „Nem arc” jelölésű és az AI által "
+              "ezekhez hasonlónak talált, elrejtett keretek is itt vannak; egy ilyen "
+              "visszaállításából az AI megtanulja, hogy az arc.",
     },
     "ignored_faces_unignore": {"en": "Revoke Selected", "hu": "Kijelöltek visszavonása"},
     "ignored_faces_unignore_confirm": {
@@ -76,6 +80,11 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "ignored_faces_count": {"en": "{n} ignored face(s)", "hu": "{n} kizárt arc"},
     "ignored_faces_empty": {"en": "(no ignored faces)", "hu": "(nincs kizárt arc)"},
     "ignored_faces_unknown_source": {"en": "(unknown source)", "hu": "(ismeretlen forrás)"},
+    "ignored_faces_kind_not_face": {"en": "Not a face", "hu": "Nem arc"},
+    "ignored_faces_auto_hidden": {
+        "en": "Hidden by the AI as not a face ({p}%)",
+        "hu": "Az AI elrejtette: nem arc ({p}%)",
+    },
     "remove_face":        {"en": "Remove Selected Face", "hu": "Kiválasztott arc eltávolítása"},
     "reassign_face":      {"en": "Reassign Face …", "hu": "Arc áthelyezése …"},
     "people_label":       {"en": "People", "hu": "Személyek"},

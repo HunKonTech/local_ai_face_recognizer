@@ -60,7 +60,8 @@ pytest-cov>=5.0
 # weighted technology in the multi-stage verification gate.  Heavy (~300 MB
 # model, downloaded on first use).  Absence is not fatal — detection falls back
 # to the primary detector and the gate skips the InsightFace vote.
-#   pip install insightface onnxruntime
+#   pip install ".[insightface]"        (or: pip install "insightface>=1.0,<2" onnxruntime)
+# insightface 1.x is a pure-Python wheel (no C++ build tools needed on Windows).
 # NOTE: pip may pull numpy>=2; re-pin afterwards with `pip install "numpy<2.0"`.
 # Toggle with detection.multistage_use_insightface in config.yaml.
 

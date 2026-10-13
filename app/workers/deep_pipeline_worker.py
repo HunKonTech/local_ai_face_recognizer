@@ -357,8 +357,9 @@ class DeepPipelineWorker(QThread):
         self._run_multistage_cleanup()
         self._checkpoint()
 
-        # --- Permanently-ignored face filter ---
+        # --- Permanently-ignored face filter + learned "not a face" filter ---
         self._run_ignored_filter()
+        self._run_non_face_filter()
 
         # --- Group new unknown faces first: their groups then vote ---
         # (an unsure face follows its "Unknown N" group's clear majority).
@@ -994,6 +995,29 @@ class DeepPipelineWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             log.warning("Ignored-face filter failed: %s", exc)
 
+    def _run_non_face_filter(self) -> None:
+        """Learned "not a face" filter: hide new / Unknown boxes that look like
+        the ones the user marked "Not a face" (patterns, half faces)."""
+        from app.services.non_face_service import NonFaceService
+        try:
+            with session_scope() as session:
+                stats = NonFaceService(
+                    session, config=getattr(self._config, "non_face", None)
+                ).apply()
+            if stats.active:
+                self._emit_log(
+                    f"  Non-face filter: hid {stats.n_hidden} box(es), restored "
+                    f"{stats.n_restored} (learned from {stats.n_negatives} "
+                    f"'not a face' mark(s))."
+                )
+            elif stats.n_restored:
+                self._emit_log(
+                    f"  Non-face filter off ({stats.reason}); restored "
+                    f"{stats.n_restored} box(es)."
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Non-face filter failed: %s", exc)
+
     def _run_deep_train_and_recognize(self) -> TrainAndRecognizeResult:
         def train_cb(current, total, detail):
             self._emit_progress(current, total or 0, "Training", detail)
@@ -1054,6 +1078,7 @@ class DeepPipelineWorker(QThread):
         """Lightweight Unknown-group rebuild: filter + cluster + consistency + suggestions."""
         self._emit_log("Stage 1/3: Applying permanently-ignored face filter …")
         self._run_ignored_filter()
+        self._run_non_face_filter()
         self._checkpoint()
 
         self._emit_log("Stage 2/3: Grouping unassigned faces into Unknown clusters …")

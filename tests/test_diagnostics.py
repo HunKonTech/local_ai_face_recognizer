@@ -103,3 +103,52 @@ class TestPrintDiagnostics:
         out = capsys.readouterr().out
         assert "TFLite diagnostics" in out
         assert "ACTION REQUIRED" in out
+
+
+class TestDetectionComponentSelfTest:
+    """``Face-Local --self-test`` — the release build's bundling guard."""
+
+    def test_reports_haar_cascades_and_models(self, monkeypatch) -> None:
+        from app import diagnostics
+
+        monkeypatch.setattr(diagnostics, "_probe_insightface", lambda: None)
+        report = diagnostics.check_detection_components()
+        assert set(report["haar_cascades"]) == set(diagnostics.HAAR_CASCADES)
+        assert all(report["haar_cascades"].values())  # pip OpenCV ships them
+        assert all(report["models"].values())
+
+    def test_write_self_test_exit_code_follows_ok(self, monkeypatch, tmp_path) -> None:
+        import json
+
+        from app import diagnostics
+
+        out = tmp_path / "selftest.json"
+        monkeypatch.setattr(diagnostics, "check_detection_components", lambda: {"ok": True})
+        assert diagnostics.write_self_test(str(out)) == 0
+        assert json.loads(out.read_text(encoding="utf-8")) == {"ok": True}
+        monkeypatch.setattr(
+            diagnostics, "check_detection_components", lambda: {"ok": False}
+        )
+        assert diagnostics.write_self_test(str(out)) == 1
+
+    def test_failed_insightface_probe_fails_the_self_test(self, monkeypatch) -> None:
+        from app import diagnostics
+
+        monkeypatch.setattr(diagnostics, "_probe_insightface", lambda: "error: boom")
+        report = diagnostics.check_detection_components()
+        if report["insightface"] is not None:
+            assert report["ok"] is False
+
+
+def test_main_self_test_flag_exits_with_report(monkeypatch, tmp_path) -> None:
+    import sys
+
+    from app import diagnostics, main
+
+    out = tmp_path / "r.json"
+    monkeypatch.setattr(sys, "argv", ["face-local", "--self-test", str(out)])
+    monkeypatch.setattr(diagnostics, "check_detection_components", lambda: {"ok": True})
+    with pytest.raises(SystemExit) as exc:
+        main.main()
+    assert exc.value.code == 0
+    assert out.exists()

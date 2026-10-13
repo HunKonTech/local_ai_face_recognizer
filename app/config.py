@@ -177,6 +177,21 @@ class DetectionConfig:
     # opinion and is dropped.
     multistage_insightface_weight: int = 2
 
+    # Minimum CONFIRM weight that must come from the *deep* detectors (YuNet,
+    # Caffe SSD, InsightFace).  The Haar face + eye cascades fire on textures
+    # (carpets, wallpaper, foliage), so two of them used to keep a pattern box
+    # on their own; with this rule they only add evidence.  Applies when the
+    # deep technologies available can reach this weight at all — otherwise the
+    # gate keeps the legacy vote so a stripped-down install is not emptied.
+    # 0 restores the legacy "any technology counts" vote.
+    multistage_min_strong_weight: int = 2
+
+    # InsightFace veto: when InsightFace is available and finds nothing on the
+    # candidate even at this low score, the box is dropped whatever the other
+    # technologies say.  SCRFD scores real (even blurry / old) faces far above
+    # this on the upscaled crop, while textures score near zero.  0 disables.
+    multistage_insightface_veto_threshold: float = 0.30
+
     # InsightFace model pack name (used when multistage_use_insightface).
     insightface_model_pack: str = "buffalo_l"
 
@@ -188,6 +203,15 @@ class DetectionConfig:
     # retroactive cleanup re-checks every stored face).  Toggled from the Scan &
     # Maintenance dialog.
     verification_verify_all: bool = False
+
+    # --- Truncated (half) face filter ---
+
+    # Drop automatic detections of faces sliced by the photo edge: the share of
+    # the detector's raw box outside the image exceeds the fraction below, or
+    # an eye landmark lies outside the image.  Such half faces embed poorly and
+    # end up as junk "Unknown" groups.  See app/detectors/truncation.py.
+    truncation_filter_enabled: bool = True
+    truncation_max_outside_fraction: float = 0.35
 
 
 @dataclass
@@ -819,6 +843,35 @@ class IgnoredFaceConfig:
 
 
 @dataclass
+class NonFaceConfig:
+    """Parameters for the learned "not a face" filter (app/deep/non_face.py).
+
+    Boxes the user marks "Not a face" are negative examples; human-confirmed
+    faces of named people are positives.  Each AI scan trains a small
+    classifier on the embeddings and hides new / Unknown boxes it is sure are
+    not faces, so similar patterns and half faces stop coming back.
+    """
+
+    enabled: bool = True
+
+    # The classifier stays off until this many "Not a face" examples exist —
+    # a handful of marks cannot describe what a non-face looks like.
+    min_negatives: int = 5
+
+    # ... and this many confirmed real faces.
+    min_positives: int = 30
+
+    # Decision threshold: at least this probability, and high enough that at
+    # most ``max_positive_fpr`` of the confirmed real faces (out-of-fold)
+    # would be hidden.
+    min_probability: float = 0.90
+    max_positive_fpr: float = 0.005
+
+    # Cap on positives used per training run (random sample) — speed only.
+    max_positives: int = 5000
+
+
+@dataclass
 class SuggestionConfig:
     """Parameters for the unknown-person name-suggestion feature.
 
@@ -954,6 +1007,7 @@ class AppConfig:
         default_factory=OverlapResolutionConfig
     )
     ignored_faces: IgnoredFaceConfig = field(default_factory=IgnoredFaceConfig)
+    non_face: NonFaceConfig = field(default_factory=NonFaceConfig)
     suggestions: SuggestionConfig = field(default_factory=SuggestionConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     scan: ScanConfig = field(default_factory=ScanConfig)
@@ -1128,11 +1182,26 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
                 "multistage_insightface_weight",
                 cfg.detection.multistage_insightface_weight,
             ),
+            multistage_min_strong_weight=det.get(
+                "multistage_min_strong_weight",
+                cfg.detection.multistage_min_strong_weight,
+            ),
+            multistage_insightface_veto_threshold=det.get(
+                "multistage_insightface_veto_threshold",
+                cfg.detection.multistage_insightface_veto_threshold,
+            ),
             insightface_model_pack=det.get(
                 "insightface_model_pack", cfg.detection.insightface_model_pack
             ),
             verification_verify_all=det.get(
                 "verification_verify_all", cfg.detection.verification_verify_all
+            ),
+            truncation_filter_enabled=det.get(
+                "truncation_filter_enabled", cfg.detection.truncation_filter_enabled
+            ),
+            truncation_max_outside_fraction=det.get(
+                "truncation_max_outside_fraction",
+                cfg.detection.truncation_max_outside_fraction,
             ),
         )
 
@@ -1444,6 +1513,15 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             ignore_similarity=ign.get(
                 "ignore_similarity", cfg.ignored_faces.ignore_similarity
             ),
+        )
+        nf = raw.get("non_face", {})
+        cfg.non_face = NonFaceConfig(
+            enabled=nf.get("enabled", cfg.non_face.enabled),
+            min_negatives=nf.get("min_negatives", cfg.non_face.min_negatives),
+            min_positives=nf.get("min_positives", cfg.non_face.min_positives),
+            min_probability=nf.get("min_probability", cfg.non_face.min_probability),
+            max_positive_fpr=nf.get("max_positive_fpr", cfg.non_face.max_positive_fpr),
+            max_positives=nf.get("max_positives", cfg.non_face.max_positives),
         )
 
         sug = raw.get("suggestions", {})

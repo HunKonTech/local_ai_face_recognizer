@@ -415,6 +415,28 @@ STRINGS: Dict[str, Dict[str, str]] = {
     "ibp_ctx_edit_frame":     {"en": "Edit bounding box", "hu": "Keret szerkesztése"},
     "ibp_ctx_delete":         {"en": "Delete",           "hu": "Törlés"},
     "ibp_ctx_ignore_forever": {"en": "Ignore forever",   "hu": "Kizárás végleg"},
+    "ibp_ctx_not_a_face":     {"en": "Not a face",       "hu": "Nem arc"},
+    "not_a_face_title":       {"en": "Not a Face",       "hu": "Nem arc"},
+    "not_a_face_confirm": {
+        "en": "Mark {n} box(es) as not a face?\n\n"
+              "The box is hidden and the AI learns from it: after a few marks the "
+              "next AI scans hide similar boxes (patterns, half faces) "
+              "automatically. You can undo it under Ignored Faces.",
+        "hu": "Megjelölsz {n} keretet: nem arc?\n\n"
+              "A keret eltűnik, és az AI tanul belőle: néhány jelölés után a "
+              "következő AI beolvasások a hasonló kereteket (minták, fél arcok) "
+              "automatikusan elrejtik. A Kizárt arcok ablakban visszavonható.",
+    },
+    "not_a_face_no_embedding": {
+        "en": "These boxes have no face signature yet, so the AI cannot learn "
+              "from them. Run a scan first, or delete the box.",
+        "hu": "Ezekhez a keretekhez még nincs arc-jellemző, így az AI nem tud "
+              "tanulni belőlük. Előbb futtass beolvasást, vagy töröld a keretet.",
+    },
+    "not_a_face_status": {
+        "en": "{n} box(es) marked as not a face.",
+        "hu": "{n} keret megjelölve: nem arc.",
+    },
 
     # ── Re-recognition (image-browser context menu + dialogs) ───────────────
     # --- Reviewable auto-merge from Unknown ---

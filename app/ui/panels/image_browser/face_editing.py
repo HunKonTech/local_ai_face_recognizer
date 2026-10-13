@@ -378,6 +378,26 @@ class FaceEditingMixin:
         self._redo_stack = [e for e in self._redo_stack if e.face_id != face_id]
         self._reload_current_face_data()
 
+    def _mark_not_a_face(self, face_id: int) -> None:
+        """Hide the box and teach the learned non-face filter from it."""
+        from app.ui.helpers.not_a_face import mark_not_a_face
+
+        if self._inline_editor_face_id == face_id:
+            self._hide_inline_editor()
+        if not mark_not_a_face([face_id], parent=self):
+            return
+        if self._selected_face_id == face_id:
+            self._selected_face_id = None
+            self._clear_face_panel()
+        if self._interactive_edit_face_id == face_id:
+            self._interactive_edit_face_id = None
+            self._interactive_edit_orig_bbox = None
+            self._image_label.cancel_interactive_edit()
+            self._draw_hint.setVisible(False)
+        self._undo_stack = [e for e in self._undo_stack if e.face_id != face_id]
+        self._redo_stack = [e for e in self._redo_stack if e.face_id != face_id]
+        self._reload_current_face_data()
+
     def _delete_face(self, face_id: int) -> None:
         if self._inline_editor_face_id == face_id:
             self._hide_inline_editor()

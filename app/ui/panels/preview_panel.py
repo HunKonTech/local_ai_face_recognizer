@@ -854,6 +854,7 @@ class PreviewPanel(QWidget):
         face_selected: ``(face_id: int)``
         face_assign_requested: ``(face_id: int)``
         face_delete_requested: ``(face_id: int)``
+        face_not_a_face_requested: ``(face_id: int)`` — "Not a face" action
         face_create_requested: ``(image_id, x, y, w, h)``
         face_bbox_update_requested: ``(face_id, x, y, w, h)``
         prev_image_requested: emitted when the user clicks "← Előző"
@@ -863,6 +864,7 @@ class PreviewPanel(QWidget):
     face_selected                      = Signal(int)
     face_assign_requested              = Signal(int)
     face_delete_requested              = Signal(int)
+    face_not_a_face_requested          = Signal(int)
     face_create_requested              = Signal(int, int, int, int, int)
     face_bbox_update_requested         = Signal(int, int, int, int, int)
     face_diagnostics_requested         = Signal(int)
@@ -1340,6 +1342,7 @@ class PreviewPanel(QWidget):
         assign_action = menu.addAction(f"👤  {t('assign_to_person')}")
         edit_action   = menu.addAction(f"✏  {t('modify_selection')}")
         delete_action = menu.addAction(f"🗑  {t('delete_selection')}")
+        not_face_action = menu.addAction(f"🚫  {t('ibp_ctx_not_a_face')}")
         menu.addSeparator()
         diag_action = menu.addAction(f"🔍  {t('diag_menu')}")
 
@@ -1374,6 +1377,8 @@ class PreviewPanel(QWidget):
             self._start_face_edit(face_id)
         elif chosen == delete_action:
             self.face_delete_requested.emit(face_id)
+        elif chosen == not_face_action:
+            self.face_not_a_face_requested.emit(face_id)
         elif chosen == diag_action:
             self.face_diagnostics_requested.emit(face_id)
         elif toggle_uncertain_action and chosen == toggle_uncertain_action:

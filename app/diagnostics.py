@@ -148,6 +148,105 @@ def print_diagnostics(diag: TFLiteDiagnostics | None = None) -> None:
     print("=" * 60)
 
 
+# Haar cascades the false-positive gate uses (multi_stage_face_validator).
+HAAR_CASCADES = (
+    "haarcascade_frontalface_default.xml",
+    "haarcascade_profileface.xml",
+    "haarcascade_eye.xml",
+    "haarcascade_eye_tree_eyeglasses.xml",
+)
+
+
+def check_detection_components() -> dict:
+    """Report which detection / verification components this install has.
+
+    PyInstaller silently drops data files and optional packages, which turned
+    the false-positive gate into a two-technology vote in the Windows build.
+    ``Face-Local --self-test out.json`` runs this inside the frozen app so the
+    release build can fail loudly instead.  Never imports Qt or loads models.
+    """
+    import cv2
+
+    from app.paths import is_frozen, resource_path
+
+    report: dict = {
+        "frozen": is_frozen(),
+        "python": sys.version.split()[0],
+        "opencv": cv2.__version__,
+    }
+    haar_dir = getattr(getattr(cv2, "data", None), "haarcascades", "")
+    report["haar_cascades"] = {
+        name: bool(haar_dir) and not cv2.CascadeClassifier(haar_dir + name).empty()
+        for name in HAAR_CASCADES
+    }
+    report["models"] = {
+        name: resource_path(f"models/{name}").exists()
+        for name in (
+            "face_detection_yunet_2023mar.onnx",
+            "res10_300x300_ssd_iter_140000.caffemodel",
+            "deploy.prototxt",
+        )
+    }
+    try:
+        import onnxruntime
+
+        report["onnxruntime"] = onnxruntime.__version__
+    except Exception as exc:  # noqa: BLE001
+        report["onnxruntime"] = None
+        report["onnxruntime_error"] = str(exc)
+    try:
+        import insightface
+        from insightface.app import FaceAnalysis  # noqa: F401
+
+        report["insightface"] = insightface.__version__
+    except Exception as exc:  # noqa: BLE001
+        report["insightface"] = None
+        report["insightface_error"] = str(exc)
+    report["insightface_detect"] = (
+        _probe_insightface() if report["insightface"] is not None else None
+    )
+    report["ok"] = (
+        all(report["haar_cascades"].values())
+        and all(report["models"].values())
+        and report["insightface"] is not None
+        and report["insightface_detect"] in (None, "ok")
+    )
+    return report
+
+
+def _probe_insightface() -> str | None:
+    """Run SCRFD once when its model pack is already on disk (never downloads).
+
+    ``None`` = skipped (pack not downloaded yet), ``"ok"`` or ``"error: …"``.
+    """
+    from app.config import DetectionConfig
+
+    pack = Path.home() / ".insightface" / "models" / DetectionConfig().insightface_model_pack
+    if not any(pack.glob("det_*.onnx")):
+        return None
+    try:
+        import numpy as np
+
+        from app.detectors.insightface_detector import InsightFaceDetector
+
+        InsightFaceDetector().detect(np.zeros((160, 160, 3), np.uint8))
+        return "ok"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc!r}"
+
+
+def write_self_test(path: str) -> int:
+    """Write :func:`check_detection_components` as JSON; 0 when all present."""
+    import json
+
+    try:
+        report = check_detection_components()
+    except Exception as exc:  # noqa: BLE001
+        report = {"ok": False, "error": repr(exc)}
+    Path(path).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return 0 if report.get("ok") else 1
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     diag = check_tflite_backend()

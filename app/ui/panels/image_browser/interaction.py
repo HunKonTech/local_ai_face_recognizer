@@ -93,6 +93,7 @@ class InteractionMixin:
         edit_action: Optional[object] = None
         delete_action: Optional[object] = None
         ignore_action: Optional[object] = None
+        not_face_action: Optional[object] = None
         object_open_action: Optional[object] = None
         object_delete_action: Optional[object] = None
 
@@ -157,6 +158,8 @@ class InteractionMixin:
             # keep the menu honest by hiding the option for them.
             if self._face_is_ignorable(face_id):
                 ignore_action = menu.addAction(t("ibp_ctx_ignore_forever"))
+            # Patterns / half faces: hide and teach the learned non-face filter.
+            not_face_action = menu.addAction(t("ibp_ctx_not_a_face"))
             menu.addSeparator()
 
         manual_mark_action = menu.addAction(t("ibp_ctx_manual_mark"))
@@ -186,6 +189,8 @@ class InteractionMixin:
             self._delete_face(face_id)
         elif ignore_action is not None and chosen is ignore_action and face_id is not None:
             self._ignore_face_forever(face_id)
+        elif not_face_action is not None and chosen is not_face_action and face_id is not None:
+            self._mark_not_a_face(face_id)
         elif chosen is manual_mark_action:
             self._draw_mode_btn.setChecked(True)
         elif chosen is object_mark_action:

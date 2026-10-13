@@ -159,6 +159,9 @@ def _migrate_add_columns(engine: Engine) -> None:
             ("label_review_status", "VARCHAR(16)"),
             ("embedding_consistency", "FLOAT"),
         ],
+        "ignored_faces": [
+            ("kind", "VARCHAR(16) NOT NULL DEFAULT 'person'"),
+        ],
         # create_all() has already created training_runs (also on old DBs).
         "training_runs": [
             ("metrics_json", "TEXT"),

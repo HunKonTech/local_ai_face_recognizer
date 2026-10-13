@@ -29,6 +29,10 @@ class Detection:
                     :func:`app.embeddings.alignment.align_face_5pt`.  ``None``
                     for detectors that do not produce landmarks (Coral, the
                     Caffe SSD CPU path, Haar).
+        truncated_fraction: Share [0.0 – 1.0] of the detector's raw box that
+                    fell outside the image and was cut off by :meth:`clamp`.
+                    A face sliced in half by the photo edge scores ~0.5 — see
+                    :mod:`app.detectors.truncation`.
     """
 
     x: int
@@ -37,6 +41,7 @@ class Detection:
     h: int
     confidence: float
     landmarks: Optional[List[List[float]]] = None
+    truncated_fraction: float = 0.0
 
     @property
     def x2(self) -> int:
@@ -53,15 +58,25 @@ class Detection:
         return (self.x, self.y, self.w, self.h)
 
     def clamp(self, img_w: int, img_h: int) -> "Detection":
-        """Return a new Detection with coordinates clamped to image bounds."""
+        """Return a new Detection with coordinates clamped to image bounds.
+
+        Landmarks are kept unclamped (a cut-off eye stays outside the image);
+        the share of the box area lost to clamping is recorded in
+        ``truncated_fraction``.
+        """
         x = max(0, min(self.x, img_w - 1))
         y = max(0, min(self.y, img_h - 1))
         x2 = max(0, min(self.x2, img_w))
         y2 = max(0, min(self.y2, img_h))
+        raw_area = self.w * self.h
+        cut = 0.0
+        if raw_area > 0:
+            cut = max(0.0, 1.0 - ((x2 - x) * (y2 - y)) / raw_area)
         return Detection(
             x=x, y=y, w=x2 - x, h=y2 - y,
             confidence=self.confidence,
             landmarks=self.landmarks,
+            truncated_fraction=max(self.truncated_fraction, cut),
         )
 
 

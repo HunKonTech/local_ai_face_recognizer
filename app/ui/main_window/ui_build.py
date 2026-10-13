@@ -210,6 +210,7 @@ class UiBuildMixin:
         self._preview_panel.face_selected.connect(self._on_preview_face_selected)
         self._preview_panel.face_assign_requested.connect(self._on_preview_face_assign)
         self._preview_panel.face_delete_requested.connect(self._on_preview_face_delete)
+        self._preview_panel.face_not_a_face_requested.connect(self._on_preview_face_not_a_face)
         self._preview_panel.face_create_requested.connect(self._on_preview_face_create)
         self._preview_panel.face_bbox_update_requested.connect(
             self._on_preview_face_bbox_update

@@ -12,6 +12,7 @@ from app.detectors.base import Detection, FaceDetector
 from app.services.multi_stage_face_validator import (
     CONFIRM,
     REJECT,
+    VETO,
     MultiStageFaceValidator,
 )
 
@@ -177,3 +178,134 @@ def test_insightface_abstains_when_unavailable():
         yunet_detector=_CropEchoDetector(),
     )
     assert "yunet" in v.active_technologies()
+
+
+# ── Deep-detector quorum (Haar / eyes only add evidence) ─────────────────────
+
+def _tech(v, name: str, weight: int, vote: str):
+    v._techs.append((name, weight, lambda crop, local, min_face, _v=vote: _v))
+    return v
+
+
+def test_haar_and_eyes_cannot_keep_texture_box():
+    # Carpet pattern: YuNet re-finds it, Haar + eyes fire on the texture, the
+    # independent Caffe SSD does not.  The legacy 3-of-4 vote kept it.
+    v = _validator(find_yunet=True, fake_votes=[])
+    _tech(v, "caffe_ssd", 1, REJECT)
+    _tech(v, "haar", 1, CONFIRM)
+    _tech(v, "eyes", 1, CONFIRM)
+    assert v.verify(_img(), _DET) is None
+
+
+def test_two_deep_detectors_keep_face():
+    v = _validator(find_yunet=True, fake_votes=[])
+    _tech(v, "caffe_ssd", 1, CONFIRM)
+    _tech(v, "haar", 1, REJECT)
+    assert v.verify(_img(), _DET) is not None
+
+
+def test_insightface_alone_meets_deep_quorum():
+    # Profile face: only InsightFace (weight 2) sees it.
+    v = _validator(find_yunet=False, fake_votes=[])
+    _tech(v, "caffe_ssd", 1, REJECT)
+    _tech(v, "insightface", 2, CONFIRM)
+    assert v.verify(_img(), _DET) is not None
+
+
+def test_weak_votes_count_when_no_second_deep_detector():
+    # Only YuNet among the deep detectors → legacy vote (fail-safe).
+    v = _validator(find_yunet=True, fake_votes=[])
+    _tech(v, "haar", 1, CONFIRM)
+    assert v.verify(_img(), _DET) is not None
+
+
+def test_min_strong_weight_zero_restores_legacy_vote():
+    v = _validator(find_yunet=True, fake_votes=[], multistage_min_strong_weight=0)
+    _tech(v, "caffe_ssd", 1, REJECT)
+    _tech(v, "haar", 1, CONFIRM)
+    assert v.verify(_img(), _DET) is not None
+
+
+# ── InsightFace veto ─────────────────────────────────────────────────────────
+
+def test_insightface_veto_overrides_other_confirmations():
+    v = _validator(find_yunet=True, fake_votes=[])
+    _tech(v, "caffe_ssd", 1, CONFIRM)
+    _tech(v, "insightface", 2, VETO)
+    assert v.verify(_img(), _DET) is None
+
+
+def test_insightface_plain_reject_is_not_a_veto():
+    v = _validator(find_yunet=True, fake_votes=[])
+    _tech(v, "caffe_ssd", 1, CONFIRM)
+    _tech(v, "insightface", 2, REJECT)
+    assert v.verify(_img(), _DET) is not None
+
+
+class _ScoredInsightFace(FaceDetector):
+    """Fake SCRFD: a centered face with a fixed score; records each call."""
+
+    def __init__(self, score: float) -> None:
+        self._score = score
+        self.calls: list = []
+
+    @property
+    def backend_name(self) -> str:
+        return "insightface_scrfd"
+
+    def detect(self, image_bgr, confidence_threshold=0.5, min_face_size=0,
+               *, allow_below_prepared=False):
+        self.calls.append((confidence_threshold, allow_below_prepared))
+        if self._score < confidence_threshold:
+            return []
+        h, w = image_bgr.shape[:2]
+        fw, fh = int(w * 0.5), int(h * 0.5)
+        return [Detection(x=(w - fw) // 2, y=(h - fh) // 2, w=fw, h=fh,
+                          confidence=self._score)]
+
+
+def _insightface_vote(score: float):
+    fake = _ScoredInsightFace(score)
+    v = MultiStageFaceValidator(
+        _cfg(multistage_use_insightface=True),
+        yunet_detector=_CropEchoDetector(),
+        insightface_detector=fake,
+    )
+    name, weight, vote_fn = v._techs[-1]
+    assert (name, weight) == ("insightface", 2)
+    crop, local, min_face = v._prepare_crop(_img(), _DET)
+    return vote_fn(crop, local, min_face), fake.calls
+
+
+def test_insightface_vote_confirm_reject_veto_bands():
+    assert _insightface_vote(0.9)[0] == CONFIRM
+    assert _insightface_vote(0.4)[0] == REJECT   # between veto 0.30 and 0.55
+    assert _insightface_vote(0.1)[0] == VETO
+
+
+def test_insightface_vote_probes_below_prepared_threshold():
+    _, calls = _insightface_vote(0.1)
+    assert calls and all(c == (0.30, True) for c in calls)
+
+
+def test_insightface_detector_lowers_scrfd_threshold_for_one_call():
+    from app.detectors.insightface_detector import InsightFaceDetector
+
+    class _DetModel:
+        det_thresh = 0.55
+
+    class _App:
+        def __init__(self):
+            self.det_model = _DetModel()
+            self.seen: list = []
+
+        def get(self, img, max_num=0):
+            self.seen.append(self.det_model.det_thresh)
+            return []
+
+    det = object.__new__(InsightFaceDetector)
+    det._app = _App()
+    det.detect(_img(), confidence_threshold=0.3, allow_below_prepared=True)
+    det.detect(_img(), confidence_threshold=0.3)
+    assert det._app.seen == [0.3, 0.55]
+    assert det._app.det_model.det_thresh == 0.55

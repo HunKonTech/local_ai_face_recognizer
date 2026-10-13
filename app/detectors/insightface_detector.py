@@ -63,13 +63,22 @@ class InsightFaceDetector(FaceDetector):
         image_bgr: np.ndarray,
         confidence_threshold: float = 0.5,
         min_face_size: int = 0,
+        *,
+        allow_below_prepared: bool = False,
     ) -> List[Detection]:
-        """Detect faces in *image_bgr* (BGR uint8); strongest first."""
+        """Detect faces in *image_bgr* (BGR uint8); strongest first.
+
+        SCRFD never reports scores below the threshold the pack was prepared
+        with, unless *allow_below_prepared* is set (the verification gate's
+        veto probe) — the co-detection pass keeps that floor on purpose.
+        """
         if image_bgr is None or image_bgr.size == 0:
             return []
 
         try:
-            raw_faces = self._app.get(image_bgr, max_num=0)
+            raw_faces = self._get_faces(
+                image_bgr, confidence_threshold if allow_below_prepared else None
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning("InsightFace detection failed: %s", exc)
             return []
@@ -104,6 +113,24 @@ class InsightFaceDetector(FaceDetector):
         results.sort(key=lambda d: d.confidence, reverse=True)
         return results
 
+    def _get_faces(self, image_bgr: np.ndarray, floor: Optional[float]):
+        """Run the pack; with *floor*, let SCRFD report scores down to it.
+
+        ``FaceAnalysis.prepare(det_thresh=…)`` makes SCRFD drop everything below
+        that score internally, so a lower per-call threshold would never see the
+        weak scores.  Lower the model's threshold for this one call only.
+        """
+        det_model = getattr(self._app, "det_model", None)
+        saved = getattr(det_model, "det_thresh", None)
+        lower = floor is not None and saved is not None and floor < saved
+        if lower:
+            det_model.det_thresh = float(floor)
+        try:
+            return self._app.get(image_bgr, max_num=0)
+        finally:
+            if lower:
+                det_model.det_thresh = saved
+
     # ------------------------------------------------------------------
 
     def _load_model(self, model_pack: str, gpu: Optional[bool]):
@@ -122,7 +149,12 @@ class InsightFaceDetector(FaceDetector):
         # Windows/Linux path), CoreML only on macOS, CPU always as fallback.
         providers = accel.onnx_providers()
         try:
-            app = FaceAnalysis(name=model_pack, providers=providers)
+            # Detection only: bbox, score and the 5 keypoints all come from
+            # SCRFD.  Without this every get() also ran the pack's landmark,
+            # gender/age and recognition models on each face it found.
+            app = FaceAnalysis(
+                name=model_pack, providers=providers, allowed_modules=["detection"]
+            )
             app.prepare(
                 ctx_id=ctx_id,
                 det_thresh=self._det_thresh,
