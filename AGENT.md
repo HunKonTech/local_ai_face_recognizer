@@ -38,10 +38,11 @@ python -m app.main                   # Run app directly (after setup)
 | Adjust embedding params | [`config.yaml`](config.yaml) → [`app/config.py`](app/config.py) | Update threshold, dimensions |
 | Database schema change | [`app/db/models.py`](app/db/models.py) | Update ORM, handle migration |
 | Debug face clustering | [`app/clustering/clusterer.py`](app/clustering/clusterer.py) | Adjust DBSCAN epsilon in config |
-| Add export format | [`app/services/export_service.py`](app/services/export_service.py) | Extend `export_by_person()` |
+| Add export format | [`app/services/export_service.py`](app/services/export_service.py) | Add an `export_*()` method next to `export_csv()` / `export_json()` / `export_person_images()` |
 | Move a project to another machine | [`app/services/database_package_service.py`](app/services/database_package_service.py) | `.facedb` = DB only; import re-bases paths onto the local library root |
-| Re-attach moved / renamed originals | [`app/services/image_path_matcher.py`](app/services/image_path_matcher.py) | Scan folders, match by name + SHA-256, review in `ImagePathRepairDialog` |
-| Trace pipeline steps | [`app/workers/pipeline_worker.py`](app/workers/pipeline_worker.py) | Follow scan → detect → embed → cluster |
+| Re-attach moved / renamed originals | [`app/services/image_path_matcher.py`](app/services/image_path_matcher.py) | Scan folders, match by name + SHA-256 content hash, review in `ImagePathRepairDialog` |
+| Trace pipeline steps | [`app/workers/deep_pipeline_worker.py`](app/workers/deep_pipeline_worker.py) | `DeepPipelineWorker._run_pipeline()`: modes `rescan` / `rebuild` / `train` / `detect_faces` / `cluster`; scan → detect → embed → cleanup → train → recognize → cluster → suggest |
+| Change deep recognition | [`app/services/deep_recognition_service.py`](app/services/deep_recognition_service.py), [`app/deep/classifier.py`](app/deep/classifier.py) | MLP ensemble over face embeddings; model saved under `data/deep_model/` |
 | Add background task | [`app/tasks/manager.py`](app/tasks/manager.py) | Use `get_task_manager().submit(name, work_fn, priority=TaskPriority.HIGH)` |
 
 ---
@@ -60,13 +61,15 @@ Users never research; app always shows exact fix commands or one-click button. E
 
 | Module | Key Functions/Classes | Purpose |
 |--------|----------------------|---------|
-| [`app/config.py`](app/config.py) | `AppConfig`, `DetectionConfig`, `EmbeddingConfig` | Load/validate all settings |
-| [`app/db/database.py`](app/db/database.py) | `session_scope()`, `init_db()` | DB access (always use context manager) |
-| [`app/detectors/factory.py`](app/detectors/factory.py) | `create_detector()` | Coral → CPU fallback |
-| [`app/embeddings/tflite_embedder.py`](app/embeddings/tflite_embedder.py) | `TfliteEmbedder.embed()` | Face → 192/512-dim embedding |
-| [`app/clustering/clusterer.py`](app/clustering/clusterer.py) | `Clusterer.cluster()` | DBSCAN cosine distance |
-| [`app/services/scan_service.py`](app/services/scan_service.py) | `ScanService.scan()` | Find new image files |
-| [`app/services/detection_service.py`](app/services/detection_service.py) | `DetectionService.detect_faces()` | Run detector on image |
+| [`app/config.py`](app/config.py) | `load_config()`, `AppConfig`, `DetectionConfig`, `EmbeddingConfig` | Load/validate all settings |
+| [`app/db/database.py`](app/db/database.py) | `session_scope()`, `init_db(db_path)` | DB access (always use context manager) |
+| [`app/detectors/factory.py`](app/detectors/factory.py) | `create_detector(config)` | Coral → YuNet → CPU fallback |
+| [`app/embeddings/tflite_embedder.py`](app/embeddings/tflite_embedder.py) | `TFLiteEmbedder.embed()` / `embed_batch()` | Face → 192/512-dim embedding |
+| [`app/services/embedding_service.py`](app/services/embedding_service.py) | `build_embedder(config)`, `EmbeddingService` | Pick the embedder backend, store vectors |
+| [`app/clustering/clusterer.py`](app/clustering/clusterer.py) | `cluster_embeddings()` | DBSCAN cosine distance + same-pair constraints |
+| [`app/services/scan_service.py`](app/services/scan_service.py) | `ScanService.scan(root_folders)` | Find new image files |
+| [`app/services/detection_service.py`](app/services/detection_service.py) | `DetectionService.process(image_ids)` | Run detector on images, save Face rows/crops |
+| [`app/workers/deep_pipeline_worker.py`](app/workers/deep_pipeline_worker.py) | `DeepPipelineWorker` (QThread) | Full scan / detect / train / recognize pipeline |
 | [`app/ui/i18n/`](app/ui/i18n/) | `t("key")` | Translate string to EN/HU |
 | [`app/tasks/manager.py`](app/tasks/manager.py) | `get_task_manager().submit()`, `TaskPriority`, `BackgroundTask` | Priority-scheduled background tasks with UI visibility + auto-cleanup |
 
@@ -119,7 +122,8 @@ local_ai_face_recognizer/
 │   │   ├── scan_service.py        # Local image discovery, hashing, metadata
 │   │   ├── detection_service.py   # Run detector, save Face records/crops
 │   │   ├── embedding_service.py   # Run embedder, save embeddings
-│   │   ├── recognition_service.py # Known-person matching and assignment
+│   │   ├── deep_recognition_service.py # Train MLP ensemble, recognize unknown faces
+│   │   ├── rerecognition_service.py # Re-run recognition on existing faces
 │   │   ├── clustering_service.py  # Unknown-person clustering and recluster
 │   │   ├── suggestion_service.py  # Unknown -> known-person suggestions
 │   │   ├── identity_service.py    # Rename / merge / delete / reassign people
@@ -142,9 +146,10 @@ local_ai_face_recognizer/
 │   │   ├── update_service.py      # Sparkle/appcast update checks
 │   │   └── geocoding/             # Provider interface + Nominatim provider
 │   ├── workers/
-│   │   ├── pipeline_worker.py     # QThread: scan -> detect -> embed -> recognize -> cluster -> suggest
-│   │   ├── deep_pipeline_worker.py # Deep recognition background run
-│   │   ├── match_job_worker.py    # Batch match jobs
+│   │   ├── deep_pipeline_worker.py # QThread: scan -> detect -> embed -> cleanup -> train -> recognize -> cluster -> suggest
+│   │   ├── pipeline_result.py     # PipelineResult returned by the pipeline modes
+│   │   ├── match_score_worker.py  # Batch match scoring
+│   │   ├── object_match_worker.py # Object similarity matching
 │   │   ├── thumbnail_worker.py    # Thumbnail loading/generation
 │   │   ├── drive_image_worker.py  # Drive thumbnail/image fetch
 │   │   └── *_worker.py            # Export, geocoding, rerecognition, Astro jobs
@@ -271,7 +276,7 @@ python -c "from app.db.database import init_db; init_db(); print('DB ready')"
 | **Session context manager** | Auto-commit/rollback; prevents transaction leaks | All services |
 | **MobileFaceNet fallback** | Manual download (no canonical URL); fallback HOG keeps app running | [`embeddings/tflite_embedder.py`](app/embeddings/tflite_embedder.py) |
 | **i18n via `t("key")`** | Bilingual requirement; single source of truth | [`ui/i18n/`](app/ui/i18n/) |
-| **Multiple DB support** | Let users switch databases; path saved in `~/.face_local_prefs.json` | [`ui/dialogs/settings_dialog.py`](app/ui/dialogs/settings_dialog.py) |
+| **Multiple DB support** | Let users switch databases; settings stored in `Documents/localAIFaceRecognizer/settings/settings.ini` via `app_qsettings()` | [`app_settings.py`](app/app_settings.py), [`ui/dialogs/settings_dialog.py`](app/ui/dialogs/settings_dialog.py) |
 | **TaskManager for all background work** | Unified scheduling, priority queue, pause/resume, UI visibility; auto-cleanup after 5 min | [`tasks/manager.py`](app/tasks/manager.py) |
 
 ---
@@ -324,7 +329,7 @@ scan:
 
 1. **Strings**: Add to [`app/ui/i18n/`](app/ui/i18n/) (EN + HU)
 2. **Widget code**: Use `t("key")`, never hardcode
-3. **Persistent UI**: Add to `_retranslate()` in [`main_window.py`](app/ui/main_window.py)
+3. **Persistent UI**: Add to `_retranslate()` in [`main_window/ui_build.py`](app/ui/main_window/ui_build.py)
 4. **New dependency**: Update `pyproject.toml`, add graceful fallback + clear error message with install command
 5. **Dialogs**: Both OK/Cancel and Close buttons translated
 
@@ -338,7 +343,7 @@ scan:
 - → Missing model files → build script auto-downloads; check `models/` directory
 
 **Detector issues?**
-- → 0 faces detected → images marked `detection_done=True`; click "Force Full Rescan"
+- → 0 faces detected → images marked `detection_done=True`; run "Full Rescan" in the scan dialog
 - → TPU device not working → auto-falls back to CPU; check TPU Status dialog for driver issues
 
 **Clustering issues?**
