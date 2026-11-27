@@ -37,6 +37,55 @@ class LayoutNode(Protocol):
 SWEEPS = 6
 
 
+def place_satellites(
+    positions: dict[int, tuple[float, int]],
+    satellites: dict[int, int],
+    spouses: dict[int, Sequence[int]],
+    *,
+    box_w: float,
+    gap: float,
+) -> dict[int, tuple[float, int]]:
+    """Insert satellite boxes (friends) beside the box they belong to.
+
+    *positions* is a finished family layout; ``satellites`` maps a satellite
+    to the box it sits beside (an anchor, or the previous satellite of the
+    same anchor). The satellite goes on the side away from the anchor's
+    spouse; boxes further out in that row shift by one slot, so family order
+    is unchanged (off mode = no satellites = identical positions).
+    """
+    out = dict(positions)
+    step = box_w + gap
+    side_of: dict[int, int] = {}
+    pending = dict(satellites)
+    while pending:
+        progressed = False
+        for sat, near in list(pending.items()):
+            if near not in out:
+                if near not in pending:
+                    pending.pop(sat)
+                continue
+            nx, band = out[near]
+            if near in side_of:
+                side = side_of[near]
+            else:
+                right = [s for s in spouses.get(near, ()) if s in out and out[s][1] == band and out[s][0] > nx]
+                left = [s for s in spouses.get(near, ()) if s in out and out[s][1] == band and out[s][0] < nx]
+                side = -1 if right and not left else 1
+            for pid, (x, b) in list(out.items()):
+                if b == band and pid != near and (x - nx) * side > 0:
+                    out[pid] = (x + side * step, b)
+            out[sat] = (nx + side * step, band)
+            side_of[sat] = side
+            pending.pop(sat)
+            progressed = True
+        if not progressed:
+            break
+    min_x = min((x for x, _ in out.values()), default=0.0)
+    if min_x < 0:
+        out = {pid: (x - min_x, b) for pid, (x, b) in out.items()}
+    return out
+
+
 def compute_layout(
     nodes: Iterable[LayoutNode],
     *,

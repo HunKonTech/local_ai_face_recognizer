@@ -133,3 +133,51 @@ def test_married_in_spouse_parents_drag_sibling_family_down():
     assert gen[5] == gen[6] == gen[7] == 3
     assert gen[1] == gen[2] == 2
     assert gen[8] == 4
+
+
+# --- friend satellites (add-family-tree-friend-lines) ------------------------
+
+
+def _friends_family():
+    f = Family()
+    f.add(1, 0)
+    f.add(2, 0)
+    f.marry(1, 2)
+    f.add(3, 1, parents=(1, 2))
+    f.add(4, 1, parents=(1, 2))
+    f.add(5, 1)
+    f.marry(3, 5)
+    return f
+
+
+def test_satellites_off_gives_identical_positions():
+    from app.services.family_tree_layout import place_satellites
+
+    f = _friends_family()
+    base = compute_layout(f.nodes.values(), box_w=100, gap=20)
+    spouses = {p: n.spouse_ids for p, n in f.nodes.items()}
+    assert place_satellites(base, {}, spouses, box_w=100, gap=20) == base
+
+
+def test_satellite_sits_next_to_anchor_and_keeps_family_order():
+    from app.services.family_tree_layout import place_satellites
+
+    f = _friends_family()
+    base = compute_layout(f.nodes.values(), box_w=100, gap=20)
+    spouses = {p: n.spouse_ids for p, n in f.nodes.items()}
+    pos = place_satellites({**base}, {9: 3, 10: 9}, spouses, box_w=100, gap=20)
+    pos = {p: v for p, v in pos.items()}
+    base_x = {p: base[p][0] for p in base}
+    assert pos[9][1] == pos[3][1] == pos[10][1]
+    # Adjacent to the anchor, on the side away from the spouse; chained after.
+    assert abs(abs(pos[9][0] - pos[3][0]) - 120) < 1e-6
+    assert (pos[9][0] - pos[3][0]) * (pos[5][0] - pos[3][0]) < 0
+    assert abs(abs(pos[10][0] - pos[9][0]) - 120) < 1e-6
+    # Family members keep their relative order in each row; only shifts by
+    # whole inserted slots.
+    for band in (0, 1):
+        before = sorted((p for p in base if base[p][1] == band), key=lambda p: base[p][0])
+        after = sorted((p for p in base if pos[p][1] == band), key=lambda p: pos[p][0])
+        assert before == after
+    for p in base:
+        assert abs(((pos[p][0] - base_x[p]) / 120) - round((pos[p][0] - base_x[p]) / 120)) < 1e-6

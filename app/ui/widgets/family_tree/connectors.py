@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush, QColor, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsPathItem, QGraphicsRectItem, QGraphicsSimpleTextItem
 
@@ -11,6 +12,7 @@ from app.ui.widgets.family_tree.geometry import _bus_tracks, _marriage_label
 from app.ui.widgets.family_tree.style import (
     _ANCESTOR_BORDER,
     _DESCENDANT_BORDER,
+    _FRIEND_LINE,
     _LINE,
     _SPOUSE_BORDER,
     _TEXT,
@@ -186,6 +188,42 @@ class _ConnectorsMixin:
                     {"item": item, "kind": "group", "group": gidx,
                      "role": "childdrop", "child": child_id}
                 )
+
+    def _draw_friend_lines(self, graph, positions) -> None:
+        """Dashed friend -> anchor links (excluded from lineage recolouring).
+
+        Same row: a horizontal segment at 1/3 box height (clear of the spouse
+        line at 1/2). Different rows: an elbow from the friend's top/bottom.
+        """
+        self._friend_items = []
+        for friend, anchor in getattr(graph, "friend_edges", None) or ():
+            if friend not in positions or anchor not in positions:
+                continue
+            fx, fy = positions[friend]
+            ax, ay = positions[anchor]
+            fh = self._box_h.get(friend, self.BOX_H)
+            ah = self._box_h.get(anchor, self.BOX_H)
+            if abs(fy - ay) < 0.5:
+                y = fy + fh / 3
+                if fx < ax:
+                    pts = [(fx + self.BOX_W, y), (ax, y)]
+                else:
+                    pts = [(fx, y), (ax + self.BOX_W, y)]
+            else:
+                fcx, acx = fx + self.BOX_W / 2, ax + self.BOX_W / 2
+                if fy < ay:
+                    start, end = (fcx, fy + fh), (acx, ay)
+                else:
+                    start, end = (fcx, fy), (acx, ay + ah)
+                mid = (start[1] + end[1]) / 2
+                pts = [start, (start[0], mid), (end[0], mid), end]
+            item = self._add_line_path(pts)
+            pen = QPen(_FRIEND_LINE)
+            pen.setWidth(2)
+            pen.setStyle(Qt.DashLine)
+            item.setPen(pen)
+            item.setZValue(-4)
+            self._friend_items.append(item)
 
     def _add_edge_label(self, cx: float, cy: float, text: str) -> None:
         """Draw a small white-backed text tag centred on (cx, cy).

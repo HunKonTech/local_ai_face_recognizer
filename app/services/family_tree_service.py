@@ -12,6 +12,7 @@ rows, and never mutates relationships itself (edits go through FamilyService).
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Literal, Optional
@@ -36,6 +37,9 @@ LineageKind = Literal[
     "in_law",       # related to from_id's spouse (e.g. parent-in-law)
     "unrelated",
 ]
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,6 +76,16 @@ class FamilyTreeGraph:
     marriages: dict[tuple[int, int], tuple[Optional[str], Optional[str], Optional[str]]] = field(
         default_factory=dict
     )
+    # Friend links derived from family codes (anchor -> friends), for anchors
+    # in ``nodes``. Friends that are not family members are NOT in ``nodes``
+    # (generations / family layout stay untouched); ``friend_nodes`` carries
+    # their box data for the view layer (generation = first anchor's).
+    friends: dict[int, tuple[int, ...]] = field(default_factory=dict)
+    friend_nodes: dict[int, "FamilyTreeNode"] = field(default_factory=dict)
+    # Set by the view layer when friends are shown: dashed (friend, anchor)
+    # lines to draw, and satellite friend -> layout neighbour it sits beside.
+    friend_edges: list[tuple[int, int]] = field(default_factory=list)
+    satellites: dict[int, int] = field(default_factory=dict)
 
     def marriage(
         self, person_id_a: int, person_id_b: int
@@ -91,6 +105,53 @@ class FamilyTreeGraph:
     def ordered(self) -> list[FamilyTreeNode]:
         """Nodes sorted by generation then id (stable for rendering/export)."""
         return sorted(self.nodes.values(), key=lambda n: (n.generation, n.person_id))
+
+
+def friend_links(persons, scheme=None) -> dict[int, list[int]]:
+    """Anchor id -> friend ids derived from family codes (no DB rows).
+
+    *persons* is an iterable of ``(person_id, family_code)``. A part of a
+    family code whose parsed suffix is the scheme's friend marker (``C81B``)
+    links the person to every person whose family code equals that part
+    without the marker (``C81``). Multi-codes (``C81B,C82B``) and ranges
+    (``C[1-3]B``) give one link per anchor; self-links and missing anchors
+    are ignored.
+    """
+    from app.services.family_code_interpreter import (
+        _resolve_scheme,
+        _split_multi,
+        expand_range_code,
+        parse_extended_code,
+    )
+
+    s = _resolve_scheme(scheme)
+    letter = (s.friend_letter or "").upper()
+    rows = [(int(pid), (code or "").strip()) for pid, code in persons if code]
+    index: dict[str, list[int]] = defaultdict(list)
+    for pid, code in rows:
+        index[code.upper()].append(pid)
+    out: dict[int, list[int]] = defaultdict(list)
+    if not letter:
+        return {}
+    for pid, code in rows:
+        for part in _split_multi(code):
+            expanded = expand_range_code(part, scheme=s) or [part]
+            for one in expanded:
+                try:
+                    info = parse_extended_code(one, scheme=s)
+                except ValueError:
+                    continue
+                if info.suffix_type != "friend":
+                    continue
+                raw = info.raw
+                cut = raw.upper().rfind(letter)
+                if cut <= 0:
+                    continue
+                anchor_code = raw[:cut].upper()
+                for anchor in index.get(anchor_code, ()):
+                    if anchor != pid and pid not in out[anchor]:
+                        out[anchor].append(pid)
+    return {a: sorted(f) for a, f in out.items()}
 
 
 def infer_coparent_links(
@@ -662,6 +723,7 @@ class FamilyTreeService:
         graph = FamilyTreeGraph(
             root_id=root_id, marriages=self._marriage_dates(included)
         )
+        self._attach_friends(graph, included, generations)
         for pid, generation in generations.items():
             person = persons.get(pid)
             if person is None:
@@ -683,6 +745,38 @@ class FamilyTreeService:
                 thumbnail_path=person.thumbnail_path or crops.get(pid),
             )
         return graph
+
+    def _attach_friends(self, graph, included: set[int], generations: dict[int, int]) -> None:
+        """Fill ``graph.friends`` / ``graph.friend_nodes`` (design D2)."""
+        try:
+            rows = self._session.query(Person.id, Person.family_code).filter(
+                Person.family_code.isnot(None), Person.family_code != ""
+            ).all()
+            links = friend_links(rows)
+        except Exception:  # noqa: BLE001 - friends are optional decoration
+            log.exception("Could not derive friend links")
+            return
+        graph.friends = {a: tuple(f) for a, f in links.items() if a in included}
+        outside: dict[int, int] = {}
+        for anchor in sorted(graph.friends):
+            for friend in graph.friends[anchor]:
+                if friend not in included and friend not in outside:
+                    outside[friend] = generations[anchor]
+        if not outside:
+            return
+        crops = self._representative_crops(set(outside))
+        for p in self._session.query(Person).filter(Person.id.in_(list(outside))).all():
+            graph.friend_nodes[p.id] = FamilyTreeNode(
+                person_id=p.id,
+                name=p.name,
+                generation=outside[p.id],
+                is_member=bool(p.is_family_tree_member),
+                gender=p.gender,
+                family_code=p.family_code,
+                birth_date=p.birth_date,
+                death_date=p.death_date,
+                thumbnail_path=p.thumbnail_path or crops.get(p.id),
+            )
 
     def _representative_crops(self, person_ids: set[int]) -> dict[int, str]:
         """Best (highest-confidence) face crop per person, for thumbnails."""

@@ -34,6 +34,17 @@ class CompositionMixin:
         self._act_expand_all = menu.addAction("", self.expand_all)
         self._act_members = menu.addAction("", self._toggle_non_members)
         self._act_members.setCheckable(True)
+        from PySide6.QtGui import QActionGroup
+
+        self._friends_menu = menu.addMenu("")
+        group = QActionGroup(self)
+        self._friend_mode_acts = {}
+        for mode in ("off", "all", "selected"):
+            act = self._friends_menu.addAction("")
+            act.setCheckable(True)
+            act.setActionGroup(group)
+            act.triggered.connect(lambda _c=False, m=mode: self.set_friend_mode(m))
+            self._friend_mode_acts[mode] = act
         menu.addSeparator()
         self._act_zoom_in = menu.addAction("", self.tree.zoom_in)
         self._act_zoom_in.setShortcut("Ctrl++")
@@ -51,6 +62,10 @@ class CompositionMixin:
         ):
             act.setText(t(key))
         self._act_members.setChecked(self.state.include_non_members)
+        self._friends_menu.setTitle(t("ts_friends_menu"))
+        for mode, act in self._friend_mode_acts.items():
+            act.setText(t(f"ts_friends_{mode}"))
+            act.setChecked(self.state.friend_mode == mode)
 
     def _changed(self) -> None:
         self.mark_dirty()
@@ -95,6 +110,34 @@ class CompositionMixin:
 
     def show_person(self, pid: int) -> None:
         self.state.hidden.discard(pid)
+        self._changed()
+
+    def set_friend_mode(self, mode: str) -> None:
+        self.state.friend_mode = mode
+        for m, act in self._friend_mode_acts.items():
+            act.setChecked(m == mode)
+        self._changed()
+
+    def friends_shown_for(self, pid: int) -> bool:
+        mode = self.state.friend_mode
+        return mode == "all" or (mode == "selected" and pid in self.state.friend_anchors)
+
+    def toggle_person_friends(self, pid: int) -> None:
+        """Context menu "Show friends" for one anchor (switches to selected mode)."""
+        st = self.state
+        if self.friends_shown_for(pid):
+            if st.friend_mode == "all":
+                anchors = set((self.full_graph.friends if self.full_graph else {}) or {})
+                st.friend_anchors = (anchors & self.visible) - {pid}
+                st.friend_mode = "selected"
+            else:
+                st.friend_anchors.discard(pid)
+        else:
+            if st.friend_mode == "off":
+                st.friend_anchors = set()
+            st.friend_mode = "selected" if st.friend_mode != "all" else "all"
+            st.friend_anchors.add(pid)
+        self._retranslate_compose()
         self._changed()
 
     def _toggle_non_members(self) -> None:
@@ -204,6 +247,12 @@ class CompositionMixin:
         if pid in self.state.floating:
             menu.addAction(t("ts_connect"), lambda: self.connect_floating(pid))
             menu.addAction(t("ts_remove_floating"), lambda: self.remove_floating(pid))
+        friends = (self.full_graph.friends if self.full_graph is not None else {}) or {}
+        if friends.get(pid):
+            act = menu.addAction(t("ts_show_friends"))
+            act.setCheckable(True)
+            act.setChecked(self.friends_shown_for(pid))
+            act.toggled.connect(lambda _c: self.toggle_person_friends(pid))
         fields_menu = menu.addMenu(t("ts_person_fields"))
         order = [f.key for f in self._catalog]
         current = set(self.state.fields_for(pid, order))

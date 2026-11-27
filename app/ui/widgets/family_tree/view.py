@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
 )
 
-from app.services.family_tree_layout import compute_layout
+from app.services.family_tree_layout import compute_layout, place_satellites
 from app.services.family_tree_service import FamilyTreeGraph
 from app.ui.widgets.family_tree.connectors import _ConnectorsMixin
 from app.ui.widgets.family_tree.geometry import _marriage_label, lineage_sets
@@ -98,6 +98,7 @@ class FamilyTreeView(
         self._collapsible: set[int] = set()
         self._collapsed: set[int] = set()
         self._badge_items: dict[int, object] = {}
+        self._friend_items: list = []
         self._show_markers = True
         self.setAcceptDrops(True)
 
@@ -131,6 +132,7 @@ class FamilyTreeView(
         self._connector_groups = []
         self._box_h = {}
         self._badge_items = {}
+        self._friend_items = []
         self._graph = graph
         self._focus_id = focus_id
         self._selected_id = selected_id
@@ -176,6 +178,7 @@ class FamilyTreeView(
         # Connector lines first (under the boxes).
         self._draw_connectors(graph, positions, focus_id)
         self._update_line_colors()
+        self._draw_friend_lines(graph, positions)
 
         # Boxes.
         for pid, (x, y) in positions.items():
@@ -294,9 +297,15 @@ class FamilyTreeView(
         """
         if h_gap is None:
             h_gap = self.H_GAP
-        placed = compute_layout(
-            graph.nodes.values(), box_w=self.BOX_W, gap=h_gap
-        )
+        satellites = getattr(graph, "satellites", None) or {}
+        family = [n for pid, n in graph.nodes.items() if pid not in satellites]
+        placed = compute_layout(family, box_w=self.BOX_W, gap=h_gap)
+        if satellites:
+            placed = place_satellites(
+                placed, satellites,
+                {pid: n.spouse_ids for pid, n in graph.nodes.items()},
+                box_w=self.BOX_W, gap=h_gap,
+            )
         # Per-generation row heights: every box in a band is as tall as the
         # band's tallest content; the next band starts below it (no overlap).
         n_bands = max((band for _, band in placed.values()), default=-1) + 1

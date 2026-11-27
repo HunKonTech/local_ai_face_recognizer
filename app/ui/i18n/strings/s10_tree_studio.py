@@ -87,4 +87,13 @@ STRINGS = {
     "ts_export_progress":  {"en": "Loading photos…", "hu": "Fényképek betöltése…"},
     "ts_export_done":      {"en": "Saved: {path}", "hu": "Mentve: {path}"},
     "ts_export_failed":    {"en": "Export failed:\n{error}", "hu": "Az exportálás nem sikerült:\n{error}"},
+    # Friend lines (add-family-tree-friend-lines)
+    "ts_friends_menu":     {"en": "Friends", "hu": "Barátok"},
+    "ts_friends_off":      {"en": "Off", "hu": "Kikapcsolva"},
+    "ts_friends_all":      {"en": "Everyone", "hu": "Mindenkinél"},
+    "ts_friends_selected": {"en": "Selected persons only", "hu": "Csak a kiválasztott személyeknél"},
+    "ts_show_friends":     {"en": "Show friends", "hu": "Barátok megjelenítése"},
+    "ft_show_friends":     {"en": "Friends", "hu": "Barátok"},
+    "ft_show_friends_tip": {"en": "Show friends recorded in family codes (e.g. C81B is a friend of C81) with dashed lines.",
+                            "hu": "A családi kódban rögzített barátok (pl. C81B a C81 barátja) megjelenítése szaggatott vonallal."},
 }

@@ -388,3 +388,47 @@ def test_is_family_tree_member_defaults_true(db):
     with session_scope() as session:
         person = _person(session, "Fresh")
         assert person.is_family_tree_member is True
+
+
+# --- friend links from family codes (add-family-tree-friend-lines) -----------
+
+
+def test_friend_links_single_shared_range_missing_and_self():
+    from app.services.family_tree_service import friend_links
+
+    links = friend_links([
+        (1, "C81"), (2, "C82"), (3, "C81B,C82B"), (4, "C[1-3]B"),
+        (5, "C1"), (6, "C3"), (7, "C99B"), (8, "C81B"), (9, "C9B"),
+    ])
+    assert links[1] == [3, 8]
+    assert links[2] == [3]
+    assert links[5] == [4] and links[6] == [4]
+    assert 7 not in {f for fs in links.values() for f in fs}
+    assert all(a not in fs for a, fs in links.items())
+
+
+def test_friend_links_custom_scheme_letter():
+    from app.services.family_code_schemes import FamilyCodeScheme
+    from app.services.family_tree_service import friend_links
+
+    scheme = FamilyCodeScheme(scheme_id="x", name="X", friend_letter="K")
+    links = friend_links([(1, "C81"), (2, "C81K"), (3, "C81B")], scheme=scheme)
+    assert links == {1: [2]}
+
+
+def test_graph_friends_do_not_change_nodes_or_generations(db):
+    with session_scope() as session:
+        ids = _build_family(session)
+        anchor = next(iter(ids.values()))
+        p = session.get(Person, anchor)
+        p.family_code = "Q5"
+        f = Person(name="Friend", is_auto_named=False, family_code="Q5B")
+        session.add(f)
+        session.flush()
+        svc = FamilyTreeService(session)
+        before = {pid: n.generation for pid, n in svc.build_graph().nodes.items()}
+        graph = svc.build_graph()
+        assert {pid: n.generation for pid, n in graph.nodes.items()} == before
+        assert f.id not in graph.nodes
+        assert graph.friends[anchor] == (f.id,)
+        assert graph.friend_nodes[f.id].generation == graph.nodes[anchor].generation

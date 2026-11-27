@@ -238,3 +238,48 @@ def test_json_import_id_with_disagreeing_data_falls_back(db):
         doc["persons"] = {str(a): {"name": "B?", "familyCode": "K2"}}
         res = TreeViewService(s).import_document(doc, name="Y")
         assert TreeViewService(s).load(res.view_id).hidden == {b}
+
+
+# --- friends (add-family-tree-friend-lines) ----------------------------------
+
+
+def _friend_graph():
+    g = _graph()
+    # F (100) friend of P and Q; S is also a friend of R (already a member).
+    g.friends = {P: (100,), Q: (100,), R: (S,)}
+    g.friend_nodes = {100: FamilyTreeNode(100, "F", 1)}
+    return g
+
+
+def test_visible_friends_modes_hidden_and_member():
+    from app.services.tree_view_service import visible_friends
+
+    g = _friend_graph()
+    vis = visible_ids(g, TreeViewState())
+    assert visible_friends(g, "off", (), vis) == {}
+    assert visible_friends(g, "all", (), vis) == {100: [P, Q], S: [R]}
+    assert visible_friends(g, "selected", {P}, vis) == {100: [P]}
+    assert visible_friends(g, "all", (), vis, hidden={100}) == {S: [R]}
+    assert TreeViewState().friend_mode == "off"
+
+
+def test_apply_friends_one_satellite_two_edges_member_linked():
+    from app.services.tree_view_service import apply_friends
+
+    g = _friend_graph()
+    shown = filter_graph(g, visible_ids(g, TreeViewState()))
+    apply_friends(shown, g, "all")
+    assert 100 in shown.nodes and shown.satellites == {100: P}
+    assert sorted(shown.friend_edges) == sorted([(100, P), (100, Q), (S, R)])
+    assert S not in shown.satellites  # already a member: only linked
+
+
+def test_friend_mode_json_and_db_round_trip(db):
+    with session_scope() as s:
+        (a,) = _people(s, ("A", "C81", None))
+        st = TreeViewState(root=RootRef(a), friend_mode="selected", friend_anchors={a})
+        svc = TreeViewService(s)
+        vid = svc.save("Barátok", st).id
+        loaded = svc.load(vid)
+        assert loaded.friend_mode == "selected" and loaded.friend_anchors == {a}
+        assert TreeViewState.from_json({"friendMode": "bogus"}).friend_mode == "off"
