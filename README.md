@@ -9,12 +9,15 @@ Scans a folder tree of images, detects faces, groups identical people into clust
 ## What it does
 
 1. **Scan** — recursively indexes images (`.jpg`, `.jpeg`, `.png`, `.webp`), hashes each file, skips unchanged ones on re-runs.
-2. **Detect** — runs face detection using a Google Coral Edge TPU (if available) or CPU fallback (OpenCV DNN SSD or Haar cascade).
-3. **Embed** — generates 192-dim face embeddings with MobileFaceNet TFLite on **CPU** (Coral is not used for this step — no practical Edge TPU ArcFace model is publicly available).
-4. **Cluster** — groups faces by cosine similarity using DBSCAN.
-5. **Label** — PySide6 GUI lets you rename clusters, merge wrong splits, reassign individual faces, and mark same/different pairs.
-6. **Export** — CSV, JSON reports, or copy face images to a folder.
-7. **Record** — a built-in screen recorder (toolbar ● / ⏸ / ■) captures the app
+2. **Detect** — runs face detection with YuNet (default, with landmarks), a Google Coral Edge TPU (if available) or the CPU fallback (OpenCV DNN SSD / Haar cascade); optional InsightFace SCRFD co-detector. A multi-stage validator drops non-faces, half faces and nested boxes.
+3. **Embed** — aligns each face and generates embeddings on **CPU**: MobileFaceNet TFLite (192-dim), SFace, InsightFace ArcFace (512-dim) or CoreML on macOS (Coral is not used for this step — no practical Edge TPU ArcFace model is publicly available).
+4. **Recognize** — trains an MLP-ensemble classifier from your labeled faces and proposes assignments for unknown faces (auto-assignment review).
+5. **Cluster** — groups the remaining unknown faces by cosine similarity using DBSCAN.
+6. **Label** — PySide6 GUI lets you rename clusters, merge wrong splits, reassign individual faces, and mark same/different pairs.
+7. **Organize** — image browser, family tree, places with map and geocoding, tagged objects, person groups, collages.
+8. **Export** — CSV/JSON reports, face images, EXIF/metadata, static web gallery (Astro), local server / Docker export, `.facepack` / `.facedb` project packages.
+9. **Google Drive** — optional online work mode on a Drive folder (`gdrive` extra).
+10. **Record** — a built-in screen recorder (toolbar ● / ⏸ / ■) captures the app
    window, cursor and microphone for documenting meetings or image
    walk-throughs, alongside a same-named `.srt` subtitle log of which image and
    selected person was active at each moment.
@@ -48,43 +51,36 @@ instead of discovered later.
 
 ```
 app/
-├── main.py               Entry point (Qt app init, arg parsing)
-├── config.py             AppConfig dataclass + YAML loader
-├── logging_setup.py      Structured logging + QLogHandler for GUI
-├── db/
-│   ├── models.py         SQLAlchemy ORM: Image, Face, Person, FaceCorrection
-│   └── database.py       Engine init, session_scope context manager
-├── detectors/
-│   ├── base.py           FaceDetector ABC + Detection dataclass
-│   ├── coral_detector.py CoralDetector — real pycoral integration
-│   ├── cpu_detector.py   CpuDetector  — OpenCV DNN SSD + Haar fallback
-│   └── factory.py        probe_coral() + create_detector() factory
-├── embeddings/
-│   ├── base.py           FaceEmbedder ABC
-│   └── tflite_embedder.py TFLiteEmbedder (CPU, MobileFaceNet) + HOG stub
-├── clustering/
-│   └── clusterer.py      cluster_embeddings() — DBSCAN + same-pair constraints
-├── services/
-│   ├── scan_service.py      ScanService — file discovery + hashing
-│   ├── detection_service.py DetectionService — runs detector, saves crops
-│   ├── embedding_service.py EmbeddingService — runs embedder, stores vectors
-│   ├── clustering_service.py ClusteringService — DBSCAN → Person assignment
-│   ├── identity_service.py  IdentityService — rename/merge/reassign ops
-│   ├── object_service.py    ObjectService — tagged objects (cars, boats, …), point occurrences, person links, merge
-│   └── export_service.py    ExportService — CSV/JSON/image export
-├── workers/
-│   └── pipeline_worker.py PipelineWorker — QThread, runs all 4 stages
+├── main.py            Entry point (Qt app init, CLI args: --config, --db, --debug, --self-test)
+├── config.py          AppConfig dataclasses + YAML loader
+├── app_settings.py    QSettings INI in Documents/localAIFaceRecognizer/settings/
+├── db/                SQLAlchemy ORM (31 tables: Image, Face, Person, Place, TaggedObject,
+│                      Relationship, AutoAssignment, TrainingRun, …) + session_scope()
+├── detectors/         YuNet, Coral Edge TPU, OpenCV SSD/Haar, InsightFace SCRFD;
+│                      factory.py = create_detector() with fallback chain
+├── embeddings/        MobileFaceNet TFLite, SFace, InsightFace ArcFace, CoreML;
+│                      alignment.py (5-point ArcFace alignment), tta.py (flip TTA)
+├── deep/              MLP-ensemble classifier, dataset, evaluation, non-face filter
+├── clustering/        cluster_embeddings() — DBSCAN + same-pair constraints
+├── services/          73 domain services (*_service.py): scan, detection, embedding,
+│                      clustering, deep_recognition, identity, family, place, object,
+│                      export, project/database packages, screen_recorder, …
+├── workers/           QThreads: deep_pipeline_worker (scan → detect → embed → cleanup →
+│                      train → recognize → cluster → suggest), thumbnails, exports, geocoding
+├── tasks/             TaskManager — prioritized background tasks with UI visibility
+├── gdrive/            Google Drive online mode (OAuth, client, cache, DB sync)
+├── updater/           Sparkle bridge (macOS auto-update)
+├── utils/             EXIF, image metadata, fuzzy dates, person search
 └── ui/
-    ├── main_window.py     MainWindow — toolbar, splitter, dock
-    ├── panels/
-    │   ├── sidebar_panel.py  Person list + search
-    │   ├── cluster_panel.py  Face thumbnail grid
-    │   ├── log_panel.py      Coloured activity log
-    │   └── preview_panel.py  Full image preview with bbox overlay
-    └── dialogs/
-        ├── rename_dialog.py  Rename person dialog
-        └── merge_dialog.py   Merge into … dialog
+    ├── main_window/   MainWindow = window.py + topic mixins (ui_build, pipeline, persons, …)
+    ├── panels/        cluster, persons, image_browser/ (mixins), preview, family_tree,
+    │                  family_search, locations, objects, collage, groups, log, sidebar
+    ├── dialogs/       settings, scan modes, export, merge, suggestions, identity repair, …
+    ├── widgets/       shared widgets (family tree view, maps, face grids, search selects)
+    └── i18n/          t("key"); EN + HU strings in strings/sNN_*.py
 ```
+
+See [AGENT.md](AGENT.md) for the full file-level map.
 
 ---
 
@@ -184,7 +180,7 @@ cp /path/to/mobilefacenet.tflite models/mobilefacenet.tflite
 pip install onnx onnx-tf tensorflow
 # Download mobilefacenet.onnx from InsightFace model zoo
 # (https://github.com/deepinsight/insightface/tree/master/model_zoo)
-# Then convert — see docs/convert_model.md (TODO: write this guide)
+# Then convert to TFLite (see the comments in config.example.yaml → embedding)
 ```
 
 **Option C — Use the HOG stub (development only)**:  
@@ -251,20 +247,17 @@ face-local --config config.yaml
 
 ## GUI workflow
 
-1. **Select Folder** — choose the root directory containing your images.
-2. **Scan & Index** — runs all 4 pipeline stages:
-   - Scanning → hashing → DB insert
-   - Detection → face bbox → crop thumbnails
-   - Embedding → face vectors
-   - Clustering → person groups
-3. **Browse** — click a person in the left sidebar to see their face thumbnails.
-4. **Click a thumbnail** — previews the original image with the face highlighted.
-5. **Rename** — give a person a real name.
-6. **Merge** — combine two clusters that represent the same person.
-7. **Remove Face** — kick a wrong face out of a cluster.
-8. **Reassign Face** — move a face to a different cluster.
-9. **Re-cluster All** — re-run DBSCAN with current manual corrections applied.
-10. **Export** — CSV/JSON report or copy images to a folder.
+1. **Select Folder** — choose the root directory (or several folders) containing your images.
+2. **Scan & Maintenance** — pick a mode in the scan dialog:
+   - **Face Detection & Assignment** — scan new images → detect → embed → clean up → train the AI model → recognize → cluster unknowns → suggestions
+   - **Train AI Model** — embed missing faces and retrain only
+   - **Full Rescan** — rebuild every automatic face box from scratch (manual boxes and confirmed assignments are kept)
+   - Maintenance: re-verify stored faces, identity repair, duplicate / overlap cleanup
+3. **Browse** — Faces, Persons, Image browser, Family tree, Places, Objects, Collage and Groups tabs.
+4. **Review** — accept or reject the AI's automatic assignments and name suggestions.
+5. **Rename / Merge / Reassign** — name people, merge clusters of the same person, move or remove single faces (multi-select supported).
+6. **Edit in the image browser** — draw or fix face boxes, add dates, notes, places and objects.
+7. **Export** — CSV/JSON, face images, metadata, web gallery, server/Docker export or a project package.
 
 ---
 
@@ -272,8 +265,9 @@ face-local --config config.yaml
 
 | Stage | Coral | CPU |
 |-------|-------|-----|
-| Face detection | ✅ Real pycoral integration via `CoralDetector` | ✅ OpenCV DNN SSD + Haar fallback |
-| Face embedding | ❌ Not used — no practical public Edge TPU ArcFace model available | ✅ MobileFaceNet TFLite via `TFLiteEmbedder` |
+| Face detection | ✅ Real pycoral integration via `CoralDetector` | ✅ YuNet (default) / OpenCV DNN SSD + Haar fallback / optional InsightFace SCRFD |
+| Face embedding | ❌ Not used — no practical public Edge TPU ArcFace model available | ✅ MobileFaceNet TFLite via `TFLiteEmbedder`, SFace, InsightFace ArcFace, CoreML (macOS) |
+| Deep recognition | ❌ Not applicable | ✅ MLP ensemble (`app/deep/classifier.py`) |
 | Clustering | ❌ Not applicable | ✅ scikit-learn DBSCAN |
 
 **Performance expectations:**
@@ -344,29 +338,25 @@ Key thresholds:
 
 ## Project status
 
-### Working in MVP
-- Full pipeline: scan → detect → embed → cluster → GUI
-- Coral detection with real pycoral integration
-- CPU detection: OpenCV DNN SSD + Haar cascade fallback
-- TFLite embedding with MobileFaceNet (or HOG stub)
-- DBSCAN clustering with manual correction constraints
-- SQLite persistence with SQLAlchemy ORM
-- PySide6 GUI: sidebar, cluster grid, preview, rename, merge, remove, reassign
-- Export: CSV, JSON, image folder
-- Resumable processing (skips unchanged files)
-- Structured logging with GUI log panel
+### Working
+- Full pipeline: scan → detect → validate → embed → train → recognize → cluster → review
+- Detectors: YuNet (with landmarks), Coral Edge TPU, OpenCV DNN SSD + Haar fallback, optional InsightFace SCRFD
+- Embedders: MobileFaceNet TFLite, SFace, InsightFace ArcFace, CoreML (macOS); 5-point alignment + flip TTA
+- Deep recognition: MLP ensemble trained from labeled faces, auto-assignment review, name suggestions
+- Cleanup tools: non-face / half-face filter, duplicate and overlap resolution, identity repair, retroactive verification
+- Image browser with face box editing, dates, notes, places (map + geocoding), objects
+- Family tree, family search, person groups, collages
+- Export: CSV, JSON, images, EXIF/metadata, Astro web gallery, local server / Docker, `.facepack` / `.facedb` packages
+- Moved / renamed originals re-linked by content hash
+- Google Drive online mode, screen recorder, Sparkle auto-update, EN/HU UI
+- Releases for macOS (signed, notarized), Windows (installer) and Linux (.deb)
 
-### Placeholder / known limitations
-- Embedding model file must be downloaded separately (see Setup)
-- CPU model files (Caffe SSD) must be downloaded separately
-- Face alignment available via `embedding.crop_mode: aligned` (5-point ArcFace
-  alignment) when the YuNet detector supplies landmarks; otherwise crops are
-  axis-aligned rectangles with no rotation correction
-- Clustering is global re-run (not incremental)
-- Re-clustering does not preserve cluster↔person mapping when many clusters change
-- `worker_threads` config exists but pipeline is currently serial (QThread runs one thread)
-- No HEIC support (extension point exists in `ScanConfig.image_extensions`)
-- No split-cluster operation in GUI (remove faces one by one as workaround)
+### Known limitations
+- Embedding model files must be downloaded separately (see Setup); without them a low-quality HOG stub is used
+- Recognition quality is still being tuned (false positives, extra unknowns — see the open GitHub issues)
+- Clustering of unknowns is a global re-run (not incremental)
+- No HEIC support by default (extension point in `ScanConfig.image_extensions`)
+- Windows system-audio recording needs a loopback device (e.g. Stereo Mix)
 
 ---
 
@@ -389,11 +379,14 @@ Beolvas egy képeket tartalmazó mappastruktúrát, arcokat érzékel, azonos sz
 ## Mit csinál
 
 1. **Beolvasás** — rekurzívan indexeli a képeket (`.jpg`, `.jpeg`, `.png`, `.webp`), minden fájlt hashel, majd újrafuttatáskor kihagyja a változatlanokat.
-2. **Érzékelés** — arcfelismerést futtat Google Coral Edge TPU-val (ha elérhető), vagy CPU-s tartalékmegoldással (OpenCV DNN SSD vagy Haar cascade).
-3. **Beágyazás** — 192 dimenziós arcbeágyazásokat generál MobileFaceNet TFLite segítségével **CPU-n** (ehhez a lépéshez a Coral nincs használatban, mert nyilvánosan nem érhető el gyakorlatban használható Edge TPU ArcFace modell).
-4. **Klaszterezés** — az arcokat koszinusz-hasonlóság alapján DBSCAN-nel csoportosítja.
-5. **Címkézés** — a PySide6 GUI-val átnevezheted a klasztereket, összevonhatod a hibás szétválásokat, újra hozzárendelhetsz egyedi arcokat, és megjelölhetsz azonos/különböző párokat.
-6. **Exportálás** — CSV- és JSON-jelentések készítése, vagy az arcképek mappába másolása.
+2. **Érzékelés** — arcérzékelést futtat YuNet-tel (alapértelmezett, landmarkokkal), Google Coral Edge TPU-val (ha elérhető), vagy CPU-s tartalékmegoldással (OpenCV DNN SSD / Haar cascade); opcionálisan InsightFace SCRFD társdetektorral. Egy többlépcsős ellenőrző kiszűri a nem-arcokat, fél arcokat és egymásba ágyazott dobozokat.
+3. **Beágyazás** — igazítja az arcokat és **CPU-n** beágyazást készít: MobileFaceNet TFLite (192 dim.), SFace, InsightFace ArcFace (512 dim.) vagy macOS-en CoreML (ehhez a lépéshez a Coral nincs használatban, mert nyilvánosan nem érhető el gyakorlatban használható Edge TPU ArcFace modell).
+4. **Felismerés** — a címkézett arcokból MLP-ensemble osztályozót tanít, és hozzárendelési javaslatokat ad az ismeretlen arcokra (automatikus hozzárendelések áttekintése).
+5. **Klaszterezés** — a maradék ismeretlen arcokat koszinusz-hasonlóság alapján DBSCAN-nel csoportosítja.
+6. **Címkézés** — a PySide6 GUI-val átnevezheted a klasztereket, összevonhatod a hibás szétválásokat, újra hozzárendelhetsz egyedi arcokat, és megjelölhetsz azonos/különböző párokat.
+7. **Rendszerezés** — képböngésző, családfa, helyszínek térképpel és geokódolással, címkézett tárgyak, személycsoportok, kollázsok.
+8. **Exportálás** — CSV/JSON jelentések, arcképek, EXIF/metaadatok, statikus webes galéria (Astro), helyi szerver / Docker export, `.facepack` / `.facedb` projektcsomagok.
+9. **Google Drive** — opcionális online munkamód egy Drive-mappán (`gdrive` extra).
 
 Minden adat egy helyi SQLite-adatbázisban tárolódik. Nem történik hálózati kommunikáció.
 
@@ -403,42 +396,37 @@ Minden adat egy helyi SQLite-adatbázisban tárolódik. Nem történik hálózat
 
 ```
 app/
-├── main.py               Belépési pont (Qt app inicializálás, argumentumfeldolgozás)
-├── config.py             AppConfig dataclass + YAML betöltő
-├── logging_setup.py      Strukturált naplózás + QLogHandler a GUI-hoz
-├── db/
-│   ├── models.py         SQLAlchemy ORM: Image, Face, Person, FaceCorrection
-│   └── database.py       Engine inicializálás, session_scope context manager
-├── detectors/
-│   ├── base.py           FaceDetector ABC + Detection dataclass
-│   ├── coral_detector.py CoralDetector — valódi pycoral integráció
-│   ├── cpu_detector.py   CpuDetector — OpenCV DNN SSD + Haar tartalékmegoldás
-│   └── factory.py        probe_coral() + create_detector() gyárfüggvény
-├── embeddings/
-│   ├── base.py           FaceEmbedder ABC
-│   └── tflite_embedder.py TFLiteEmbedder (CPU, MobileFaceNet) + HOG csonk
-├── clustering/
-│   └── clusterer.py      cluster_embeddings() — DBSCAN + same-pair korlátozások
-├── services/
-│   ├── scan_service.py      ScanService — fájlfelderítés + hashelés
-│   ├── detection_service.py DetectionService — detektor futtatása, kivágások mentése
-│   ├── embedding_service.py EmbeddingService — beágyazó futtatása, vektorok tárolása
-│   ├── clustering_service.py ClusteringService — DBSCAN → Person hozzárendelés
-│   ├── identity_service.py  IdentityService — átnevezés/egyesítés/áthelyezés műveletek
-│   └── export_service.py    ExportService — CSV/JSON/kép export
-├── workers/
-│   └── pipeline_worker.py PipelineWorker — QThread, mind a 4 lépcsőt futtatja
+├── main.py            Belépési pont (Qt inicializálás, CLI: --config, --db, --debug, --self-test)
+├── config.py          AppConfig dataclassok + YAML betöltő
+├── app_settings.py    QSettings INI a Documents/localAIFaceRecognizer/settings/ mappában
+├── db/                SQLAlchemy ORM (31 tábla: Image, Face, Person, Place, TaggedObject,
+│                      Relationship, AutoAssignment, TrainingRun, …) + session_scope()
+├── detectors/         YuNet, Coral Edge TPU, OpenCV SSD/Haar, InsightFace SCRFD;
+│                      factory.py = create_detector() tartaléklánccal
+├── embeddings/        MobileFaceNet TFLite, SFace, InsightFace ArcFace, CoreML;
+│                      alignment.py (5 pontos ArcFace igazítás), tta.py (tükrözéses TTA)
+├── deep/              MLP-ensemble osztályozó, adatkészlet, kiértékelés, nem-arc szűrő
+├── clustering/        cluster_embeddings() — DBSCAN + same-pair korlátozások
+├── services/          73 szolgáltatás (*_service.py): scan, detection, embedding,
+│                      clustering, deep_recognition, identity, family, place, object,
+│                      export, projekt-/adatbáziscsomag, screen_recorder, …
+├── workers/           QThreadek: deep_pipeline_worker (beolvasás → érzékelés → beágyazás →
+│                      tisztítás → tanítás → felismerés → klaszterezés → javaslatok),
+│                      bélyegképek, exportok, geokódolás
+├── tasks/             TaskManager — priorizált háttérfeladatok, UI-ban látható állapottal
+├── gdrive/            Google Drive online mód (OAuth, kliens, cache, DB szinkron)
+├── updater/           Sparkle híd (macOS automatikus frissítés)
+├── utils/             EXIF, képmetaadat, bizonytalan dátumok, személykeresés
 └── ui/
-    ├── main_window.py     MainWindow — eszköztár, splitter, dock
-    ├── panels/
-    │   ├── sidebar_panel.py  Személylista + keresés
-    │   ├── cluster_panel.py  Arcbélyegkép-rács
-    │   ├── log_panel.py      Színezett aktivitási napló
-    │   └── preview_panel.py  Teljes képelőnézet bbox átfedéssel
-    └── dialogs/
-        ├── rename_dialog.py  Személy átnevezése párbeszédablak
-        └── merge_dialog.py   Beolvasztás ide: ... párbeszédablak
+    ├── main_window/   MainWindow = window.py + témánkénti mixinek (ui_build, pipeline, persons, …)
+    ├── panels/        cluster, persons, image_browser/ (mixinek), preview, family_tree,
+    │                  family_search, locations, objects, collage, groups, log, sidebar
+    ├── dialogs/       beállítások, beolvasási módok, export, egyesítés, javaslatok, identitás-javítás, …
+    ├── widgets/       közös widgetek (családfa nézet, térképek, arcrácsok, keresők)
+    └── i18n/          t("key"); EN + HU szövegek a strings/sNN_*.py fájlokban
 ```
+
+A teljes, fájlszintű térkép: [AGENT.md](AGENT.md).
 
 ---
 
@@ -519,7 +507,7 @@ cp /path/to/mobilefacenet.tflite models/mobilefacenet.tflite
 pip install onnx onnx-tf tensorflow
 # Töltsd le a mobilefacenet.onnx fájlt az InsightFace model zoo-ból
 # (https://github.com/deepinsight/insightface/tree/master/model_zoo)
-# Majd konvertáld át — lásd: docs/convert_model.md (TODO: ezt az útmutatót még meg kell írni)
+# Majd konvertáld TFLite-ra (lásd a config.example.yaml → embedding megjegyzéseit)
 ```
 
 **C lehetőség — Használd a HOG csonkot (csak fejlesztéshez)**:
@@ -586,20 +574,17 @@ face-local --config config.yaml
 
 ## GUI munkafolyamat
 
-1. **Mappa kiválasztása** — válaszd ki a képeket tartalmazó gyökérkönyvtárat.
-2. **Beolvasás és indexelés** — lefuttatja a pipeline mind a 4 szakaszát:
-   - Beolvasás → hashelés → DB beszúrás
-   - Érzékelés → arc bbox → bélyegképkivágások
-   - Beágyazás → arcvetktorok
-   - Klaszterezés → személycsoportok
-3. **Böngészés** — kattints egy személyre a bal oldali sávban az arcbélyegképek megtekintéséhez.
-4. **Kattintás a bélyegképre** — megnyitja az eredeti képet kiemelt arccal.
-5. **Átnevezés** — adj egy valós nevet a személyhez.
-6. **Egyesítés** — vonj össze két klasztert, ha ugyanazt a személyt jelölik.
-7. **Arc eltávolítása** — vedd ki a rossz arcot a klaszterből.
-8. **Arc újra hozzárendelése** — helyezd át az arcot egy másik klaszterbe.
-9. **Összes újraklaszterezése** — futtasd újra a DBSCAN-t a jelenlegi kézi korrekciók figyelembevételével.
-10. **Exportálás** — CSV/JSON jelentés vagy képek másolása egy mappába.
+1. **Mappa kiválasztása** — válaszd ki a képeket tartalmazó gyökérkönyvtárat (vagy több mappát).
+2. **Beolvasás és karbantartás** — válassz módot a beolvasási ablakban:
+   - **Arcfelismerés és hozzárendelés** — új képek beolvasása → érzékelés → beágyazás → tisztítás → AI modell tanítása → felismerés → ismeretlenek klaszterezése → javaslatok
+   - **AI modell tanítása** — csak a hiányzó beágyazások és újratanítás
+   - **Teljes újrabeolvasás** — minden automatikus arcdoboz újraépítése (a kézi dobozok és a megerősített hozzárendelések megmaradnak)
+   - Karbantartás: tárolt arcok újra-ellenőrzése, identitás-helyreállítás, duplikátum- és átfedéstisztítás
+3. **Böngészés** — Arcok, Személyek, Képböngésző, Családfa, Helyszínek, Tárgyak, Kollázs és Csoportok fülek.
+4. **Áttekintés** — fogadd el vagy utasítsd el az AI automatikus hozzárendeléseit és névajánlatait.
+5. **Átnevezés / egyesítés / áthelyezés** — nevezd el a személyeket, vond össze az azonos személy klasztereit, helyezz át vagy távolíts el egyes arcokat (többes kijelöléssel is).
+6. **Szerkesztés a képböngészőben** — arcdobozok rajzolása, javítása; dátum, megjegyzés, helyszín és tárgyak megadása.
+7. **Exportálás** — CSV/JSON, arcképek, metaadatok, webes galéria, szerver/Docker export vagy projektcsomag.
 
 ---
 
@@ -607,8 +592,9 @@ face-local --config config.yaml
 
 | Szakasz | Coral | CPU |
 |-------|-------|-----|
-| Arcérzékelés | ✅ Valódi pycoral integráció a `CoralDetector` segítségével | ✅ OpenCV DNN SSD + Haar tartalékmegoldás |
-| Arcbeágyazás | ❌ Nincs használatban — nem érhető el gyakorlatban használható nyilvános Edge TPU ArcFace modell | ✅ MobileFaceNet TFLite a `TFLiteEmbedder` segítségével |
+| Arcérzékelés | ✅ Valódi pycoral integráció a `CoralDetector` segítségével | ✅ YuNet (alapértelmezett) / OpenCV DNN SSD + Haar tartalék / opcionális InsightFace SCRFD |
+| Arcbeágyazás | ❌ Nincs használatban — nem érhető el gyakorlatban használható nyilvános Edge TPU ArcFace modell | ✅ MobileFaceNet TFLite a `TFLiteEmbedder` segítségével, SFace, InsightFace ArcFace, CoreML (macOS) |
+| Mély felismerés | ❌ Nem alkalmazható | ✅ MLP-ensemble (`app/deep/classifier.py`) |
 | Klaszterezés | ❌ Nem alkalmazható | ✅ scikit-learn DBSCAN |
 
 **Várható teljesítmény:**
@@ -679,27 +665,25 @@ Fontos küszöbértékek:
 
 ## Projektállapot
 
-### Működő MVP-elemek
-- Teljes pipeline: beolvasás → érzékelés → beágyazás → klaszterezés → GUI
-- Coral-alapú érzékelés valódi pycoral integrációval
-- CPU-s érzékelés: OpenCV DNN SSD + Haar cascade fallback
-- TFLite beágyazás MobileFaceNettel (vagy HOG csonkkal)
-- DBSCAN klaszterezés kézi korrekciós megkötésekkel
-- SQLite perzisztencia SQLAlchemy ORM-mel
-- PySide6 GUI: oldalsáv, klaszterrács, előnézet, átnevezés, egyesítés, eltávolítás, áthelyezés
-- Export: CSV, JSON, képmappa
-- Folytatható feldolgozás (kihagyja a változatlan fájlokat)
-- Strukturált naplózás GUI naplópanellel
+### Működik
+- Teljes pipeline: beolvasás → érzékelés → ellenőrzés → beágyazás → tanítás → felismerés → klaszterezés → áttekintés
+- Detektorok: YuNet (landmarkokkal), Coral Edge TPU, OpenCV DNN SSD + Haar tartalék, opcionális InsightFace SCRFD
+- Beágyazók: MobileFaceNet TFLite, SFace, InsightFace ArcFace, CoreML (macOS); 5 pontos igazítás + tükrözéses TTA
+- Mély felismerés: címkézett arcokból tanított MLP-ensemble, automatikus hozzárendelések áttekintése, névajánlatok
+- Tisztító eszközök: nem-arc / fél arc szűrő, duplikátum- és átfedésfeloldás, identitás-helyreállítás, utólagos ellenőrzés
+- Képböngésző arcdoboz-szerkesztéssel, dátumokkal, megjegyzésekkel, helyszínekkel (térkép + geokódolás), tárgyakkal
+- Családfa, családi keresés, személycsoportok, kollázsok
+- Export: CSV, JSON, képek, EXIF/metaadat, Astro webes galéria, helyi szerver / Docker, `.facepack` / `.facedb` csomagok
+- Áthelyezett / átnevezett eredeti képek újrakapcsolása tartalom-hash alapján
+- Google Drive online mód, képernyőrögzítő, Sparkle automatikus frissítés, EN/HU felület
+- Kiadások macOS-re (aláírt, notarizált), Windowsra (telepítő) és Linuxra (.deb)
 
-### Helykitöltő elemek / ismert korlátok
-- A beágyazó modellfájlt külön kell letölteni (lásd: Telepítés)
-- A CPU-s modellfájlokat (Caffe SSD) külön kell letölteni
-- Nincs arckiegyenesítési lépés (a kivágások tengelyhez igazított téglalapok, nincs forgatáskorrekció)
-- A klaszterezés teljes újrafuttatással történik (nem inkrementális)
-- Az újraklaszterezés nem őrzi meg a klaszter↔személy megfeleltetést, ha sok klaszter változik
-- A `worker_threads` konfiguráció létezik, de a pipeline jelenleg soros (a QThread egy szálon fut)
-- Nincs HEIC támogatás (kiterjesztési pont van a `ScanConfig.image_extensions` mezőben)
-- Nincs klaszter-szétválasztó művelet a GUI-ban (kerülőmegoldásként az arcokat egyesével lehet eltávolítani)
+### Ismert korlátok
+- A beágyazó modellfájlokat külön kell letölteni (lásd: Telepítés); nélkülük gyenge minőségű HOG csonk fut
+- A felismerési minőség finomhangolása folyamatban (hamis pozitívok, fölösleges ismeretlenek — lásd a nyitott GitHub jegyeket)
+- Az ismeretlenek klaszterezése teljes újrafuttatással történik (nem inkrementális)
+- Alapból nincs HEIC támogatás (kiterjesztési pont: `ScanConfig.image_extensions`)
+- Windowson a rendszerhang rögzítéséhez loopback eszköz kell (pl. Stereo Mix)
 
 ---
 
