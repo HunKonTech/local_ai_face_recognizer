@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Optional
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QGraphicsItemGroup,
@@ -46,6 +46,11 @@ class FamilyTreeView(
     person_activated = Signal(int)
     # Right-click on a person box: (person id, global screen position).
     person_context_menu = Signal(int, QPoint)
+    # "+/-" badge under a person with children was clicked.
+    collapse_toggled = Signal(int)
+    # A person was dropped (MIME PERSON_MIME): (person id, target pid | None,
+    # scene position).
+    person_dropped = Signal(int, object, QPointF)
 
     BOX_W = 168
     BOX_H = 86
@@ -83,6 +88,19 @@ class FamilyTreeView(
         self._connector_items: list = []
         self._connector_groups: list = []
 
+        # Box contents and per-generation row heights (Tree Studio). The
+        # default provider reproduces the classic name / years / code lines.
+        self._line_provider = None
+        self._box_h: dict[int, float] = {}
+        self._row_y: list[float] = []
+        self._row_h: list[float] = []
+        # Collapse badges: persons that get one, and which are collapsed.
+        self._collapsible: set[int] = set()
+        self._collapsed: set[int] = set()
+        self._badge_items: dict[int, object] = {}
+        self._show_markers = True
+        self.setAcceptDrops(True)
+
         # Photos are loaded lazily for boxes that scroll into view, so a tree
         # with thousands of people opens instantly. pid -> (group, pos, path).
         self._pending_photos: dict[int, tuple] = {}
@@ -111,6 +129,8 @@ class FamilyTreeView(
         self._pending_photos = {}
         self._connector_items = []
         self._connector_groups = []
+        self._box_h = {}
+        self._badge_items = {}
         self._graph = graph
         self._focus_id = focus_id
         self._selected_id = selected_id
@@ -124,14 +144,14 @@ class FamilyTreeView(
         h_gap = self._min_spouse_gap(graph)
         positions, total_w, gens = self._layout(graph, h_gap=h_gap)
 
-        col_h = self.BOX_H + self.V_GAP
         # Generation bands (alternating background stripes) with a left gutter
         # carrying an increasing generation number (1 at the top).
         ordered_gens = sorted(gens)
         band_left = -h_gap - self.GUTTER
         band_width = total_w + 2 * h_gap + self.GUTTER
         for band_index, gen in enumerate(ordered_gens):
-            y = band_index * col_h - self.V_GAP / 2
+            y = self._row_y[band_index] - self.V_GAP / 2
+            col_h = self._row_h[band_index] + self.V_GAP
             band = self._scene.addRect(
                 band_left, y, band_width, col_h,
                 QPen(Qt.NoPen),
@@ -168,7 +188,8 @@ class FamilyTreeView(
             band_left - margin,
             -self.V_GAP,
             band_width + 2 * margin,
-            len(ordered_gens) * col_h + margin,
+            (self._row_y[-1] + self._row_h[-1] + self.V_GAP if self._row_y else 0)
+            + margin,
         )
 
         # Bring the focus/selected person into view, else start at the top.
@@ -183,6 +204,27 @@ class FamilyTreeView(
     # ------------------------------------------------------------------
     # Zoom + selection
     # ------------------------------------------------------------------
+
+    def set_line_provider(self, provider) -> None:
+        """``provider(node) -> [(text, role)]``; ``None`` restores the default.
+
+        ``role`` is ``"name"`` (bold, larger) or ``"line"``. Takes effect on the
+        next :meth:`set_graph`.
+        """
+        self._line_provider = provider
+
+    def set_collapse_state(self, collapsible, collapsed) -> None:
+        """Persons that get a +/- badge and which of them are collapsed."""
+        self._collapsible = set(collapsible or ())
+        self._collapsed = set(collapsed or ())
+
+    def set_markers_visible(self, visible: bool) -> None:
+        self._show_markers = bool(visible)
+        for item in self._badge_items.values():
+            item.setVisible(self._show_markers)
+
+    def box_height(self, pid: int) -> float:
+        return self._box_h.get(pid, self.BOX_H)
 
     def zoom_in(self) -> None:
         self._zoom(1.2)
@@ -255,9 +297,23 @@ class FamilyTreeView(
         placed = compute_layout(
             graph.nodes.values(), box_w=self.BOX_W, gap=h_gap
         )
-        step_y = self.BOX_H + self.V_GAP
+        # Per-generation row heights: every box in a band is as tall as the
+        # band's tallest content; the next band starts below it (no overlap).
+        n_bands = max((band for _, band in placed.values()), default=-1) + 1
+        row_h = [float(self.BOX_H)] * n_bands
+        for pid, (_x, band) in placed.items():
+            node = graph.node(pid)
+            if node is not None:
+                row_h[band] = max(row_h[band], self._content_height(node))
+        row_y: list[float] = []
+        y = 0.0
+        for h in row_h:
+            row_y.append(y)
+            y += h + self.V_GAP
+        self._row_h, self._row_y = row_h, row_y
+        self._box_h = {pid: row_h[band] for pid, (_x, band) in placed.items()}
         positions: dict[int, tuple[float, float]] = {
-            pid: (x, band * step_y) for pid, (x, band) in placed.items()
+            pid: (x, row_y[band]) for pid, (x, band) in placed.items()
         }
         gens: dict[int, list] = defaultdict(list)
         for node in graph.nodes.values():

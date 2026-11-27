@@ -20,8 +20,11 @@ from app.ui.widgets.family_tree.style import (
 class _ConnectorsMixin:
     """Draws and recolours connector lines; state lives on the view."""
 
-    def _center(self, x: float, y: float) -> tuple[float, float]:
-        return x + self.BOX_W / 2, y + self.BOX_H / 2
+    def _center(self, x: float, y: float, h: float | None = None) -> tuple[float, float]:
+        return x + self.BOX_W / 2, y + (self.BOX_H if h is None else h) / 2
+
+    def _center_of(self, pid: int, positions) -> tuple[float, float]:
+        return self._center(*positions[pid], self._box_h.get(pid, self.BOX_H))
 
     def _draw_connectors(self, graph, positions, focus_id) -> None:
         # _connector_items: list of dicts describing each drawn line + enough
@@ -49,9 +52,10 @@ class _ConnectorsMixin:
                     lx, ly, rx, ry = x, y, sx, sy
                 else:
                     lx, ly, rx, ry = sx, sy, x, y
+                half = self._box_h.get(pid, self.BOX_H) / 2
                 item = self._add_line_path([
-                    (lx + self.BOX_W, ly + self.BOX_H / 2),
-                    (rx, ry + self.BOX_H / 2),
+                    (lx + self.BOX_W, ly + half),
+                    (rx, ry + half),
                 ])
                 self._connector_items.append(
                     {"item": item, "kind": "spouse", "pair": frozenset([pid, spouse])}
@@ -61,7 +65,7 @@ class _ConnectorsMixin:
                 label = _marriage_label(*graph.marriage(pid, spouse))
                 if label:
                     mid_x = (lx + self.BOX_W + rx) / 2
-                    line_y = (ly + ry) / 2 + self.BOX_H / 2
+                    line_y = (ly + ry) / 2 + half
                     self._add_edge_label(mid_x, line_y, label)
 
         # --- Parent → children: group siblings by their canonical couple so they
@@ -102,11 +106,13 @@ class _ConnectorsMixin:
             parents_in_pos = sorted(p for p in parent_ids_fs if p in positions)
             if not parents_in_pos:
                 continue
-            parent_centers = [self._center(*positions[p]) for p in parents_in_pos]
+            parent_centers = [self._center_of(p, positions) for p in parents_in_pos]
             # Horizontal midpoint between the parents (or single parent).
             drop_x = sum(c[0] for c in parent_centers) / len(parent_centers)
             # Bottom edge of the parents' row.
-            py = max(c[1] for c in parent_centers) + self.BOX_H / 2
+            py = max(
+                positions[p][1] + self._box_h.get(p, self.BOX_H) for p in parents_in_pos
+            )
             children_sorted = sorted(children, key=lambda c: positions[c][0])
             child_x = {
                 c: positions[c][0] + self.BOX_W / 2 for c in children_sorted

@@ -57,6 +57,7 @@ register_watched_table("persons", "person")
 register_watched_table("relationships", "relationship")
 register_watched_table("person_field_definitions", "field")
 register_watched_table("person_field_values", "person", "person_id")
+register_watched_table("family_tree_views", "view")
 
 
 def _now_sql() -> str:

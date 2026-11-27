@@ -14,6 +14,7 @@ from . import (
     s07_already_reviewed_history_lis,
     s08_simplified_scan_dialog_workf,
     s09_keyboard_shortcuts_settings,
+    s10_tree_studio,
 )
 
 _PARTS = (
@@ -26,6 +27,7 @@ _PARTS = (
     s07_already_reviewed_history_lis,
     s08_simplified_scan_dialog_workf,
     s09_keyboard_shortcuts_settings,
+    s10_tree_studio,
 )
 
 
