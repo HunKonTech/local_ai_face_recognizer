@@ -201,6 +201,7 @@ def _migrate_add_columns(engine: Engine) -> None:
     _migrate_person_groups(engine)
     _migrate_person_fields(engine)
     _migrate_change_log(engine)
+    _migrate_tree_views(engine)
     _migrate_collage_locations_to_places(engine)
     _migrate_place_types(engine)
     _migrate_geocoding_tables(engine)
@@ -1065,6 +1066,27 @@ def _migrate_change_log(engine: Engine) -> None:
             """
         ))
     log.debug("Migration: change_log ensured")
+
+
+def _migrate_tree_views(engine: Engine) -> None:
+    """Ensure Tree Studio's ``family_tree_views`` table exists (idempotent)."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS family_tree_views (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(255) COLLATE NOCASE NOT NULL,
+                state_json TEXT NOT NULL,
+                created_at DATETIME,
+                updated_at DATETIME
+            )
+            """
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_family_tree_views_name "
+            "ON family_tree_views(name)"
+        ))
+    log.debug("Migration: family_tree_views ensured")
 
 
 def _migrate_collage_locations_to_places(engine: Engine) -> None:

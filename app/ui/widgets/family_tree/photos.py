@@ -23,12 +23,18 @@ class _PhotosMixin:
     # above it, load only what is in/near the viewport so huge trees stay fast.
     EAGER_PHOTO_LIMIT = 250
 
-    def _load_visible_photos(self, *, budget: int = 120) -> None:
-        """Load pending photos — all of them when small, else viewport-near."""
+    def _load_visible_photos(self, *, budget: int = 120, everything: bool = False) -> None:
+        """Load pending photos — all of them when small, else viewport-near.
+
+        ``everything`` (image export) takes every pending photo regardless of
+        the viewport, still in ``budget``-sized steps.
+        """
         if not self._pending_photos:
             return
 
-        if len(self._pending_photos) <= self.EAGER_PHOTO_LIMIT:
+        if everything:
+            targets = list(self._pending_photos.keys())
+        elif len(self._pending_photos) <= self.EAGER_PHOTO_LIMIT:
             targets = list(self._pending_photos.keys())
             budget = len(targets)  # no partial pass for small trees
         else:

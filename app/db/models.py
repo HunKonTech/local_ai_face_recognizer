@@ -525,6 +525,29 @@ class ChangeLog(Base):
 
 
 # ---------------------------------------------------------------------------
+# Saved family tree views (Tree Studio, add-tree-studio-app)
+# ---------------------------------------------------------------------------
+
+class SavedTreeView(Base):
+    """A named, composed family-tree view (root, collapsed/hidden persons, fields).
+
+    ``state_json`` is :meth:`TreeViewState.to_json` with
+    ``"format": "facelocal.treeview.v1"``.
+    """
+
+    __tablename__ = "family_tree_views"
+    __table_args__ = (Index("ux_family_tree_views_name", "name", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255, collation="NOCASE"), nullable=False)
+    state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+# ---------------------------------------------------------------------------
 # Relationship
 # ---------------------------------------------------------------------------
 

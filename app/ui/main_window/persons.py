@@ -363,6 +363,24 @@ class PersonsMixin:
         self._image_browser._reload_current_face_data()
 
     @Slot()
+    def _on_launch_tree_studio(self) -> None:
+        """Tools menu: start Tree Studio as a separate process on this DB."""
+        import subprocess
+
+        from app.db.database import get_engine
+        from app.paths import project_root
+        from app.tree_studio.main import launch_command
+
+        try:
+            db_path = get_engine().url.database
+            cmd = launch_command(db_path=db_path)
+            log.info("Launching Tree Studio: %s", cmd)
+            subprocess.Popen(cmd, cwd=str(project_root()))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Could not launch Tree Studio")
+            QMessageBox.warning(self, "Tree Studio", t("ts_launch_failed", error=str(exc)))
+
+    @Slot()
     def _on_manage_person_fields(self) -> None:
         """Tools menu: rename / reorder / delete custom person fields."""
         from app.ui.dialogs.person_fields_dialog import PersonFieldsDialog

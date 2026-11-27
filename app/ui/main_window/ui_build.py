@@ -83,6 +83,9 @@ class UiBuildMixin:
         self._person_fields_action = self._mb_tools_menu.addAction(
             "", self._on_manage_person_fields
         )
+        self._tree_studio_action = self._mb_tools_menu.addAction(
+            "", self._on_launch_tree_studio
+        )
 
         # ── Összevonás ────────────────────────────────────────────────────
         self._mb_merge_menu = mb.addMenu("")
@@ -458,6 +461,7 @@ class UiBuildMixin:
         if hasattr(self, "_external_change_bar"):
             self._external_change_bar.retranslate()
         self._person_fields_action.setText(t("cf_manage_menu"))
+        self._tree_studio_action.setText(t("ts_launch_menu"))
         self._mb_merge_menu.setTitle(t("mb_merge"))
         self._mb_system_menu.setTitle(t("mb_system"))
         self._mb_debug_menu.setTitle(t("mb_debug"))

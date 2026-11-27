@@ -322,6 +322,34 @@ class FamilyTreeService:
 
         return self._materialise_graph(root_id, gen, parents, children, spouses)
 
+    def find_root_by_external_code(
+        self, code: str
+    ) -> tuple[Optional[int], list[tuple[int, str, str]]]:
+        """Root for an external family code such as ``#Zoli#``.
+
+        Returns ``(person id, [])`` when exactly one person has the code, else
+        ``(None, candidates)`` with every ``(id, name, code)`` whose external
+        code starts with *code* (for the user to choose from).
+        """
+        code = (code or "").strip()
+        if not code:
+            return None, []
+        exact = (
+            self._session.query(Person.id)
+            .filter(Person.external_family_code == code)
+            .order_by(Person.id)
+            .all()
+        )
+        if len(exact) == 1:
+            return exact[0][0], []
+        rows = (
+            self._session.query(Person.id, Person.name, Person.external_family_code)
+            .filter(Person.external_family_code.startswith(code, autoescape=True))
+            .order_by(Person.external_family_code, Person.id)
+            .all()
+        )
+        return None, [(pid, name, ext) for pid, name, ext in rows]
+
     def build_lineage(
         self,
         root_id: int,
