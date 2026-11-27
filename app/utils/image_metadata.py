@@ -1,85 +1,97 @@
-"""Low-level image metadata writer for face-local face annotations.
+"""Image metadata writer for face-local annotations, GPS and dates.
 
-This module embeds a versioned, structured JSON payload (schema
-``facelocal.faces.v1``) into an image file, or writes it to a sidecar JSON
-file next to the image when embedding is not possible.
+All metadata edits for one image go through :func:`apply_image_metadata`,
+which reads the file once, applies every edit and replaces the file once.
 
-Write strategy (in preference order):
+What is written for a ``facelocal.faces.v1`` payload:
 
-1. **XMP** — a dedicated ``facelocal`` RDF block inside the image's XMP packet
-   (JPEG and PNG).  Existing XMP and EXIF are preserved.
-2. **EXIF** — ``UserComment`` (preferred) or ``ImageDescription`` as a JSON
-   string, when XMP is not available for the format but EXIF is (JPEG).
-3. **Sidecar** — ``<image>.facelocal.json`` next to the file, used for
-   unsupported / RAW / read-only / remote-only files, or when the caller
-   forces sidecar-only mode.
+* **JPEG** — lossless segment splice (no re-encode; ICC, MPF etc. kept):
+  - EXIF ``UserComment``: the JSON (``UNICODE`` code, UTF-16) — optional,
+  - EXIF ``XPComment`` / ``XPKeywords``: known person names (Windows
+    Explorer "Comments" / "Tags"),
+  - XMP ``facelocal:data`` (the JSON), ``MP:RegionInfo`` and
+    ``mwg-rs:Regions`` (named face rectangles — Windows "People", MWG tools).
+* **PNG** — the XMP part (lossless re-save, ICC/EXIF kept).
+* **Anything else / read-only / locked** — a sidecar ``<image>.facelocal.json``.
 
-Design goals:
-
-* The original image is never corrupted — embedded writes go through a
-  temporary file in the same directory and an atomic ``os.replace``.
-* Existing EXIF (GPS, dates, …) and unrelated XMP blocks survive a write.
-* Re-running an export *updates* the single ``facelocal`` block instead of
-  appending duplicates.
+Safety: the new file is written to a temp file next to the image, fsynced and
+swapped in with ``os.replace``. If another program keeps the image open
+(Windows), the result is :data:`WRITE_MODE_LOCKED`, the original stays
+untouched and the payload is preserved in the sidecar.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
-import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from app.utils import exif_fields as ef
+from app.utils import jpeg_segments as js
+from app.utils import xmp_edit as xe
 
 log = logging.getLogger(__name__)
 
 # Schema identifier carried inside every payload — bump when the shape changes.
 FACELOCAL_SCHEMA = "facelocal.faces.v1"
 
-# Custom XMP namespace for the embedded block.
-_XMP_NS_URI = "http://facelocal.app/ns/faces/1.0/"
-_XMP_NS_PREFIX = "facelocal"
-# The single property holding the JSON document (as an XML-escaped string).
-_XMP_PROP = "data"
-
-# Adobe-required XMP packet wrapper id.
-_XPACKET_ID = "W5M0MpCehiHzreSzNTczkc9d"
-
 # Write-mode result constants.
 WRITE_MODE_XMP = "xmp"
-WRITE_MODE_EXIF_USER_COMMENT = "exif_user_comment"
-WRITE_MODE_EXIF_IMAGE_DESCRIPTION = "exif_image_description"
+WRITE_MODE_EXIF_USER_COMMENT = "exif_user_comment"  # JSON in UserComment *and* XMP
+WRITE_MODE_EXIF_IMAGE_DESCRIPTION = "exif_image_description"  # legacy, read-only
+WRITE_MODE_EXIF = "exif"  # GPS/date only, no face payload
 WRITE_MODE_SIDECAR = "sidecar"
+WRITE_MODE_LOCKED = "locked"
 WRITE_MODE_SKIPPED = "skipped"
 WRITE_MODE_FAILED = "failed"
 
-# Formats we can embed XMP into.
-_XMP_FORMATS = {"JPEG", "PNG"}
-# Formats we can embed EXIF into (JPEG; TIFF technically but kept conservative).
-_EXIF_FORMATS = {"JPEG"}
-
-# File extensions we will *attempt* to embed into.  Everything else (RAW, GIF,
-# HEIC, etc.) falls back to a sidecar JSON file.
+# File extensions we will *attempt* to embed face data into.  Everything else
+# (RAW, GIF, HEIC, …) falls back to a sidecar JSON file.
 _EMBEDDABLE_EXTS = {".jpg", ".jpeg", ".jpe", ".png"}
 
 # Standard XMP-in-PNG iTXt keyword.
 _PNG_XMP_KEY = "XML:com.adobe.xmp"
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+# Replace retry schedule (seconds) — about 2.8 s in total, enough for the
+# Search indexer / antivirus to let go of a freshly written file.
+_REPLACE_BACKOFF = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7)
+
+# Windows error codes meaning "another process has the file open".
+_LOCK_WINERRORS = {5, 32, 33}
+
+
+class FileLockedError(OSError):
+    """The image could not be replaced because another program holds it."""
+
 
 @dataclass
 class MetadataWriteResult:
-    """Outcome of a single :func:`write_face_metadata` call."""
+    """Outcome of a single metadata write."""
 
     write_mode: str
     sidecar_path: Optional[Path] = None
     error_message: Optional[str] = None
+    # True when the image file itself was rewritten (GPS/date/face fields).
+    exif_written: bool = False
 
     @property
     def ok(self) -> bool:
+        """True when the data is preserved somewhere (file, XMP or sidecar)."""
         return self.write_mode not in (WRITE_MODE_FAILED,)
+
+    @property
+    def embedded(self) -> bool:
+        return self.write_mode in (
+            WRITE_MODE_XMP, WRITE_MODE_EXIF_USER_COMMENT, WRITE_MODE_EXIF,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -105,64 +117,116 @@ def write_face_metadata(
     prefer_exif_comment: bool = True,
     set_finder_comment: bool = True,
 ) -> MetadataWriteResult:
-    """Persist *payload* for *image_path* using the best available strategy.
+    """Persist a ``facelocal.faces.v1`` *payload* for *image_path*.
+
+    Thin wrapper over :func:`apply_image_metadata` (see there for details).
+    """
+    return apply_image_metadata(
+        image_path,
+        faces_payload=payload,
+        prefer_sidecar_only=prefer_sidecar_only,
+        prefer_exif_comment=prefer_exif_comment,
+        set_finder_comment=set_finder_comment,
+    )
+
+
+def apply_image_metadata(
+    image_path: str | Path,
+    *,
+    gps: Optional[tuple[float, float]] = None,
+    date: Optional[datetime] = None,
+    faces_payload: Optional[dict] = None,
+    prefer_sidecar_only: bool = False,
+    prefer_exif_comment: bool = True,
+    set_finder_comment: bool = True,
+) -> MetadataWriteResult:
+    """Apply GPS, date and face metadata to *image_path* in one file write.
 
     Args:
-        image_path: Absolute path to the image file.
-        payload: A JSON-serialisable ``facelocal.faces.v1`` document.
-        prefer_sidecar_only: When True, skip embedding entirely and always write
-            a sidecar JSON file (used for the privacy-conscious export option).
-        prefer_exif_comment: When True (default), JPEGs receive the JSON in the
-            EXIF ``UserComment`` field — the image's "comment", visible among the
-            standard EXIF data in most viewers. When False, the JSON goes into an
-            XMP block instead. Formats without EXIF (PNG) always use XMP.
-        set_finder_comment: When True (default) and running on macOS, the JSON is
-            *also* written to the file's Finder/Spotlight comment so it shows up
-            in Finder → Get Info → "Comments". Best-effort; no-op elsewhere.
+        gps: ``(lat, lon)`` to store in EXIF GPS, or None to leave it.
+        date: Capture date for DateTime/DateTimeOriginal/DateTimeDigitized.
+        faces_payload: A ``facelocal.faces.v1`` document, or None.
+        prefer_sidecar_only: Never put the face payload into the image; write
+            the sidecar instead (GPS/date edits are still applied).
+        prefer_exif_comment: JPEG only — also keep a copy of the JSON in the
+            EXIF ``UserComment`` (default). The XMP copy is always written.
+        set_finder_comment: On macOS also set the Finder comment (best effort).
 
     Returns:
-        A :class:`MetadataWriteResult` describing how (or whether) the data was
-        written.  Embedding failures degrade gracefully to a sidecar file; a
-        genuinely unwritable target yields ``WRITE_MODE_FAILED``.
+        The write mode: an embedded mode, ``sidecar`` (face data could not or
+        should not go into the file), ``locked`` (another program holds the
+        file; face data is in the sidecar), ``skipped`` (nothing to do) or
+        ``failed``. ``error_message`` carries reasons and partial-write notes.
     """
     path = Path(image_path)
-
     if not path.exists():
-        return MetadataWriteResult(
-            WRITE_MODE_FAILED, error_message=f"file not found: {path}"
-        )
+        return MetadataWriteResult(WRITE_MODE_FAILED, error_message=f"file not found: {path}")
 
-    if prefer_sidecar_only:
-        return _write_sidecar_result(path, payload)
+    has_faces = faces_payload is not None
+    embed_faces = has_faces and not prefer_sidecar_only and is_embeddable(path)
+    has_exif = gps is not None or date is not None
 
-    if not is_embeddable(path):
+    sidecar_reason: Optional[str] = None
+    if has_faces and not embed_faces and not prefer_sidecar_only:
+        sidecar_reason = f"format {path.suffix or '?'} cannot hold embedded metadata"
         log.debug("Not embeddable (%s) → sidecar: %s", path.suffix, path)
-        return _write_sidecar_result(
-            path, payload, reason=f"format {path.suffix or '?'} cannot hold embedded metadata"
-        )
+
+    if not embed_faces and not has_exif:
+        if has_faces:
+            return _write_sidecar_result(path, faces_payload, reason=sidecar_reason)
+        return MetadataWriteResult(WRITE_MODE_SKIPPED)
 
     if not os.access(path, os.W_OK):
-        log.info("Image not writable → sidecar: %s", path)
-        return _write_sidecar_result(path, payload, reason="image file is read-only")
+        log.info("Image not writable: %s", path)
+        if has_faces:
+            return _write_sidecar_result(path, faces_payload, reason="image file is read-only")
+        return MetadataWriteResult(WRITE_MODE_FAILED, error_message="image file is read-only")
 
-    reason: Optional[str] = None
     try:
-        mode = _embed(path, payload, prefer_exif_comment=prefer_exif_comment)
-        if mode is not None:
-            if set_finder_comment:
-                write_macos_finder_comment(path, json.dumps(payload, ensure_ascii=False))
-            return MetadataWriteResult(mode)
-        reason = "no embedding path for this image format"
-    except Exception as exc:  # noqa: BLE001
-        # Never lose the data: fall back to a sidecar, but keep the cause so the
-        # UI can explain *why* the image itself was not updated.
-        log.warning(
-            "Embedding metadata failed for %s: %s — falling back to sidecar",
-            path, exc, exc_info=True,
+        mode, notes = _write_embedded(
+            path,
+            gps=gps,
+            date=date,
+            payload=faces_payload if embed_faces else None,
+            prefer_exif_comment=prefer_exif_comment,
         )
-        reason = f"embedding failed: {exc}"
+    except FileLockedError as exc:
+        message = f"image is in use by another program: {exc}"
+        log.warning("Metadata write blocked by a file lock: %s", path)
+        if has_faces:
+            sidecar = _write_sidecar_result(path, faces_payload, reason=message)
+            if sidecar.write_mode == WRITE_MODE_FAILED:
+                return MetadataWriteResult(
+                    WRITE_MODE_FAILED, error_message=f"{message}; {sidecar.error_message}"
+                )
+            return MetadataWriteResult(
+                WRITE_MODE_LOCKED, sidecar_path=sidecar.sidecar_path, error_message=message
+            )
+        return MetadataWriteResult(WRITE_MODE_LOCKED, error_message=message)
+    except xe.XmpParseError as exc:
+        # Never drop another tool's XMP: leave the file untouched.
+        log.warning("Existing XMP unreadable in %s: %s", path, exc)
+        if has_faces:
+            sidecar = _write_sidecar_result(path, faces_payload)
+            return MetadataWriteResult(
+                WRITE_MODE_FAILED, sidecar_path=sidecar.sidecar_path, error_message=str(exc)
+            )
+        return MetadataWriteResult(WRITE_MODE_FAILED, error_message=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Embedding metadata failed for %s: %s", path, exc, exc_info=True)
+        if has_faces:
+            return _write_sidecar_result(path, faces_payload, reason=f"embedding failed: {exc}")
+        return MetadataWriteResult(WRITE_MODE_FAILED, error_message=str(exc))
 
-    return _write_sidecar_result(path, payload, reason=reason)
+    if has_faces and not embed_faces:
+        # GPS/date went into the file; the face data goes next to it.
+        result = _write_sidecar_result(path, faces_payload, reason=sidecar_reason)
+        result.exif_written = True
+        return result
+
+    if embed_faces and set_finder_comment:
+        write_macos_finder_comment(path, json.dumps(faces_payload, ensure_ascii=False))
+    return MetadataWriteResult(mode, error_message="; ".join(notes) or None, exif_written=True)
 
 
 def write_macos_finder_comment(image_path: str | Path, text: str) -> bool:
@@ -221,12 +285,12 @@ def write_macos_finder_comment(image_path: str | Path, text: str) -> bool:
         return False
 
 
+
 def read_face_metadata(image_path: str | Path) -> Optional[dict]:
     """Read back a previously written ``facelocal`` payload, or ``None``.
 
-    Checks, in order: embedded XMP, embedded EXIF (UserComment /
-    ImageDescription), then the sidecar JSON file.  Used by the dedup/update
-    logic and by tests.
+    Checks, in order: embedded XMP, embedded EXIF (UserComment, legacy
+    ImageDescription), then the sidecar JSON file.
     """
     path = Path(image_path)
 
@@ -257,9 +321,7 @@ def _write_sidecar_result(
 ) -> MetadataWriteResult:
     try:
         sidecar = write_sidecar(path, payload)
-        return MetadataWriteResult(
-            WRITE_MODE_SIDECAR, sidecar_path=sidecar, error_message=reason
-        )
+        return MetadataWriteResult(WRITE_MODE_SIDECAR, sidecar_path=sidecar, error_message=reason)
     except Exception as exc:  # noqa: BLE001
         log.error("Sidecar write failed for %s: %s", path, exc)
         return MetadataWriteResult(WRITE_MODE_FAILED, error_message=str(exc))
@@ -275,389 +337,347 @@ def write_sidecar(image_path: str | Path, payload: dict) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Embedding (XMP / EXIF)
+# Embedding
 # ---------------------------------------------------------------------------
 
-def _embed(path: Path, payload: dict, *, prefer_exif_comment: bool = True) -> Optional[str]:
-    """Embed *payload* into the image; return the write-mode or ``None``.
+def _known_names(payload: dict) -> list[str]:
+    names: list[str] = []
+    for face in payload.get("faces") or []:
+        name = face.get("person_name")
+        if face.get("unknown") or not name:
+            continue
+        name = str(name).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
-    Returns ``None`` (not an exception) when the format simply has no embedding
-    path, so the caller can fall back to a sidecar cleanly.
 
-    For JPEG the JSON goes into the EXIF ``UserComment`` field when
-    *prefer_exif_comment* is True (the default — it shows up as the image's
-    "comment" among the standard EXIF data), otherwise into an XMP block.
-    PNG has no EXIF and always uses XMP.
-    """
+def _is_facelocal_json(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    try:
+        parsed = json.loads(text)
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(parsed, dict) and parsed.get("schema") == FACELOCAL_SCHEMA
+
+
+def _face_edits(
+    payload: dict, exif_old: bytes, json_text: str, prefer_exif_comment: bool
+) -> tuple[ef.ExifEdits, bool, list[str]]:
+    """EXIF edits for a face payload → ``(edits, user_comment_written, notes)``."""
+    notes: list[str] = []
+    names = _known_names(payload)
+    edits = ef.ExifEdits(
+        xp_comment="; ".join(names) if names else None,
+        xp_keywords=";".join(names) if names else None,
+    )
+    existing_uc = ef.read_user_comment(exif_old)
+    uc_is_ours = _is_facelocal_json(existing_uc)
+    uc_free = not (existing_uc or "").strip() or uc_is_ours
+
+    if prefer_exif_comment:
+        if uc_free:
+            edits.user_comment = ef.UserCommentText(json_text)
+            return edits, True, notes
+        notes.append("EXIF UserComment holds other data — JSON stored in XMP only")
+    elif uc_is_ours:
+        edits.user_comment = None  # no stale copy next to the fresh XMP
+    return edits, False, notes
+
+
+def _fit_exif(
+    exif_old: bytes, edits: ef.ExifEdits, payload: Optional[dict], uc_written: bool
+) -> tuple[bytes, bool, list[str]]:
+    """Build EXIF that fits one JPEG segment, stepping down when too large."""
+    notes: list[str] = []
+
+    def fits(blob: bytes) -> bool:
+        return len(blob) <= js.MAX_SEGMENT_PAYLOAD
+
+    out = ef.build_exif(exif_old, edits)
+    if fits(out) or payload is None:
+        if not fits(out):
+            raise js.SegmentTooLargeError("EXIF block too large")
+        return out, uc_written, notes
+
+    if uc_written:
+        edits.user_comment = ef.UserCommentText(
+            json.dumps(payload, ensure_ascii=True), ascii=True
+        )
+        out = ef.build_exif(exif_old, edits)
+        if fits(out):
+            notes.append("UserComment stored ASCII-escaped (EXIF size limit)")
+            return out, True, notes
+        edits.user_comment = None if _is_facelocal_json(ef.read_user_comment(exif_old)) else ef.KEEP
+        uc_written = False
+        notes.append("UserComment copy omitted (EXIF size limit) — JSON in XMP only")
+        out = ef.build_exif(exif_old, edits)
+        if fits(out):
+            return out, uc_written, notes
+
+    edits.xp_comment = ef.KEEP
+    edits.xp_keywords = ef.KEEP
+    notes.append("Windows Comments/Tags omitted (EXIF size limit)")
+    out = ef.build_exif(exif_old, edits)
+    if not fits(out):
+        raise js.SegmentTooLargeError("EXIF block too large")
+    return out, uc_written, notes
+
+
+def _write_embedded(
+    path: Path,
+    *,
+    gps: Optional[tuple[float, float]],
+    date: Optional[datetime],
+    payload: Optional[dict],
+    prefer_exif_comment: bool,
+) -> tuple[str, list[str]]:
+    data = path.read_bytes()
+    if data.startswith(b"\xff\xd8"):
+        return _write_jpeg(path, data, gps, date, payload, prefer_exif_comment)
+    return _write_with_pillow(path, data, gps, date, payload)
+
+
+def _image_size(data: bytes) -> tuple[int, int]:
     from PIL import Image as PilImage
 
-    with PilImage.open(path) as img:
-        img_format = (img.format or "").upper()
-        existing_xmp = img.info.get("xmp")
-        existing_exif = img.info.get("exif", b"")
+    with PilImage.open(io.BytesIO(data)) as img:  # header only, no decode
+        return img.size
+
+
+def _write_jpeg(
+    path: Path,
+    data: bytes,
+    gps: Optional[tuple[float, float]],
+    date: Optional[datetime],
+    payload: Optional[dict],
+    prefer_exif_comment: bool,
+) -> tuple[str, list[str]]:
+    exif_old, xmp_old = js.read_metadata(data)
+    exif_old = exif_old or b""
+    notes: list[str] = []
+    edits = ef.ExifEdits()
+    uc_written = False
+    new_xmp = js.KEEP
+
+    if payload is not None:
+        json_text = json.dumps(payload, ensure_ascii=False)
+        edits, uc_written, notes = _face_edits(payload, exif_old, json_text, prefer_exif_comment)
+        ow, oh = xe.oriented_size(*_image_size(data), ef.read_orientation(exif_old))
+        new_xmp = xe.edit_xmp(
+            xmp_old,
+            json_text=json_text,
+            regions=xe.regions_from_payload(payload, ow, oh),
+            applied_to=(ow, oh),
+        )
+        if len(js.XMP_HEADER) + len(new_xmp) > js.MAX_SEGMENT_PAYLOAD:
+            raise js.SegmentTooLargeError("XMP too large for one JPEG segment")
+
+    edits.gps = gps
+    edits.date = date
+    new_exif = js.KEEP
+    if not edits.is_empty():
+        new_exif, uc_written, more = _fit_exif(exif_old, edits, payload, uc_written)
+        notes.extend(more)
+
+    _replace_with_bytes(path, js.splice(data, exif=new_exif, xmp=new_xmp))
+
+    if payload is None:
+        return WRITE_MODE_EXIF, notes
+    return (WRITE_MODE_EXIF_USER_COMMENT if uc_written else WRITE_MODE_XMP), notes
+
+
+def _write_with_pillow(
+    path: Path,
+    data: bytes,
+    gps: Optional[tuple[float, float]],
+    date: Optional[datetime],
+    payload: Optional[dict],
+) -> tuple[str, list[str]]:
+    """PNG (and, for GPS/date only, other Pillow formats): lossless re-save."""
+    from PIL import Image as PilImage
+
+    with PilImage.open(io.BytesIO(data)) as img:
+        fmt = (img.format or "").upper()
+        info = dict(img.info)
         png_text = dict(getattr(img, "text", {}) or {})
         img.load()
         work = img.copy()
 
-    json_text = json.dumps(payload, ensure_ascii=False)
+    exif_old = info.get("exif", b"") or b""
+    if isinstance(exif_old, str):
+        exif_old = exif_old.encode("latin-1", errors="replace")
+    if exif_old and not exif_old.startswith(ef.EXIF_HEADER):
+        exif_old = ef.EXIF_HEADER + exif_old
 
-    if prefer_exif_comment and img_format in _EXIF_FORMATS:
-        return _save_jpeg_exif_comment(
-            path, work, existing_exif, json_text, existing_xmp=existing_xmp
-        )
+    edits = ef.ExifEdits(gps=gps, date=date)
+    new_exif = ef.build_exif(exif_old, edits) if not edits.is_empty() else exif_old
 
-    if img_format in _XMP_FORMATS:
-        new_xmp = _merge_xmp(existing_xmp, json_text)
-        if img_format == "JPEG":
-            _save_jpeg(path, work, xmp=new_xmp, exif=existing_exif)
-        else:  # PNG
-            _save_png(path, work, png_text, xmp=new_xmp.decode("utf-8"))
-        return WRITE_MODE_XMP
+    if fmt == "PNG":
+        new_xmp: Optional[str] = None
+        if payload is not None:
+            ow, oh = xe.oriented_size(*work.size, ef.read_orientation(exif_old))
+            existing_xmp = png_text.get(_PNG_XMP_KEY) or info.get("xmp")
+            new_xmp = xe.edit_xmp(
+                existing_xmp,
+                json_text=json.dumps(payload, ensure_ascii=False),
+                regions=xe.regions_from_payload(payload, ow, oh),
+                applied_to=(ow, oh),
+            ).decode("utf-8")
+        _save_png(path, work, png_text, xmp=new_xmp, exif=new_exif,
+                  icc=info.get("icc_profile"))
+        return (WRITE_MODE_XMP if payload is not None else WRITE_MODE_EXIF), []
 
-    if img_format in _EXIF_FORMATS:
-        return _save_jpeg_exif_comment(
-            path, work, existing_exif, json_text, existing_xmp=existing_xmp
-        )
-
-    return None
-
-
-def _save_jpeg(path: Path, img, *, xmp: bytes, exif: bytes) -> None:
-    tmp = _tmp_for(path)
-    save_kwargs = {"format": "JPEG", "xmp": xmp, "quality": "keep"}
-    if exif:
-        save_kwargs["exif"] = exif
-    try:
-        img.save(tmp, **save_kwargs)
-    except (ValueError, OSError):
-        # "keep" quality only works for JPEG inputs that still have their
-        # original tables; retry with a high explicit quality.
-        save_kwargs["quality"] = 95
-        img.save(tmp, **save_kwargs)
-    _replace_atomic(tmp, path)
+    if payload is not None:
+        raise ValueError(f"cannot embed face metadata into {fmt or 'this format'}")
+    save_kwargs: dict = {"format": fmt or None, "exif": new_exif}
+    if info.get("icc_profile"):
+        save_kwargs["icc_profile"] = info["icc_profile"]
+    _replace_with_pillow(path, work, save_kwargs)
+    return WRITE_MODE_EXIF, []
 
 
-# EXIF tag numbers used by the Pillow fallback path (piexif is optional).
-_EXIF_IFD_TAG = 0x8769           # 0th IFD → Exif IFD pointer
-_TAG_USER_COMMENT = 0x9286       # Exif IFD → UserComment
-_TAG_IMAGE_DESCRIPTION = 0x010E  # 0th IFD → ImageDescription
-
-# UserComment carries an 8-byte character-code prefix; "UNICODE\0" with UTF-16,
-# or the ASCII prefix for plain text.  We use the ASCII prefix and store UTF-8
-# JSON bytes after it — widely tolerated and round-trips here.
-_USER_COMMENT_PREFIX = b"ASCII\x00\x00\x00"
-
-
-def _dump_exif_with_user_comment(existing_exif: bytes, json_text: str) -> bytes:
-    """Return *existing_exif* with our JSON added as the EXIF ``UserComment``.
-
-    Uses :mod:`piexif` when it is installed (it round-trips every original tag)
-    and otherwise falls back to Pillow's own EXIF writer.  piexif is therefore
-    optional: a machine without it still gets real EXIF metadata instead of
-    silently degrading to a sidecar JSON file.
-    """
-    try:
-        import piexif
-    except ImportError:
-        log.debug("piexif not installed — writing the EXIF UserComment via Pillow")
-        return _dump_exif_with_user_comment_pillow(existing_exif, json_text)
-
-    exif_dict = piexif.load(existing_exif) if existing_exif else {
-        "0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None,
-    }
-    exif_dict.setdefault("Exif", {})
-    exif_dict["Exif"][piexif.ExifIFD.UserComment] = (
-        _USER_COMMENT_PREFIX + json_text.encode("utf-8")
-    )
-    return piexif.dump(exif_dict)
-
-
-def _dump_exif_with_user_comment_pillow(existing_exif: bytes, json_text: str) -> bytes:
-    """piexif-free EXIF writer built on ``PIL.Image.Exif``."""
-    from PIL import Image as PilImage
-
-    exif = PilImage.Exif()
-    if existing_exif:
-        try:
-            exif.load(existing_exif)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Unparsable existing EXIF (%s) — writing a fresh block", exc)
-
-    sub_ifd = exif.get_ifd(_EXIF_IFD_TAG)
-    sub_ifd[_TAG_USER_COMMENT] = _USER_COMMENT_PREFIX + json_text.encode("utf-8")
-    exif[_EXIF_IFD_TAG] = sub_ifd
-    return exif.tobytes()
-
-
-def _save_jpeg_exif_comment(
-    path: Path,
-    img,
-    existing_exif: bytes,
-    json_text: str,
-    *,
-    existing_xmp=None,
-) -> str:
-    new_exif = _dump_exif_with_user_comment(existing_exif, json_text)
-
-    # Re-attach any pre-existing XMP so an unrelated XMP block survives the write.
-    save_kwargs = {"format": "JPEG", "exif": new_exif, "quality": "keep"}
-    if existing_xmp:
-        save_kwargs["xmp"] = existing_xmp
-
-    tmp = _tmp_for(path)
-    try:
-        img.save(tmp, **save_kwargs)
-    except (ValueError, OSError):
-        save_kwargs["quality"] = 95
-        img.save(tmp, **save_kwargs)
-    _replace_atomic(tmp, path)
-    return WRITE_MODE_EXIF_USER_COMMENT
-
-
-def _save_png(path: Path, img, existing_text: dict, *, xmp: str) -> None:
+def _save_png(path: Path, img, existing_text: dict, *, xmp: Optional[str],
+              exif: bytes, icc) -> None:
     from PIL import PngImagePlugin
 
     info = PngImagePlugin.PngInfo()
-    # Preserve all existing textual chunks except a prior XMP block.
     for key, value in existing_text.items():
-        if key == _PNG_XMP_KEY:
+        if key == _PNG_XMP_KEY and xmp is not None:
             continue
         try:
             info.add_itxt(key, value)
         except Exception:  # noqa: BLE001
-            # Non-iTXt legacy chunks: store as latin-1 tEXt where possible.
             try:
                 info.add_text(key, value)
             except Exception:  # noqa: BLE001
                 log.debug("Skipping unpreservable PNG text chunk %r", key)
-    info.add_itxt(_PNG_XMP_KEY, xmp)
+    if xmp is not None:
+        info.add_itxt(_PNG_XMP_KEY, xmp)
 
-    tmp = _tmp_for(path)
-    img.save(tmp, format="PNG", pnginfo=info)
-    _replace_atomic(tmp, path)
-
-
-# ---------------------------------------------------------------------------
-# XMP packet construction / merging
-# ---------------------------------------------------------------------------
-
-def _build_xmp_description(json_text: str) -> str:
-    escaped = _xml_escape(json_text)
-    return (
-        f'<rdf:Description rdf:about="" '
-        f'xmlns:{_XMP_NS_PREFIX}="{_XMP_NS_URI}">'
-        f"<{_XMP_NS_PREFIX}:{_XMP_PROP}>{escaped}</{_XMP_NS_PREFIX}:{_XMP_PROP}>"
-        f"</rdf:Description>"
-    )
-
-
-def _build_xmp_packet(json_text: str) -> bytes:
-    description = _build_xmp_description(json_text)
-    packet = (
-        f'<?xpacket begin="﻿" id="{_XPACKET_ID}"?>'
-        '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
-        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
-        f"{description}"
-        "</rdf:RDF>"
-        "</x:xmpmeta>"
-        '<?xpacket end="w"?>'
-    )
-    return packet.encode("utf-8")
-
-
-# Matches a whole <rdf:Description …facelocal…>…</rdf:Description> block, so a
-# re-export replaces our block in place instead of duplicating it.
-_FACELOCAL_DESC_RE = re.compile(
-    r"<rdf:Description\b[^>]*?" + re.escape(_XMP_NS_URI) + r".*?</rdf:Description>",
-    re.DOTALL,
-)
-_RDF_CLOSE_RE = re.compile(r"</rdf:RDF>")
-
-
-def _merge_xmp(existing_xmp, json_text: str) -> bytes:
-    """Return XMP bytes with our facelocal block inserted/updated.
-
-    Preserves any other RDF descriptions in *existing_xmp*.  When there is no
-    usable existing packet, a fresh minimal packet is built.
-    """
-    if not existing_xmp:
-        return _build_xmp_packet(json_text)
-
-    if isinstance(existing_xmp, bytes):
-        try:
-            text = existing_xmp.decode("utf-8")
-        except UnicodeDecodeError:
-            text = existing_xmp.decode("latin-1", errors="replace")
-    else:
-        text = str(existing_xmp)
-
-    new_desc = _build_xmp_description(json_text)
-
-    if _FACELOCAL_DESC_RE.search(text):
-        merged = _FACELOCAL_DESC_RE.sub(lambda _m: new_desc, text, count=1)
-    elif _RDF_CLOSE_RE.search(text):
-        merged = _RDF_CLOSE_RE.sub(new_desc + "</rdf:RDF>", text, count=1)
-    else:
-        # Existing XMP is malformed / has no RDF — start clean rather than risk
-        # producing an invalid packet.
-        return _build_xmp_packet(json_text)
-
-    return merged.encode("utf-8")
+    save_kwargs: dict = {"format": "PNG", "pnginfo": info}
+    if exif:
+        save_kwargs["exif"] = exif
+    if icc:
+        save_kwargs["icc_profile"] = icc
+    _replace_with_pillow(path, img, save_kwargs)
 
 
 # ---------------------------------------------------------------------------
 # Reading embedded payloads back
 # ---------------------------------------------------------------------------
 
-_FACELOCAL_PROP_RE = re.compile(
-    rf"<{_XMP_NS_PREFIX}:{_XMP_PROP}>(.*?)</{_XMP_NS_PREFIX}:{_XMP_PROP}>",
-    re.DOTALL,
-)
-
-
-def _read_embedded(path: Path) -> Optional[dict]:
-    from PIL import Image as PilImage
-
-    with PilImage.open(path) as img:
-        xmp = img.info.get("xmp")
-        exif = img.info.get("exif", b"")
-        png_text = dict(getattr(img, "text", {}) or {})
-
-    # XMP (JPEG stores raw bytes in info["xmp"]; PNG keeps it in text chunks).
-    candidates = []
-    if xmp:
-        candidates.append(xmp.decode("utf-8", errors="replace") if isinstance(xmp, bytes) else str(xmp))
-    if _PNG_XMP_KEY in png_text:
-        candidates.append(png_text[_PNG_XMP_KEY])
-
-    for text in candidates:
-        m = _FACELOCAL_PROP_RE.search(text)
-        if m:
-            try:
-                return json.loads(_xml_unescape(m.group(1)))
-            except json.JSONDecodeError:
-                continue
-
-    # EXIF UserComment / ImageDescription.
-    if exif:
-        payload = _read_exif_comment(exif)
-        if payload is not None:
-            return payload
-
-    return None
-
-
-def _read_exif_comment(exif: bytes) -> Optional[dict]:
-    try:
-        import piexif
-
-        exif_dict = piexif.load(exif)
-    except ImportError:
-        return _read_exif_comment_pillow(exif)
-    except Exception:  # noqa: BLE001
-        return None
-
-    raw = exif_dict.get("Exif", {}).get(piexif.ExifIFD.UserComment)
-    payload = _decode_user_comment(raw)
-    if payload is not None:
-        return payload
-
-    return _decode_json_bytes(exif_dict.get("0th", {}).get(piexif.ImageIFD.ImageDescription))
-
-
-def _read_exif_comment_pillow(exif: bytes) -> Optional[dict]:
-    """piexif-free counterpart of :func:`_read_exif_comment`."""
-    from PIL import Image as PilImage
-
-    parsed = PilImage.Exif()
-    try:
-        parsed.load(exif)
-        raw = parsed.get_ifd(_EXIF_IFD_TAG).get(_TAG_USER_COMMENT)
-    except Exception:  # noqa: BLE001
-        return None
-
-    payload = _decode_user_comment(raw)
-    if payload is not None:
-        return payload
-
-    return _decode_json_bytes(parsed.get(_TAG_IMAGE_DESCRIPTION))
-
-
-def _decode_user_comment(raw) -> Optional[dict]:
-    """Strip the 8-byte character-code prefix and parse the JSON body."""
-    if isinstance(raw, str):
-        raw = raw.encode("utf-8", errors="replace")
-    if not isinstance(raw, bytes) or raw[:8] not in (b"ASCII\x00\x00\x00", b"UNICODE\x00"):
-        return None
-    return _decode_json_bytes(raw[8:])
-
-
-def _decode_json_bytes(raw) -> Optional[dict]:
-    if isinstance(raw, bytes):
-        try:
-            raw = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    if not isinstance(raw, str):
+def _loads(text: Optional[str]) -> Optional[dict]:
+    if not text:
         return None
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(text)
     except Exception:  # noqa: BLE001
         return None
     return parsed if isinstance(parsed, dict) else None
 
 
+def _read_embedded(path: Path) -> Optional[dict]:
+    data = path.read_bytes()
+    if data.startswith(b"\xff\xd8"):
+        exif, xmp = js.read_metadata(data)
+    else:
+        from PIL import Image as PilImage
+
+        with PilImage.open(io.BytesIO(data)) as img:
+            exif = img.info.get("exif", b"")
+            xmp = (getattr(img, "text", {}) or {}).get(_PNG_XMP_KEY) or img.info.get("xmp")
+
+    payload = _loads(xe.read_facelocal_json(xmp)) if xmp else None
+    if payload is not None:
+        return payload
+    if exif:
+        payload = _loads(ef.read_user_comment(exif))
+        if payload is not None:
+            return payload
+        try:  # legacy ImageDescription copy
+            from PIL import Image as PilImage
+
+            parsed = PilImage.Exif()
+            parsed.load(exif)
+            return _loads(parsed.get(ef.TAG_IMAGE_DESCRIPTION))
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
-# Utilities
+# Safe replace
 # ---------------------------------------------------------------------------
 
 def _tmp_for(path: Path) -> Path:
     return path.with_name(path.name + ".facelocal.tmp")
 
 
-def _replace_atomic(tmp: Path, path: Path) -> None:
-    """Replace *path* with *tmp*, tolerating transient Windows file locks.
+def _cleanup(tmp: Path) -> None:
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
 
-    ``os.replace`` over an existing file raises ``PermissionError`` on Windows
-    whenever another handle is briefly open on the target — the Search indexer,
-    antivirus, Explorer's thumbnail cache, or the app's own preview. (POSIX has
-    no such restriction, which is why this only bites on Windows.) We retry a few
-    times with a short backoff, then fall back to overwriting the file contents
-    in place. Only if *all* of that fails does the exception propagate, letting
-    the caller degrade to a sidecar JSON file.
+
+def _replace_with_bytes(path: Path, data: bytes) -> None:
+    tmp = _tmp_for(path)
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        _cleanup(tmp)
+        raise
+    _replace_atomic(tmp, path)
+
+
+def _replace_with_pillow(path: Path, img, save_kwargs: dict) -> None:
+    tmp = _tmp_for(path)
+    try:
+        with open(tmp, "wb") as fh:
+            img.save(fh, **save_kwargs)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except BaseException:
+        _cleanup(tmp)
+        raise
+    _replace_atomic(tmp, path)
+
+
+def _is_lock_error(exc: OSError) -> bool:
+    return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in _LOCK_WINERRORS
+
+
+def _replace_atomic(tmp: Path, path: Path) -> None:
+    """Atomically replace *path* with *tmp*, tolerating short Windows locks.
+
+    ``os.replace`` over a file that another process holds open fails on
+    Windows (Search indexer, antivirus, Explorer thumbnails, a viewer). Short
+    locks are ridden out with a backoff; a lock that persists raises
+    :class:`FileLockedError`. The original is never overwritten in place, so
+    a failure always leaves it intact, and the temp file is always removed.
     """
     import time
 
-    last_exc: Optional[BaseException] = None
-    for attempt in range(6):
+    last_exc: Optional[OSError] = None
+    for attempt in range(len(_REPLACE_BACKOFF) + 1):
         try:
             os.replace(tmp, path)
             return
-        except PermissionError as exc:  # Windows: target momentarily locked
+        except OSError as exc:
+            if not _is_lock_error(exc):
+                _cleanup(tmp)
+                raise
             last_exc = exc
-            time.sleep(0.08 * (attempt + 1))
+            if attempt < len(_REPLACE_BACKOFF):
+                time.sleep(_REPLACE_BACKOFF[attempt])
 
-    # Last resort: overwrite the original file's bytes in place. This keeps the
-    # original inode/handle and succeeds in some lock scenarios os.replace can't.
-    try:
-        data = tmp.read_bytes()
-        with open(path, "r+b") as dst:
-            dst.seek(0)
-            dst.write(data)
-            dst.truncate()
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        log.info("Atomic replace blocked; wrote in place instead: %s", path)
-        return
-    except Exception as exc:  # noqa: BLE001
-        log.warning("In-place fallback failed for %s: %s", path, exc)
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise last_exc if last_exc is not None else exc
+    _cleanup(tmp)
+    raise FileLockedError(str(last_exc)) from last_exc
 
 
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
@@ -668,19 +688,3 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, target)
-
-
-def _xml_escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-
-
-def _xml_unescape(text: str) -> str:
-    return (
-        text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-    )

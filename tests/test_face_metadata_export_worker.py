@@ -16,7 +16,16 @@ from app.workers.face_metadata_export_worker import FaceMetadataExportWorker
 
 class TestFaceMetadataExportWorker:
     def test_emits_summary_on_success(self, qtbot):
-        summary = FaceMetadataExportSummary(requested_total=2)
+        from app.services.face_metadata_export_service import FaceMetadataExportResult
+        from app.utils import image_metadata as meta
+
+        summary = FaceMetadataExportSummary(
+            results=[
+                FaceMetadataExportResult(1, "a.jpg", True, meta.WRITE_MODE_XMP),
+                FaceMetadataExportResult(2, "busy.jpg", True, meta.WRITE_MODE_LOCKED),
+            ],
+            requested_total=2,
+        )
         token = CancellationToken()
         options = FaceMetadataExportOptions()
 
@@ -31,6 +40,9 @@ class TestFaceMetadataExportWorker:
             with qtbot.waitSignal(worker.finished_ok, timeout=3000) as blocker:
                 worker.run()
         assert blocker.args[0] is summary
+        # The locked outcome reaches the UI unchanged.
+        assert blocker.args[0].locked_count == 1
+        assert blocker.args[0].locked_paths == ["busy.jpg"]
 
     def test_reports_progress(self, qtbot):
         token = CancellationToken()

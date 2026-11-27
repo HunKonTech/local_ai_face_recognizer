@@ -947,6 +947,13 @@ class ExportDialog(QDialog):
                 skipped=summary.skipped_count,
                 failed=summary.failed_count,
             )
+        locked = getattr(summary, "locked_paths", [])
+        if locked:
+            msg += "\n\n" + t(
+                "fmeta_locked",
+                count=len(locked),
+                files="\n".join(Path(p).name for p in locked[:10]),
+            )
         reasons = getattr(summary, "fallback_reasons", [])
         if reasons:
             msg += "\n\n" + "\n".join(reasons[:5])

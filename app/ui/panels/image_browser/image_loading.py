@@ -356,45 +356,38 @@ class ImageLoadingMixin:
             return
 
         from app.services.face_metadata_export_service import FaceMetadataExportService
-        from app.services.image_library_service import resolve_existing_image_path
-        from app.utils.exif import parse_flexible_date, write_exif_date, write_exif_gps
+        from app.utils.exif import parse_flexible_date
 
-        gps_written = 0
-        date_written = 0
+        def extra_edits(img: Image) -> dict:
+            # GPS + date go into the SAME file write as the persons: separate
+            # rewrites in quick succession make Windows' indexer/antivirus lock
+            # the fresh file and the next write fails.
+            lat, lon = self._effective_gps(img)
+            return {
+                "gps": (lat, lon) if lat is not None and lon is not None else None,
+                "date": parse_flexible_date((img.photo_date or "").strip()),
+            }
 
         with session_scope() as session:
-            # 1) GPS + date go in FIRST — they only touch EXIF. The face-metadata
-            #    XMP write below re-attaches the existing EXIF, so writing it last
-            #    keeps GPS/date intact while adding the persons block.
-            for image_id in image_ids:
-                img = session.get(Image, image_id)
-                if img is None:
-                    continue
-                abs_path = resolve_existing_image_path(img)
-                if abs_path is None or not Path(abs_path).exists():
-                    continue
-                path_str = str(abs_path)
-
-                lat, lon = self._effective_gps(img)
-                if lat is not None and lon is not None and write_exif_gps(path_str, lat, lon):
-                    gps_written += 1
-
-                dt = parse_flexible_date((img.photo_date or "").strip())
-                if dt is not None and write_exif_date(path_str, dt):
-                    date_written += 1
-
-            # 2) Persons + face boxes (XMP / EXIF UserComment / sidecar JSON).
-            summary = FaceMetadataExportService(session).export_images(image_ids)
+            summary = FaceMetadataExportService(session).export_images(
+                image_ids, extra_edits=extra_edits
+            )
 
         msg = t(
             "ib3_save_meta_summary",
             total=summary.total,
             embedded=summary.embedded_count,
             sidecar=summary.sidecar_count,
-            gps=gps_written,
-            date=date_written,
+            gps=summary.extra_written_count("gps"),
+            date=summary.extra_written_count("date"),
             failed=summary.failed_count,
         )
+        if summary.locked_paths:
+            msg += "\n\n" + t(
+                "fmeta_locked",
+                count=summary.locked_count,
+                files="\n".join(Path(p).name for p in summary.locked_paths[:10]),
+            )
         errors = summary.errors
         if errors:
             msg += "\n\n" + "\n".join(errors[:10])

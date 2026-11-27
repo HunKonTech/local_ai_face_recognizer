@@ -49,10 +49,11 @@ def test_gps_and_date_coexist(tmp_path):
     assert _read_datetime_original(jpg) == "2001:02:03 00:00:00"
 
 
-def test_write_gps_survives_windows_lock(tmp_path, monkeypatch):
-    """Simulate Windows os.replace PermissionError → in-place fallback succeeds."""
+def test_write_gps_locked_file_left_intact(tmp_path, monkeypatch):
+    """A persistent Windows lock → False, original untouched, no temp file."""
     jpg = tmp_path / "locked.jpg"
     _make_jpeg(jpg)
+    before = jpg.read_bytes()
 
     import app.utils.image_metadata as meta
 
@@ -66,10 +67,52 @@ def test_write_gps_survives_windows_lock(tmp_path, monkeypatch):
     monkeypatch.setattr(meta.os, "replace", fake_replace)
     monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
 
+    assert write_exif_gps(jpg, 47.5, 19.05) is False
+    assert jpg.read_bytes() == before
+    assert not (tmp_path / "locked.jpg.facelocal.tmp").exists()
+
+
+def test_write_gps_rides_out_short_lock(tmp_path, monkeypatch):
+    """A lock that clears after a few retries still gets the write in."""
+    jpg = tmp_path / "busy.jpg"
+    _make_jpeg(jpg)
+
+    import app.utils.image_metadata as meta
+
+    real_replace = meta.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("indexer busy")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(meta.os, "replace", flaky_replace)
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+
     assert write_exif_gps(jpg, 47.5, 19.05) is True
     assert read_exif_gps(jpg) is not None
-    # No leftover temp file.
-    assert not (tmp_path / "locked.jpg.facelocal.tmp").exists()
+
+
+def test_write_gps_and_date_keep_pixels_and_icc(tmp_path):
+    """GPS/date writes splice metadata only: scan data and ICC are byte-identical."""
+    from PIL import ImageCms
+
+    from app.utils import jpeg_segments as js
+
+    jpg = tmp_path / "icc.jpg"
+    icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    PilImage.new("RGB", (80, 60), (5, 99, 200)).save(jpg, format="JPEG", icc_profile=icc)
+    before = jpg.read_bytes()
+
+    assert write_exif_gps(jpg, 47.5, 19.05)
+    assert write_exif_date(jpg, datetime(2001, 2, 3))
+
+    after = jpg.read_bytes()
+    assert after[js._parse(after)[1]:] == before[js._parse(before)[1]:]
+    with PilImage.open(jpg) as im:
+        assert im.info.get("icc_profile") == icc
 
 
 def test_write_gps_quality_preserved_no_recompress_blowup(tmp_path):
@@ -80,8 +123,8 @@ def test_write_gps_quality_preserved_no_recompress_blowup(tmp_path):
     size1 = jpg.stat().st_size
     write_exif_gps(jpg, 47.6, 19.06)
     size2 = jpg.stat().st_size
-    # quality="keep" → near-identical recompression, not a big drift.
-    assert abs(size2 - size1) < size1 * 0.5
+    # Lossless splice: only the EXIF segment changes, its size stays put.
+    assert abs(size2 - size1) < 64
 
 
 def test_missing_file_returns_false(tmp_path):

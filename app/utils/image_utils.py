@@ -240,7 +240,10 @@ def load_image_bgr(path: str) -> Optional[np.ndarray]:
 
     # Pillow fallback (handles WEBP, some TIFF variants, etc.)
     try:
-        pil_img = PilImage.open(path).convert("RGB")
+        # Context manager: never leave a handle open (it would block metadata
+        # writes to this file on Windows).
+        with PilImage.open(path) as src:
+            pil_img = src.convert("RGB")
         return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not load image %s: %s", path, exc)
