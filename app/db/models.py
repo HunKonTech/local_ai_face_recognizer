@@ -503,6 +503,28 @@ class PersonFieldValue(Base):
 
 
 # ---------------------------------------------------------------------------
+# Cross-process change log (add-db-change-notification)
+# ---------------------------------------------------------------------------
+
+class ChangeLog(Base):
+    """One write to a watched family table, tagged with the writing process.
+
+    Rows are appended by per-connection TEMP triggers installed in
+    :func:`app.services.change_watch_service.install_change_triggers` and
+    pruned after 30 days. ``changed_at`` is a Unix timestamp (seconds).
+    """
+
+    __tablename__ = "change_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    table_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    row_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    op: Mapped[str] = mapped_column(String(1), nullable=False)
+    origin: Mapped[str] = mapped_column(String(32), nullable=False)
+    changed_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+# ---------------------------------------------------------------------------
 # Relationship
 # ---------------------------------------------------------------------------
 

@@ -455,6 +455,8 @@ class UiBuildMixin:
         self._select_folder_action.setText(t("manage_folders"))
         self._mb_scan_menu_action.setText(t("scanModes.openButton"))
         self._mb_tools_menu.setTitle(t("mb_tools"))
+        if hasattr(self, "_external_change_bar"):
+            self._external_change_bar.retranslate()
         self._person_fields_action.setText(t("cf_manage_menu"))
         self._mb_merge_menu.setTitle(t("mb_merge"))
         self._mb_system_menu.setTitle(t("mb_system"))

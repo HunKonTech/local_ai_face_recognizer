@@ -1140,7 +1140,7 @@ class ImageBrowserPanel(DeoldifiedMixin, TreeMixin, RerecognitionMixin, Navigati
         if sb and sb.isVisible():
             self._fs_hidden_widgets.append(sb)
             sb.hide()
-        tabs = main_win.centralWidget()
+        tabs = getattr(main_win, "_tabs", None) or main_win.centralWidget()
         if isinstance(tabs, QTabWidget):
             tabs.tabBar().hide()
         self._fs_btn.setVisible(False)
@@ -1154,7 +1154,7 @@ class ImageBrowserPanel(DeoldifiedMixin, TreeMixin, RerecognitionMixin, Navigati
         for w in self._fs_hidden_widgets:
             w.show()
         self._fs_hidden_widgets = []
-        tabs = main_win.centralWidget()
+        tabs = getattr(main_win, "_tabs", None) or main_win.centralWidget()
         if isinstance(tabs, QTabWidget):
             tabs.tabBar().show()
         self._fs_btn.setVisible(True)

@@ -62,6 +62,14 @@ def init_db(db_path: Path | str) -> Engine:
         # with foreground manual edits under WAL (single-writer).
         cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
+        # Cross-process change log: TEMP triggers tagged with this process's
+        # origin (skipped until the tables exist; see pool recycle below).
+        try:
+            from app.services.change_watch_service import install_change_triggers
+
+            install_change_triggers(dbapi_conn)
+        except Exception:  # noqa: BLE001 - optional feature
+            log.exception("Could not install change-log triggers")
 
     # Per-statement timing + slow-query warnings (negligible overhead).
     from app.perf import attach_sql_timing
@@ -72,6 +80,12 @@ def init_db(db_path: Path | str) -> Engine:
 
     # Add columns introduced in later versions to existing databases
     _migrate_add_columns(engine)
+
+    # Connections opened before the schema existed lack the change-log
+    # triggers; recycle the pool so every later connection installs them.
+    engine.dispose()
+    from app.services.change_watch_service import init_change_watch
+    init_change_watch(engine)
 
     _engine = engine
     _SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -186,6 +200,7 @@ def _migrate_add_columns(engine: Engine) -> None:
     _migrate_add_indexes(engine)
     _migrate_person_groups(engine)
     _migrate_person_fields(engine)
+    _migrate_change_log(engine)
     _migrate_collage_locations_to_places(engine)
     _migrate_place_types(engine)
     _migrate_geocoding_tables(engine)
@@ -1032,6 +1047,24 @@ def _migrate_person_fields(engine: Engine) -> None:
             "ON person_field_values(field_id)"
         ))
     log.debug("Migration: person field tables ensured")
+
+
+def _migrate_change_log(engine: Engine) -> None:
+    """Ensure the cross-process ``change_log`` table exists (idempotent)."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS change_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name VARCHAR(64) NOT NULL,
+                row_id INTEGER,
+                op VARCHAR(1) NOT NULL,
+                origin VARCHAR(32) NOT NULL,
+                changed_at FLOAT NOT NULL
+            )
+            """
+        ))
+    log.debug("Migration: change_log ensured")
 
 
 def _migrate_collage_locations_to_places(engine: Engine) -> None:
