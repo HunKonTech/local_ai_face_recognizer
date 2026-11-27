@@ -185,6 +185,7 @@ def _migrate_add_columns(engine: Engine) -> None:
     _migrate_face_blobs(engine)
     _migrate_add_indexes(engine)
     _migrate_person_groups(engine)
+    _migrate_person_fields(engine)
     _migrate_collage_locations_to_places(engine)
     _migrate_place_types(engine)
     _migrate_geocoding_tables(engine)
@@ -989,6 +990,48 @@ def _migrate_person_groups(engine: Engine) -> None:
             )
         )
     log.debug("Migration: person_groups tables ensured")
+
+
+def _migrate_person_fields(engine: Engine) -> None:
+    """Ensure custom person field tables + indexes exist (idempotent).
+
+    ``create_all`` normally creates both tables; this is the defensive
+    fallback and adds the NOCASE unique label index if it is missing.
+    """
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS person_field_definitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label VARCHAR(255) COLLATE NOCASE NOT NULL,
+                field_type VARCHAR(16) NOT NULL DEFAULT 'text',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME,
+                updated_at DATETIME
+            )
+            """
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_person_field_definitions_label "
+            "ON person_field_definitions(label)"
+        ))
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS person_field_values (
+                person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+                field_id INTEGER NOT NULL
+                    REFERENCES person_field_definitions(id) ON DELETE CASCADE,
+                value TEXT NOT NULL,
+                updated_at DATETIME,
+                PRIMARY KEY (person_id, field_id)
+            )
+            """
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_person_field_values_field_id "
+            "ON person_field_values(field_id)"
+        ))
+    log.debug("Migration: person field tables ensured")
 
 
 def _migrate_collage_locations_to_places(engine: Engine) -> None:

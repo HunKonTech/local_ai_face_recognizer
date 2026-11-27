@@ -501,8 +501,7 @@ class FamilyTreePanel(QWidget):
         if self._selected_id is None:
             return
         person_id = self._selected_id
-        from app.services.person_service import PersonService
-        from app.ui.dialogs.person_info_dialog import PersonInfoDialog
+        from app.ui.dialogs.person_info_dialog import PersonInfoDialog, save_person_dialog
 
         with session_scope() as session:
             person = session.get(Person, person_id)
@@ -513,23 +512,7 @@ class FamilyTreePanel(QWidget):
             return
         try:
             with session_scope() as session:
-                PersonService(session).update_person(
-                    person_id,
-                    gender=dlg.gender(),
-                    family_code=dlg.family_code(),
-                    external_family_code=dlg.external_family_code(),
-                    name_prefix=dlg.name_prefix(),
-                    last_name=dlg.last_name(),
-                    first_name=dlg.first_name(),
-                    second_name=dlg.second_name(),
-                    nickname=dlg.nickname(),
-                    married_name=dlg.married_name(),
-                    birth_place=dlg.birth_place(),
-                    birth_date=dlg.birth_date(),
-                    death_place=dlg.death_place(),
-                    death_date=dlg.death_date(),
-                    notes=dlg.notes(),
-                )
+                save_person_dialog(person_id, dlg, session)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, t("ft_edit_person"), str(exc))
             return

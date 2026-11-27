@@ -239,6 +239,11 @@ class IdentityService:
             self._session.commit()
             return target
 
+        # Custom person field values: target wins, source fills the gaps.
+        from app.services.person_field_service import PersonFieldService
+
+        PersonFieldService(self._session).merge_values(source_id, target_id)
+        self._session.expire(source, ["field_values"])
         self._session.delete(source)
         self._session.commit()
         return target
@@ -565,12 +570,22 @@ class IdentityService:
         Returns:
             The number of faces actually restored.
         """
+        restore_fields: list[tuple[int, Dict[int, str]]] = []
         for snap in removed_persons or []:
             pid = snap.get("id")
             if pid is None or self._session.get(Person, pid) is not None:
                 continue
-            self._session.add(Person(**snap))
+            columns = {k: v for k, v in snap.items() if k != "custom_fields"}
+            self._session.add(Person(**columns))
+            if snap.get("custom_fields"):
+                restore_fields.append((pid, snap["custom_fields"]))
         self._session.flush()
+        if restore_fields:
+            from app.services.person_field_service import PersonFieldService
+
+            field_svc = PersonFieldService(self._session)
+            for pid, values in restore_fields:
+                field_svc.restore_values(pid, values)
 
         restored = 0
         for snap in snapshots:
@@ -593,7 +608,11 @@ class IdentityService:
 
     def _snapshot_person(self, person: Person) -> Dict[str, Any]:
         """Capture a person's column values for later recreation (undo)."""
-        return {col: getattr(person, col) for col in _PERSON_SNAPSHOT_COLUMNS}
+        from app.services.person_field_service import PersonFieldService
+
+        snap = {col: getattr(person, col) for col in _PERSON_SNAPSHOT_COLUMNS}
+        snap["custom_fields"] = PersonFieldService(self._session).values_of(person.id)
+        return snap
 
     @staticmethod
     def _clear_auto_merge_markers(face: Face) -> None:

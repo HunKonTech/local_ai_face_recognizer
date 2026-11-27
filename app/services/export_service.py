@@ -436,6 +436,10 @@ class ExportService:
         _report(74, "Személyek feldolgozása…")
         # --- person records ---
         relationships = _build_person_relationship_map(self._session, persons)
+        from app.services.person_field_service import PersonFieldService
+        field_svc = PersonFieldService(self._session)
+        field_defs = field_svc.list_definitions()
+        field_vals = field_svc.values_for(p.id for p in persons)
         person_records: List[dict] = []
         for person in persons:
             thumb_path, tw, th = _export_person_thumb(person, images_root)
@@ -473,6 +477,11 @@ class ExportService:
                     "birthYear": birth_year,
                     "deathYear": death_year,
                     "notes": person.notes or "",
+                    "customFields": [
+                        {"label": d.label, "value": v}
+                        for d in field_defs
+                        if (v := field_vals.get(person.id, {}).get(f"c:{d.id}"))
+                    ],
                     "groups": groups,
                     "relationships": relationships.get(person.id, []),
                 }
@@ -529,6 +538,7 @@ class ExportService:
                 "marriedName": p["marriedName"], "birthDate": p["birthDate"],
                 "birthPlace": p["birthPlace"], "deathDate": p["deathDate"],
                 "deathPlace": p["deathPlace"], "notes": p["notes"],
+                "customFields": p.get("customFields", []),
                 "groups": p["groups"], "thumb": _no_slash(p["thumb"]),
             }
             for p in person_records
@@ -2070,6 +2080,7 @@ def _build_family_tree_export(
                 "birthYear": rec["birthYear"],
                 "deathYear": rec["deathYear"],
                 "notes": rec.get("notes", ""),
+                "customFields": rec.get("customFields", []),
                 "groups": rec.get("groups", []),
                 "thumb": rec["thumb"],
                 "imageCount": rec.get("imageCount", 0),
@@ -3027,6 +3038,9 @@ function openPersonPanel(personId, fallbackName){
   rows.forEach(([k,v]) => {
     const val = (k === 'Csoportok') ? v : esc(v);
     parts.push('<div class=\"pp-row\"><b>' + esc(k) + ':</b> ' + val + '</div>');
+  });
+  ((info && info.customFields) || []).forEach(f => {
+    parts.push('<div class=\"pp-row\"><b>' + esc(f.label) + ':</b> ' + esc(f.value) + '</div>');
   });
   if(info && info.notes){
     parts.push('<div class=\"pp-notes\">' + esc(info.notes) + '</div>');
