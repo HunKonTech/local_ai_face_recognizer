@@ -32,6 +32,7 @@ ruff check app/ui/panels/image_browser               # lint (E,F,W,I; line lengt
 - **panels/image_browser/** — `ImageBrowserPanel(…Mixins, QWidget)`; `panel.py` = `__init__`, `_build_ui`, `refresh`, fullscreen. `helpers.py` (module functions), `widgets.py` (`_DrawableImageLabel`, inline editor) ·
   `tree` · `rerecognition` · `navigation` · `image_loading` · `interaction` (clicks, objects) · `face_editing` (bbox) · `canvas` (coords, zoom) · `inline_editor` · `metadata` (date/note/place/GPS) · `search` · `person_actions` · `deoldified`.
   `panels/image_browser_panel.py` is only a compat re-export.
+- **widgets/family_tree/** — `FamilyTreeView(…Mixins, QGraphicsView)`; `view.py` = `__init__`, `set_graph`, zoom, selection, layout call. `style` colours · `geometry` Qt-free helpers (bus tracks, labels, lineage) · `connectors` lines · `node_box` person boxes · `photos` lazy photos · `interaction` mouse/keys/context menu. `widgets/family_tree_view.py` is only a compat re-export.
 - Other panels: `panels/` (cluster, persons, family_search, locations, objects, collage, groups, preview); dialogs in `dialogs/`; shared widgets in `widgets/`.
 
 ## Conventions
