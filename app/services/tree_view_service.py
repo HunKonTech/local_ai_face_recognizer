@@ -59,6 +59,9 @@ class TreeViewState:
     person_fields: dict[int, dict[str, set[str]]] = field(default_factory=dict)
     include_non_members: bool = True
     options: dict[str, Any] = field(default_factory=dict)
+    # Friend links from family codes: "off" | "all" | "selected" (anchors).
+    friend_mode: str = "off"
+    friend_anchors: set[int] = field(default_factory=set)
 
     # -- per-person field resolution ----------------------------------
 
@@ -105,6 +108,8 @@ class TreeViewState:
             },
             "includeNonMembers": self.include_non_members,
             "options": dict(self.options),
+            "friendMode": self.friend_mode,
+            "friendAnchors": sorted(self.friend_anchors),
         }
 
     @classmethod
@@ -123,10 +128,15 @@ class TreeViewState:
             },
             include_non_members=bool(data.get("includeNonMembers", True)),
             options=dict(data.get("options") or {}),
+            friend_mode=_friend_mode(data.get("friendMode")),
+            friend_anchors={int(x) for x in data.get("friendAnchors", [])},
         )
 
     def referenced_ids(self) -> set[int]:
-        ids = set(self.collapsed) | set(self.hidden) | set(self.floating) | set(self.person_fields)
+        ids = (
+            set(self.collapsed) | set(self.hidden) | set(self.floating)
+            | set(self.person_fields) | set(self.friend_anchors)
+        )
         if self.root.person_id is not None:
             ids.add(self.root.person_id)
         return ids
@@ -159,6 +169,8 @@ class TreeViewState:
             },
             include_non_members=self.include_non_members,
             options=dict(self.options),
+            friend_mode=self.friend_mode,
+            friend_anchors={x for x in (m(p) for p in self.friend_anchors) if x is not None},
         )
 
     def drop_unknown(self, existing: set[int]) -> "TreeViewState":
@@ -247,13 +259,80 @@ def reveal(graph, state: TreeViewState, pid: int, root_id: Optional[int] = None)
     return True
 
 
+FRIEND_MODES = ("off", "all", "selected")
+
+
+def _friend_mode(value) -> str:  # noqa: ANN001
+    return value if value in FRIEND_MODES else "off"
+
+
+def visible_friends(
+    graph, mode: str, anchors_filter: Iterable[int], visible: set[int], hidden: Iterable[int] = ()
+) -> dict[int, list[int]]:
+    """``{friend: [anchors]}`` drawn for *mode* (design D3).
+
+    Only visible anchors that pass the mode count; hidden friends are left out.
+    """
+    if mode not in ("all", "selected"):
+        return {}
+    allowed = set(anchors_filter)
+    hidden = set(hidden)
+    out: dict[int, list[int]] = {}
+    for anchor in sorted(getattr(graph, "friends", {}) or {}):
+        if anchor not in visible or (mode == "selected" and anchor not in allowed):
+            continue
+        for friend in graph.friends[anchor]:
+            if friend in hidden:
+                continue
+            out.setdefault(friend, []).append(anchor)
+    return out
+
+
+def apply_friends(shown, source, mode: str, anchors_filter=(), hidden=()) -> dict[int, list[int]]:  # noqa: ANN001
+    """Add friend edges and satellite boxes to *shown* (filtered graph).
+
+    *source* is the graph the friends were derived on (``friends`` and
+    ``friend_nodes``). A friend already in *shown* is only linked; others get
+    one satellite box beside their first anchor (by id), in its row.
+    """
+    from dataclasses import replace
+
+    links = visible_friends(source, mode, anchors_filter, set(shown.nodes), hidden)
+    shown.friend_edges = []
+    shown.satellites = {}
+    attach_end: dict[int, int] = {}  # anchor -> last box chained beside it
+    for friend in sorted(links):
+        anchors = links[friend]
+        if friend not in shown.nodes:
+            template = source.friend_nodes.get(friend) or source.node(friend)
+            if template is None:
+                continue
+            first = anchors[0]
+            anchor_node = shown.node(first)
+            shown.nodes[friend] = replace(
+                template,
+                generation=anchor_node.generation,
+                parent_ids=(), child_ids=(), spouse_ids=(),
+            )
+            shown.satellites[friend] = attach_end.get(first, first)
+            attach_end[first] = friend
+        for anchor in anchors:
+            shown.friend_edges.append((friend, anchor))
+    return links
+
+
 def filter_graph(graph, keep: set[int]):
     """Copy of *graph* restricted to *keep* (edge lists trimmed)."""
     from dataclasses import replace
 
     from app.services.family_tree_service import FamilyTreeGraph
 
-    out = FamilyTreeGraph(root_id=graph.root_id, marriages=dict(graph.marriages))
+    out = FamilyTreeGraph(
+        root_id=graph.root_id,
+        marriages=dict(graph.marriages),
+        friends=dict(getattr(graph, "friends", {}) or {}),
+        friend_nodes=dict(getattr(graph, "friend_nodes", {}) or {}),
+    )
     for pid in keep:
         node = graph.node(pid)
         if node is None:

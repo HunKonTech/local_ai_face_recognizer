@@ -12,6 +12,7 @@ mutates relationships directly. Rendering uses the in-memory
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -55,6 +56,20 @@ def _vline() -> QFrame:
     # would collapse to nothing: give it the height of a toolbar button.
     f.setMinimumHeight(22)
     return f
+
+
+log = logging.getLogger(__name__)
+
+_FRIENDS_KEY = "family_tree/show_friends"
+
+
+def _show_friends_setting() -> bool:
+    try:
+        from app.app_settings import app_qsettings
+
+        return bool(app_qsettings().value(_FRIENDS_KEY, False, type=bool))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 class FamilyTreePanel(QWidget):
@@ -105,6 +120,11 @@ class FamilyTreePanel(QWidget):
         self._non_members_check.setChecked(True)
         self._non_members_check.toggled.connect(self.refresh)
         controls.addWidget(self._non_members_check)
+        # Friends from family codes (C81B -> C81), off / everyone; remembered.
+        self._friends_check = QCheckBox()
+        self._friends_check.setChecked(_show_friends_setting())
+        self._friends_check.toggled.connect(self._on_friends_toggled)
+        controls.addWidget(self._friends_check)
         controls.addWidget(_vline())
         self._regenerate_btn = QPushButton()
         self._regenerate_btn.clicked.connect(self._on_regenerate)
@@ -250,6 +270,8 @@ class FamilyTreePanel(QWidget):
         self._choose_root_btn.setText(t("ft_choose_root"))
         self._whole_tree_btn.setText(t("ft_show_whole"))
         self._non_members_check.setText(t("ft_show_non_members"))
+        self._friends_check.setText(t("ft_show_friends"))
+        self._friends_check.setToolTip(t("ft_show_friends_tip"))
         self._regenerate_btn.setText(t("ft_regenerate"))
         self._regenerate_btn.setToolTip(t("ft_regenerate_tip"))
         self._refresh_btn.setText(t("ft_refresh"))
@@ -338,6 +360,15 @@ class FamilyTreePanel(QWidget):
     # Refresh / rendering
     # ------------------------------------------------------------------
 
+    def _on_friends_toggled(self, checked: bool) -> None:
+        try:
+            from app.app_settings import app_qsettings
+
+            app_qsettings().setValue(_FRIENDS_KEY, bool(checked))
+        except Exception:  # noqa: BLE001
+            log.exception("Could not store the friends setting")
+        self.refresh()
+
     def refresh(self) -> None:
         selected = self._selected_id
         include_non_members = self._non_members_check.isChecked()
@@ -363,6 +394,10 @@ class FamilyTreePanel(QWidget):
                         self._root_id, include_non_members=include_non_members
                     )
 
+        if self._friends_check.isChecked():
+            from app.services.tree_view_service import apply_friends
+
+            apply_friends(graph, graph, "all")
         self._graph = graph
         self._tree.set_graph(graph, focus_id=self._root_id, selected_id=selected)
 

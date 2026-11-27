@@ -17,6 +17,7 @@ _ANCESTOR_BORDER = QColor("#1f6fbf")    # selected person's ancestors
 _DESCENDANT_BORDER = QColor("#2e9e4f")  # selected person's descendants
 _SPOUSE_BORDER = QColor("#c0392b")      # selected person's spouses
 _LINE = QColor("#7a7a7a")
+_FRIEND_LINE = QColor("#16a085")    # dashed friend links (family codes)
 _BAND_A = QColor("#ffffff")
 _BAND_B = QColor("#faf0dd")
 _TEXT = QColor("#222222")

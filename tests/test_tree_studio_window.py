@@ -221,3 +221,64 @@ def test_language_switch_retranslates(win, monkeypatch):
     assert win._view_menu.title() == "&Nézet"
     win._set_language("en")
     assert win._act_new.text() == "New view…"
+
+
+def _seed_friends():
+    with session_scope() as s:
+        def mk(name, code=None, ext=None):
+            p = Person(name=name, is_auto_named=False, family_code=code, external_family_code=ext)
+            s.add(p)
+            s.flush()
+            return p.id
+
+        ids = {"R": mk("Root", "C", "#F#"), "A": mk("A", "C81"), "B": mk("B", "C82"),
+               "F": mk("Pal", "C81B,C82B")}
+        fam = FamilyService(s)
+        fam.add_parent_child(ids["R"], ids["A"])
+        fam.add_parent_child(ids["R"], ids["B"])
+        return ids
+
+
+def test_friends_everyone_selected_saved_and_hidden(win, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    ids = _seed_friends()
+    win.new_view("#F#")
+    assert win.state.friend_mode == "off" and ids["F"] not in win.visible
+    win.set_friend_mode("all")
+    assert ids["F"] in win.visible
+    assert len(win.tree._friend_items) == 2  # one box, two dashed lines
+    # Context toggle off for B -> selected mode with only A.
+    win.toggle_person_friends(ids["B"])
+    assert win.state.friend_mode == "selected" and win.state.friend_anchors == {ids["A"]}
+    assert len(win.tree._friend_items) == 1
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Barátok", True))
+    assert win.save_view_as()
+    vid = win.view_id
+    win.state.friend_mode = "off"
+    win._dirty = False
+    win.open_view(vid)
+    assert win.state.friend_mode == "selected" and len(win.tree._friend_items) == 1
+    # Hiding the friend removes box and lines.
+    win.hide_person(ids["F"])
+    assert ids["F"] not in win.visible and not win.tree._friend_items
+
+
+def test_face_local_panel_friend_toggle_persists(db, qtbot, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    import app.app_settings as app_settings
+    from app.ui.panels.family_tree_panel import FamilyTreePanel
+
+    ini = str(tmp_path / "s.ini")
+    monkeypatch.setattr(app_settings, "app_qsettings", lambda: QSettings(ini, QSettings.IniFormat))
+    _seed_friends()
+    panel = FamilyTreePanel()
+    qtbot.addWidget(panel)
+    panel.refresh()
+    assert not panel._tree._friend_items
+    panel._friends_check.setChecked(True)
+    assert len(panel._tree._friend_items) == 2
+    again = FamilyTreePanel()
+    qtbot.addWidget(again)
+    assert again._friends_check.isChecked()

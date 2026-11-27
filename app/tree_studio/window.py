@@ -17,6 +17,7 @@ from app.db.database import session_scope
 from app.services.family_tree_service import FamilyTreeNode, FamilyTreeService
 from app.services.tree_view_service import (
     TreeViewState,
+    apply_friends,
     collapsible_ids,
     filter_graph,
     visible_ids,
@@ -150,6 +151,10 @@ class TreeStudioWindow(
                 visible = visible_ids(graph, self.state, root) if root is not None else set()
                 shown = filter_graph(graph, {p for p in visible if p in graph.nodes})
                 self._add_floating_nodes(session, shown, graph)
+                apply_friends(
+                    shown, graph, self.state.friend_mode,
+                    self.state.friend_anchors, self.state.hidden,
+                )
                 field_svc = PersonFieldService(session)
                 self._catalog = field_svc.catalog()
                 self._values = field_svc.values_for(shown.nodes)

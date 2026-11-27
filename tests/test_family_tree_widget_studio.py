@@ -124,3 +124,21 @@ def test_export_png_scale_jpg_white_svg_and_no_selection(qtbot, tmp_path, photo)
     # Markers hidden in export by default, still visible on screen.
     assert v._badge_items[3].isVisible()
     assert not v._pending_photos
+
+
+def test_friend_link_is_dashed_and_not_recoloured(qtbot):
+    from app.services.tree_view_service import apply_friends
+    from app.ui.widgets.family_tree.style import _FRIEND_LINE
+
+    g = _graph()
+    g.friends = {3: (50,)}
+    g.friend_nodes = {50: FamilyTreeNode(50, "Pal", 1)}
+    apply_friends(g, g, "all")
+    v = _view(qtbot)
+    v.set_graph(g)
+    assert 50 in v._node_items
+    (item,) = v._friend_items
+    assert item.pen().style() == Qt.DashLine
+    v.set_selected(3)
+    assert item.pen().style() == Qt.DashLine
+    assert item.pen().color() == _FRIEND_LINE
