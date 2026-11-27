@@ -471,6 +471,17 @@ class SettingsDialog(QDialog):
         upd_layout.addLayout(upd_btn_row)
         layout.addWidget(upd_group)
 
+        # ── Multiple windows (external change detection) ──────────────────
+        multi_group = QGroupBox(t("ext_settings_group"))
+        multi_layout = QVBoxLayout(multi_group)
+        self._auto_refresh_check = QCheckBox(t("ext_auto_refresh_setting"))
+        self._auto_refresh_check.setToolTip(t("ext_auto_refresh_tip"))
+        self._auto_refresh_check.setChecked(
+            _qsettings().value("ui/auto_refresh_on_activate", False, type=bool)
+        )
+        multi_layout.addWidget(self._auto_refresh_check)
+        layout.addWidget(multi_group)
+
         # ── TPU status ────────────────────────────────────────────────────
         tpu_group = QGroupBox(t("tpu_title"))
         tpu_layout = QVBoxLayout(tpu_group)
@@ -1940,6 +1951,7 @@ class SettingsDialog(QDialog):
     def _on_accept(self) -> None:
         qs = _qsettings()
         qs.setValue("updates/notify", self._notify_check.isChecked())
+        qs.setValue("ui/auto_refresh_on_activate", self._auto_refresh_check.isChecked())
         qs.setValue("deoldified/auto_pair", self._deoldified_check.isChecked())
         qs.setValue("deoldified/auto_sync", self._deoldified_sync_check.isChecked())
         qs.setValue("geocoding/enabled", self._geocoding_check.isChecked())

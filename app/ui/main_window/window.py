@@ -18,6 +18,7 @@ from app.ui.i18n import t
 
 from .deep_model import DeepModelMixin
 from .export import ExportMixin
+from .external_changes import ExternalChangesMixin
 from .face_actions import FaceActionsMixin
 from .folders import FoldersMixin
 from .gdrive import GDriveMixin
@@ -33,7 +34,7 @@ from .ui_build import UiBuildMixin
 log = logging.getLogger(__name__)
 
 
-class MainWindow(UiBuildMixin, FoldersMixin, PipelineMixin, MaintenanceMixin, GDriveMixin, RecordingMixin, ObjectsMixin, FaceActionsMixin, PersonsMixin, ExportMixin, DeepModelMixin, TrayUpdatesMixin, TasksMixin, QMainWindow):
+class MainWindow(UiBuildMixin, FoldersMixin, PipelineMixin, MaintenanceMixin, GDriveMixin, RecordingMixin, ObjectsMixin, FaceActionsMixin, PersonsMixin, ExportMixin, DeepModelMixin, TrayUpdatesMixin, TasksMixin, ExternalChangesMixin, QMainWindow):
     """Primary application window."""
 
     log_signal = Signal(str, int)
@@ -81,6 +82,7 @@ class MainWindow(UiBuildMixin, FoldersMixin, PipelineMixin, MaintenanceMixin, GD
         ensure_unknown_person()
 
         self._build_ui()
+        self._setup_external_change_watch()
         self._connect_log_handler()
         self._refresh_persons()
         self._retranslate()
