@@ -563,11 +563,18 @@ class AudioSource:
 # peak every ~0.1 s and ``ametadata`` prints it to ffmpeg's *stdout* (``file=-``)
 # independently of ``-loglevel`` so the GUI can drive a live VU meter.  The
 # parser looks for ``METER_KEY=<dBFS>`` lines.
+#
+# The tap ends in a labelled pad that is mapped to a separate ``-f null``
+# output — NOT in an ``anullsink``. A sink-only branch inside
+# ``-filter_complex`` makes FFmpeg 7.x abort right after opening the inputs
+# ("Assertion best_input >= 0 failed at fftools/ffmpeg_filter.c"), which left
+# every Windows recording without audio (issue #80).
 METER_KEY = "lavfi.astats.Overall.Peak_level"
+METER_LABEL = "[ameter]"
 _METER_TAP = (
     "astats=metadata=1:reset=1:length=0.1,"
-    f"ametadata=mode=print:key={METER_KEY}:file=-,"
-    "anullsink"
+    f"ametadata=mode=print:key={METER_KEY}:file=-"
+    f"{METER_LABEL}"
 )
 
 
@@ -920,6 +927,10 @@ def build_ffmpeg_args(
         "-segment_format", "mp4",
         segment_pattern,
     ]
+    if graph is not None and METER_LABEL in graph:
+        # Second, discarded output that pulls the metering branch (see
+        # _METER_TAP); the meter lines still go to stdout via ametadata.
+        args += ["-map", METER_LABEL, "-c:a", "pcm_s16le", "-f", "null", "-"]
     return args
 
 
