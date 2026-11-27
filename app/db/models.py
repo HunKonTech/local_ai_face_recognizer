@@ -367,6 +367,12 @@ class Person(Base):
         back_populates="person",
         cascade="all, delete-orphan",
     )
+    field_values: Mapped[List["PersonFieldValue"]] = relationship(
+        "PersonFieldValue",
+        back_populates="person",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     def __repr__(self) -> str:
         return f"<Person id={self.id} name={self.name!r}>"
@@ -428,6 +434,72 @@ class PersonGroupMembership(Base):
 
     def __repr__(self) -> str:
         return f"<PersonGroupMembership person={self.person_id} group={self.group_id}>"
+
+
+# ---------------------------------------------------------------------------
+# Custom person fields (user-defined, EAV)
+# ---------------------------------------------------------------------------
+
+PERSON_FIELD_TYPES = ("text", "long_text", "date")
+
+
+class PersonFieldDefinition(Base):
+    """A user-defined person field, e.g. "Foglalkozás".
+
+    ``label`` is unique ignoring case (NOCASE index; the service also folds
+    non-ASCII case and surrounding whitespace). ``field_type`` is one of
+    :data:`PERSON_FIELD_TYPES`; ``date`` values are flexible strings like
+    ``Person.birth_date``.
+    """
+
+    __tablename__ = "person_field_definitions"
+    __table_args__ = (
+        Index("ux_person_field_definitions_label", "label", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(255, collation="NOCASE"), nullable=False)
+    field_type: Mapped[str] = mapped_column(String(16), nullable=False, default="text")
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    values: Mapped[List["PersonFieldValue"]] = relationship(
+        "PersonFieldValue",
+        back_populates="definition",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<PersonFieldDefinition id={self.id} label={self.label!r}>"
+
+
+class PersonFieldValue(Base):
+    """One person's value for one :class:`PersonFieldDefinition`."""
+
+    __tablename__ = "person_field_values"
+    __table_args__ = (Index("ix_person_field_values_field_id", "field_id"),)
+
+    person_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("persons.id", ondelete="CASCADE"), primary_key=True
+    )
+    field_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("person_field_definitions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    person: Mapped["Person"] = relationship("Person", back_populates="field_values")
+    definition: Mapped["PersonFieldDefinition"] = relationship(
+        "PersonFieldDefinition", back_populates="values"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -264,3 +264,19 @@ class TestFullDelete:
                 assert face.person_id is None
         # Crop files are preserved in un-assign mode.
         assert len(list(crop_dir.iterdir())) == 2
+
+
+def test_full_delete_removes_custom_field_values(tmp_db):
+    from app.db.models import PersonFieldValue
+    from app.services.person_field_service import PersonFieldService
+
+    with session_scope() as session:
+        image_id = _add_image(session)
+        pid, _ = _make_unknown_person(session, "Unknown 9", image_id, 0, tmp_db)
+        svc = PersonFieldService(session)
+        svc.set_value(pid, svc.create_definition("Foglalkozás").id, "tanító")
+        session.commit()
+        IdentityService(session).delete_person(pid, remove_faces=True)
+    with session_scope() as session:
+        assert session.query(PersonFieldValue).count() == 0
+        assert len(PersonFieldService(session).list_definitions()) == 1
