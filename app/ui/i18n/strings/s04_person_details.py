@@ -304,10 +304,16 @@ STRINGS: Dict[str, Dict[str, str]] = {
                                  "saját metaadatába (XMP/EXIF) vagy egy mellettük lévő JSON fájlba írja."},
     "fmeta_warning":      {"en": "Person names, ids and face positions may be written into the image "
                                  "file's metadata or a JSON file next to it. Other programs or people "
-                                 "can read these if you share the image.",
+                                 "can read these if you share the image.\n\n"
+                                 "The Windows comment, tags and people regions of the image are "
+                                 "replaced by the app's person list (values set by other programs "
+                                 "in these fields are overwritten).",
                            "hu": "A személynevek, azonosítók és arcpozíciók bekerülhetnek a képfájl "
                                  "metaadataiba vagy egy mellette lévő JSON fájlba. Ezeket más programok "
-                                 "vagy más személyek is elolvashatják, ha a képet továbbküldöd."},
+                                 "vagy más személyek is elolvashatják, ha a képet továbbküldöd.\n\n"
+                                 "A kép Windows-megjegyzése, címkéi és személyrégiói helyére az "
+                                 "alkalmazás személylistája kerül (más programok által ezekbe a "
+                                 "mezőkbe írt értékek felülíródnak)."},
     "fmeta_confirm_title": {"en": "Embed person metadata?", "hu": "Személy-metaadat beágyazása?"},
     "fmeta_opt_name":     {"en": "Include person name", "hu": "Személynév mentése"},
     "fmeta_opt_notes":    {"en": "Include notes", "hu": "Megjegyzések mentése"},
@@ -333,6 +339,12 @@ STRINGS: Dict[str, Dict[str, str]] = {
                            "hu": "Megszakítás — az aktuális kép befejezése…"},
     "fmeta_processing":   {"en": "Processing {done}/{total}: {name}",
                            "hu": "Feldolgozás {done}/{total}: {name}"},
+    "fmeta_locked":       {"en": "{count} image(s) are open in another program (e.g. a photo viewer), "
+                                 "so they could not be updated. The person data was saved to a JSON "
+                                 "file next to them. Close that program and save again:\n{files}",
+                           "hu": "{count} kép egy másik programban (pl. képnézegetőben) meg van nyitva, "
+                                 "ezért nem lehetett módosítani. A személyadatok egy mellette lévő JSON "
+                                 "fájlba kerültek. Zárd be azt a programot, és mentsd újra:\n{files}"},
 
     # ── Status bar update notification ────────────────────────────────────
     "status_update_available":     {"en": "New version available: v{version}  ↑",

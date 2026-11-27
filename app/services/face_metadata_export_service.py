@@ -60,9 +60,10 @@ class FaceMetadataExportOptions:
     include_notes: bool = True
     # When True, never modify the image file — always write a sidecar JSON.
     prefer_sidecar_only: bool = False
-    # When True (default), JPEGs get the JSON in the EXIF UserComment field (the
-    # image's "comment", visible among the standard EXIF data); when False, an
-    # XMP block is used instead. PNGs always use XMP (they have no EXIF).
+    # The JSON always goes into XMP (``facelocal:data``). When True (default),
+    # JPEGs additionally keep an identical copy in the EXIF UserComment field
+    # (UTF-16, visible among the standard EXIF data); when False, XMP only.
+    # PNGs always use XMP only (they have no EXIF UserComment).
     embed_in_exif_comment: bool = True
     # When True (default) and on macOS, also set the Finder/Spotlight comment so
     # the JSON shows up in Finder → Get Info → "Comments". No-op elsewhere.
@@ -87,6 +88,8 @@ class FaceMetadataExportResult:
     sidecar_path: Optional[str] = None
     error_message: Optional[str] = None
     exported_face_count: int = 0
+    # Extra edits (e.g. "gps", "date") that landed in the image file.
+    extra_written: tuple[str, ...] = ()
 
 
 @dataclass
@@ -120,7 +123,24 @@ class FaceMetadataExportSummary:
 
     @property
     def sidecar_count(self) -> int:
-        return sum(1 for r in self.results if r.write_mode == meta.WRITE_MODE_SIDECAR)
+        """Images whose face data went to the sidecar JSON (locked ones included)."""
+        return sum(1 for r in self.results if r.write_mode in _SIDECAR_MODES)
+
+    @property
+    def locked_count(self) -> int:
+        """Images another program kept open — data saved to the sidecar."""
+        return sum(1 for r in self.results if r.write_mode == meta.WRITE_MODE_LOCKED)
+
+    @property
+    def locked_paths(self) -> list[str]:
+        return [
+            r.image_path or f"id={r.image_id}"
+            for r in self.results if r.write_mode == meta.WRITE_MODE_LOCKED
+        ]
+
+    def extra_written_count(self, key: str) -> int:
+        """How many images received the extra edit *key* (e.g. ``"gps"``)."""
+        return sum(1 for r in self.results if key in r.extra_written)
 
     @property
     def skipped_count(self) -> int:
@@ -159,6 +179,8 @@ _EMBED_MODES = {
     meta.WRITE_MODE_EXIF_USER_COMMENT,
     meta.WRITE_MODE_EXIF_IMAGE_DESCRIPTION,
 }
+# Locked images still had their face data saved to the sidecar JSON.
+_SIDECAR_MODES = {meta.WRITE_MODE_SIDECAR, meta.WRITE_MODE_LOCKED}
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +225,7 @@ class FaceMetadataExportService:
         options: Optional[FaceMetadataExportOptions] = None,
         progress_cb: Optional[Callable[[int, int, Optional[str]], None]] = None,
         cancel_token: Optional[CancellationToken] = None,
+        extra_edits: Optional[Callable[[Image], dict]] = None,
     ) -> FaceMetadataExportSummary:
         """Export metadata for many image ids, returning an aggregate summary.
 
@@ -216,6 +239,11 @@ class FaceMetadataExportService:
         ``progress_cb`` is invoked as ``(done, total, current_name)`` — once
         before each image with that image's filename (so the UI can show which
         image is being processed) and once after the last image completes.
+
+        ``extra_edits`` returns further metadata for an image — currently
+        ``{"gps": (lat, lon), "date": datetime}``, any key optional — that is
+        written in the *same* file write as the face data (one rewrite per
+        image; separate rewrites trigger Windows indexer/antivirus locks).
         """
         options = options or FaceMetadataExportOptions()
         ids = list(image_ids)
@@ -249,7 +277,8 @@ class FaceMetadataExportService:
                     )
                 )
             else:
-                summary.results.append(self._export_one(image, options))
+                extra = (extra_edits(image) if extra_edits else None) or {}
+                summary.results.append(self._export_one(image, options, extra))
 
             if progress_cb:
                 progress_cb(idx + 1, total, current_name)
@@ -311,6 +340,7 @@ class FaceMetadataExportService:
         self,
         image: Image,
         options: FaceMetadataExportOptions,
+        extra: Optional[dict] = None,
     ) -> FaceMetadataExportResult:
         abs_path = resolve_existing_image_path(image)
         path_str = str(abs_path) if abs_path else (image.file_path or None)
@@ -328,25 +358,33 @@ class FaceMetadataExportService:
                 exported_face_count=face_count,
             )
 
+        extra = {k: v for k, v in (extra or {}).items() if k in ("gps", "date") and v is not None}
+
         # Respect "do not overwrite": if a block already exists and the caller
-        # asked not to overwrite, skip without touching the file.
+        # asked not to overwrite, leave the face data alone (extra GPS/date
+        # edits are still applied).
+        faces_payload: Optional[dict] = payload
         if not options.overwrite_existing_facelocal_metadata:
             try:
                 if meta.read_face_metadata(abs_path) is not None:
-                    return FaceMetadataExportResult(
-                        image_id=image.id,
-                        image_path=path_str,
-                        success=True,
-                        write_mode=meta.WRITE_MODE_SKIPPED,
-                        exported_face_count=face_count,
-                    )
+                    faces_payload = None
             except Exception:  # noqa: BLE001
                 log.debug("Existing-metadata check failed for %s", abs_path, exc_info=True)
+            if faces_payload is None and not extra:
+                return FaceMetadataExportResult(
+                    image_id=image.id,
+                    image_path=path_str,
+                    success=True,
+                    write_mode=meta.WRITE_MODE_SKIPPED,
+                    exported_face_count=face_count,
+                )
 
         try:
-            write_result = meta.write_face_metadata(
+            write_result = meta.apply_image_metadata(
                 abs_path,
-                payload,
+                gps=extra.get("gps"),
+                date=extra.get("date"),
+                faces_payload=faces_payload,
                 prefer_sidecar_only=options.prefer_sidecar_only,
                 prefer_exif_comment=options.embed_in_exif_comment,
                 set_finder_comment=options.set_macos_finder_comment,
@@ -362,14 +400,18 @@ class FaceMetadataExportService:
                 exported_face_count=face_count,
             )
 
+        write_mode = write_result.write_mode
+        if faces_payload is None and write_result.ok:
+            write_mode = meta.WRITE_MODE_SKIPPED  # face block left as it was
         return FaceMetadataExportResult(
             image_id=image.id,
             image_path=path_str,
             success=write_result.ok,
-            write_mode=write_result.write_mode,
+            write_mode=write_mode,
             sidecar_path=str(write_result.sidecar_path) if write_result.sidecar_path else None,
             error_message=write_result.error_message,
             exported_face_count=face_count,
+            extra_written=tuple(extra) if write_result.exif_written else (),
         )
 
     def _orientation(self, image: Image) -> int:

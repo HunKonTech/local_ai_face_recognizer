@@ -81,6 +81,15 @@ def _read_user_comment(path: Path) -> bytes:
     return raw or b""
 
 
+def _user_comment_text(path: Path) -> str:
+    """UserComment decoded with its declared character code / byte order."""
+    from app.utils import exif_fields as ef
+    from app.utils import jpeg_segments as js
+
+    exif, _ = js.read_metadata(path.read_bytes())
+    return ef.read_user_comment(exif or b"") or ""
+
+
 def _write_jpeg(path: Path, *, exif: bytes | None = None) -> None:
     img = PilImage.new("RGB", (200, 150), (40, 80, 120))
     if exif:
@@ -217,7 +226,8 @@ def test_export_embeds_exif_comment_and_is_idempotent(db):
     assert r2.success and r2.write_mode == meta.WRITE_MODE_EXIF_USER_COMMENT
 
     # The UserComment is overwritten in place — a re-export does not duplicate.
-    assert _read_user_comment(jpg).count(b'"schema"') == 1
+    assert _read_user_comment(jpg).startswith(b"UNICODE\x00")
+    assert _user_comment_text(jpg).count('"schema"') == 1
 
     # And the data round-trips.
     payload = meta.read_face_metadata(jpg)
@@ -413,13 +423,11 @@ def test_no_overwrite_skips_when_block_exists(db):
     assert result.success
 
 
-def test_windows_lock_on_replace_still_embeds(db, monkeypatch):
-    """Simulate the Windows case where os.replace fails on a locked target.
-
-    The embed must succeed via the in-place fallback, NOT degrade to a sidecar.
-    """
+def test_windows_lock_on_replace_reports_locked(db, monkeypatch):
+    """A persistent lock on the image → 'locked', data in sidecar, image intact."""
     jpg = db / "locked.jpg"
     _write_jpeg(jpg)
+    before = jpg.read_bytes()
 
     real_replace = os.replace
 
@@ -439,10 +447,43 @@ def test_windows_lock_on_replace_still_embeds(db, monkeypatch):
         result = FaceMetadataExportService(session).export_image(img.id)
 
     assert result.success
-    assert result.write_mode == meta.WRITE_MODE_EXIF_USER_COMMENT  # embedded, not sidecar
+    assert result.write_mode == meta.WRITE_MODE_LOCKED
+    assert "in use" in (result.error_message or "")
+    assert jpg.read_bytes() == before
+    assert not (db / "locked.jpg.facelocal.tmp").exists()
+    assert result.sidecar_path and Path(result.sidecar_path).exists()
+    assert meta.read_face_metadata(jpg)["faces"][0]["person_name"] == "Alice"
+
+    # Lock gone → the next export embeds.
+    monkeypatch.setattr(meta.os, "replace", real_replace)
+    with session_scope() as session:
+        result2 = FaceMetadataExportService(session).export_image(img.id)
+    assert result2.write_mode == meta.WRITE_MODE_EXIF_USER_COMMENT
+
+
+def test_short_lock_still_embeds(db, monkeypatch):
+    jpg = db / "busy.jpg"
+    _write_jpeg(jpg)
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise PermissionError("indexer busy")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(meta.os, "replace", flaky)
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+
+    with session_scope() as session:
+        alice = _make_person(session, "Alice")
+        img = _make_image(session, jpg)
+        _make_face(session, img, alice)
+        result = FaceMetadataExportService(session).export_image(img.id)
+
+    assert result.write_mode == meta.WRITE_MODE_EXIF_USER_COMMENT
     assert not meta.sidecar_path_for(jpg).exists()
-    payload = meta.read_face_metadata(jpg)
-    assert payload["faces"][0]["person_name"] == "Alice"
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS Finder comment")
@@ -586,9 +627,8 @@ def test_exif_written_without_piexif(db, no_piexif):
     assert result.write_mode == meta.WRITE_MODE_EXIF_USER_COMMENT
     assert not meta.sidecar_path_for(jpg).exists()
 
-    comment = _read_user_comment(jpg)
-    assert comment.startswith(b"ASCII\x00\x00\x00")
-    assert json.loads(comment[8:].decode("utf-8"))["faces"][0]["person_name"] == "Alice"
+    assert _read_user_comment(jpg).startswith(b"UNICODE\x00")
+    assert json.loads(_user_comment_text(jpg))["faces"][0]["person_name"] == "Alice"
 
     payload = meta.read_face_metadata(jpg)
     assert payload["faces"][0]["person_name"] == "Alice"
@@ -611,3 +651,99 @@ def test_existing_exif_preserved_without_piexif(db, no_piexif):
     with PilImage.open(jpg) as im:
         assert im.getexif().get(0x010F) == "TestCam"
     assert meta.read_face_metadata(jpg)["faces"][0]["person_name"] == "Alice"
+
+
+# ---------------------------------------------------------------------------
+# Single write per action (GPS + date + persons) and preserved metadata
+# ---------------------------------------------------------------------------
+
+def test_extra_edits_written_in_one_replace_and_metadata_kept(db, monkeypatch):
+    from PIL import ImageCms
+
+    from app.utils.exif import read_exif_gps
+
+    jpg = db / "combo.jpg"
+    icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    exif = PilImage.Exif()
+    exif[0x0112] = 6  # orientation
+    PilImage.new("RGB", (120, 80)).save(jpg, format="JPEG", exif=exif.tobytes(), icc_profile=icc)
+
+    replaces: list[str] = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        replaces.append(str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(meta.os, "replace", spy)
+
+    with session_scope() as session:
+        alice = _make_person(session, "Alice")
+        img = _make_image(session, jpg)
+        _make_face(session, img, alice)
+        summary = FaceMetadataExportService(session).export_images(
+            [img.id],
+            extra_edits=lambda _i: {"gps": (47.5, 19.05), "date": datetime(1999, 9, 9)},
+        )
+
+    assert [p for p in replaces if p.endswith("combo.jpg")] == [str(jpg)]
+    assert summary.embedded_count == 1
+    assert summary.extra_written_count("gps") == 1
+    assert summary.extra_written_count("date") == 1
+
+    lat, lon = read_exif_gps(jpg)
+    assert round(lat, 4) == 47.5 and round(lon, 4) == 19.05
+    with PilImage.open(jpg) as im:
+        assert im.getexif().get(0x0112) == 6
+        assert im.getexif().get_ifd(0x8769).get(0x9003) == "1999:09:09 00:00:00"
+        assert im.info.get("icc_profile") == icc
+    assert meta.read_face_metadata(jpg)["faces"][0]["person_name"] == "Alice"
+
+    # A later face-only export keeps the GPS/date written above.
+    with session_scope() as session:
+        FaceMetadataExportService(session).export_image(img.id)
+    assert read_exif_gps(jpg) is not None
+
+
+def test_no_overwrite_still_applies_extra_edits(db):
+    from app.utils.exif import read_exif_gps
+
+    jpg = db / "keep.jpg"
+    _write_jpeg(jpg)
+    with session_scope() as session:
+        alice = _make_person(session, "Alice")
+        img = _make_image(session, jpg)
+        _make_face(session, img, alice)
+        svc = FaceMetadataExportService(session)
+        svc.export_image(img.id)
+        summary = svc.export_images(
+            [img.id],
+            FaceMetadataExportOptions(overwrite_existing_facelocal_metadata=False),
+            extra_edits=lambda _i: {"gps": (10.0, 20.0)},
+        )
+    assert summary.results[0].write_mode == meta.WRITE_MODE_SKIPPED
+    assert summary.extra_written_count("gps") == 1
+    assert read_exif_gps(jpg) is not None
+
+
+def test_summary_counts_locked_separately():
+    from app.services.face_metadata_export_service import (
+        FaceMetadataExportResult,
+        FaceMetadataExportSummary,
+    )
+
+    def r(mode, ok=True, path="x.jpg"):
+        return FaceMetadataExportResult(1, path, ok, mode)
+
+    summary = FaceMetadataExportSummary(results=[
+        r(meta.WRITE_MODE_EXIF_USER_COMMENT),
+        r(meta.WRITE_MODE_SIDECAR),
+        r(meta.WRITE_MODE_LOCKED, path="busy.jpg"),
+        r(meta.WRITE_MODE_FAILED, ok=False),
+    ])
+    assert summary.embedded_count == 1
+    # A locked image's data did land in the sidecar, so it counts there too.
+    assert summary.sidecar_count == 2
+    assert summary.locked_count == 1
+    assert summary.locked_paths == ["busy.jpg"]
+    assert summary.failed_count == 1
