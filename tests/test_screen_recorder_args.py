@@ -156,6 +156,33 @@ def test_meter_adds_stdout_tap() -> None:
     assert "ametadata=mode=print" in fc
     # The encoder maps the metering-split branch, not the raw bus.
     assert "[aenc]" in args
+    # Issue #80: no sink-only branch (FFmpeg 7 aborts on it); the meter pad is
+    # pulled by a separate null output after the segment output instead.
+    assert "anullsink" not in fc
+    tail = args[args.index("/out/seg_%05d.mp4") + 1:]
+    assert tail == ["-map", "[ameter]", "-c:a", "pcm_s16le", "-f", "null", "-"]
+
+
+def test_windows_meter_graph_has_null_output_and_no_sink() -> None:
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone="Mikrofon (High Definition Audio Device)"),
+        RecordingOptions(meter_audio=True, windows_backend="gdigrab"),
+        "C:/out/seg_%05d.mp4",
+    )
+    fc = args[args.index("-filter_complex") + 1]
+    assert "anullsink" not in fc and fc.endswith("[ameter]")
+    assert args[-7:] == ["-map", "[ameter]", "-c:a", "pcm_s16le", "-f", "null", "-"]
+
+
+def test_no_meter_has_no_null_output() -> None:
+    args = build_ffmpeg_args(
+        "win32",
+        CaptureDevices(screen="desktop", microphone="Mic"),
+        RecordingOptions(meter_audio=False, windows_backend="gdigrab"),
+        "C:/out/seg_%05d.mp4",
+    )
+    assert args[-1] == "C:/out/seg_%05d.mp4"
 
 
 def test_no_audio_uses_an() -> None:
